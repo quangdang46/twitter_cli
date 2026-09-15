@@ -69,6 +69,8 @@ pub struct OutputOptions {
     pub time_mode: TimeMode,
     /// Human table shows full text (no 120-char truncation).
     pub full_text: bool,
+    /// Access tier cap (guest degraded-mode reads).
+    pub tier: Option<String>,
 }
 
 impl OutputOptions {

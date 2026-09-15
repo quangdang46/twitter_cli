@@ -8,6 +8,7 @@
 //! (per-endpoint token bucket + page-count/jitter math), [`timeline`] (the
 //! `_fetch_timeline` pagination loop), [`wreq_transport`] (default impl).
 
+pub mod guest;
 pub mod headers;
 pub mod throttle;
 pub mod timeline;

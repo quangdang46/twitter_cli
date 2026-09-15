@@ -66,6 +66,10 @@ struct Cli {
     /// always carries absolute created_at).
     #[arg(long, global = true, env = "TWR_TIME", default_value = "relative")]
     time: String,
+    /// Access tier cap: syndication|guest|session (guest covers a narrow
+    /// op set when full session auth is unavailable).
+    #[arg(long, global = true, env = "TWR_TIER")]
+    tier: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -361,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
     opts.policy = twr_core::Policy::parse(&cli.policy).unwrap_or_default();
     opts.time_mode = twr_core::TimeMode::parse(&cli.time).unwrap_or_default();
     opts.full_text = cli.full_text;
+    opts.tier = cli.tier.clone();
 
     // The decision table is live for every invocation: read commands ignore
     // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
@@ -777,6 +782,42 @@ fn emit_yaml<T: serde::Serialize>(envelope: &twr_core::Envelope<T>) -> anyhow::R
     let value = serde_json::to_value(envelope)?;
     println!("{}", serde_yaml::to_string(&value)?);
     Ok(())
+}
+
+/// Cheap session probe (no browser sweep): true when flags/env/file resolve.
+fn has_session() -> bool {
+    let env = twr_auth::read_env();
+    let file = home_path()
+        .map(|h| h.join(".twr").join("session.json"))
+        .and_then(|p| twr_auth::load_session(&p));
+    twr_auth::resolve(&twr_auth::FlagInput::default(), &env, file, || {
+        (twr_auth::SessionCookies::default(), vec![])
+    })
+    .is_some()
+}
+
+/// Tier guard for reads: guest covers UserByScreenName/TweetDetail/UserTweets
+/// only; anything else needs session. Returns Some((data, code)) when denied.
+fn tier_guard(
+    opts: &OutputOptions,
+    operation: &str,
+    authed: bool,
+) -> Option<(serde_json::Value, i32)> {
+    let flag = opts
+        .tier
+        .as_deref()
+        .and_then(twr_client::guest::Tier::parse);
+    let tier = twr_client::guest::effective_tier(flag, authed);
+    if tier == twr_client::guest::Tier::Session {
+        return None;
+    }
+    if tier == twr_client::guest::Tier::Guest && twr_client::guest::guest_covers(operation) {
+        return None;
+    }
+    Some((
+        serde_json::json!({"error": format!("tier {} does not cover {operation}; use full session auth", tier.as_str())}),
+        2,
+    ))
 }
 
 fn home_path() -> Option<std::path::PathBuf> {
@@ -1246,6 +1287,9 @@ async fn run_feed(
     cursor: Option<String>,
     filter: bool,
 ) -> (serde_json::Value, i32) {
+    if let Some(denied) = tier_guard(opts, "HomeTimeline", has_session()) {
+        return denied;
+    }
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
@@ -1320,6 +1364,10 @@ async fn run_search(
     cursor: Option<String>,
     filter: bool,
 ) -> (serde_json::Value, i32) {
+    // Guest tier never covers search: deny before auth so --tier guest gets exit 2, not 77.
+    if let Some(denied) = tier_guard(opts, "SearchTimeline", has_session()) {
+        return denied;
+    }
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
