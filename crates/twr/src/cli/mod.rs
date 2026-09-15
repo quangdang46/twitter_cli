@@ -2,6 +2,7 @@
 
 pub mod exec;
 pub mod ids;
+pub mod mcp;
 pub mod search;
 pub mod table;
 pub mod write;

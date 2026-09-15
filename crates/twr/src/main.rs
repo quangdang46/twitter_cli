@@ -118,6 +118,8 @@ enum Command {
         /// Shell: bash|zsh|fish|powershell|elvish.
         shell: String,
     },
+    /// Serve the tool catalog over stdio (JSON-RPC MCP shape).
+    Mcp,
     /// Post a tweet (needs --apply; --dry-run to preview).
     Post {
         text: String,
@@ -455,6 +457,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Completions { shell } => {
             return run_completions(&shell);
+        }
+        Command::Mcp => {
+            // stdio loop: never returns until stdin closes. We are already
+            // inside the tokio runtime (#[tokio::main]), so dispatch via
+            // block_in_place on the current handle (calls are sequential).
+            cli::mcp::serve_stdio(&|name, args| {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(mcp_invoke(name, args))
+                })
+            });
+            return Ok(());
         }
         Command::Post {
             text,
@@ -2475,6 +2488,80 @@ async fn run_headlines(
         }),
         0,
     )
+}
+
+/// MCP tool dispatch: name + arguments → envelope JSON string. Read-only and
+/// offline-capable tools run fully; credential-gated tools return their
+/// normal exit-77/2 envelopes as text (same contract as the CLI).
+async fn mcp_invoke(name: &str, args: &serde_json::Value) -> String {
+    // Minimal opts for MCP: JSON, fresh trace id.
+    let opts = OutputOptions::new(None);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let home = home_path();
+    let (config, _) = twr_config::load(&cwd, home.as_deref());
+    let max = args.get("max").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let (kind, data): (&str, serde_json::Value) = match name {
+        "status" => ("status", status_data(&opts)),
+        "doctor" => {
+            let (d, _) = doctor_data(false, &opts);
+            ("doctor", d)
+        }
+        "query_ids" => ("query-ids", query_ids_data()),
+        "feed" => {
+            let (d, _) = run_feed(
+                &opts,
+                &config,
+                "for-you".into(),
+                max,
+                args.get("cursor")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                false,
+            )
+            .await;
+            ("tweet_list", d)
+        }
+        "search" => {
+            let q = cli::search::SearchQuery {
+                query: args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into(),
+                ..Default::default()
+            };
+            let (d, _) = run_search(&opts, &config, q, max, None, false).await;
+            ("tweet_list", d)
+        }
+        "tweet" => {
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let (d, _) = run_tweet(&opts, &config, id).await;
+            ("tweet_detail", d)
+        }
+        "user" => {
+            let h = args
+                .get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let (d, _) = run_user(&opts, &config, h).await;
+            ("user", d)
+        }
+        _ => {
+            let err = twr_core::TwrError::new(
+                twr_core::ErrorKind::UsagePolicyDenied,
+                format!("MCP tool '{name}' not wired (use the CLI for writes)"),
+            );
+            let env: Envelope<serde_json::Value> = Envelope::err(err);
+            return serde_json::to_string(&env).unwrap_or_default();
+        }
+    };
+    let envelope = Envelope::ok(kind, data).with_meta(Meta::new(opts.trace_id.clone()));
+    serde_json::to_string(&envelope).unwrap_or_default()
 }
 
 #[cfg(test)]
