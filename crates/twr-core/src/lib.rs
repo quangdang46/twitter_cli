@@ -7,6 +7,7 @@ pub mod envelope;
 pub mod error;
 pub mod idempotency;
 pub mod output;
+pub mod policy;
 
 pub use apply::{ambiguous_message, cancelled_data, decide, dry_run_data, ApplyInput, Decision};
 pub use envelope::{
@@ -21,3 +22,4 @@ pub use idempotency::{
     UNKNOWN_SUGGESTION,
 };
 pub use output::{new_trace_id, OutputFormat, OutputOptions};
+pub use policy::Policy;

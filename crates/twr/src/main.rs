@@ -51,6 +51,10 @@ struct Cli {
     /// Never prompt; ambiguous writes become exit 2.
     #[arg(long, global = true, env = "TWR_NO_INTERACTIVE")]
     no_interactive: bool,
+    /// Write policy: read_only blocks all writes, engagement allows
+    /// like/rt/follow/bookmark only, write (default) allows all gated writes.
+    #[arg(long, global = true, env = "TWR_POLICY", default_value = "write")]
+    policy: String,
 
     #[command(subcommand)]
     command: Command,
@@ -290,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
     opts.apply = cli.apply;
     opts.dry_run = cli.dry_run;
     opts.no_interactive = cli.no_interactive;
+    opts.policy = twr_core::Policy::parse(&cli.policy).unwrap_or_default();
 
     // The decision table is live for every invocation: read commands ignore
     // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
@@ -1514,6 +1519,13 @@ async fn run_post_write(
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
+    // Policy BEFORE the decision table: read_only-scoped agents cannot post even with --apply.
+    if !opts.policy.allows(operation) {
+        return (
+            serde_json::json!({"error": opts.policy.denial(operation)}),
+            2,
+        );
+    }
     // Validate -i up front so even --dry-run fails fast on bad images.
     if let Err(e) = cli::write::validate_images(&images) {
         return (serde_json::json!({"error": e}), 2);
@@ -1805,6 +1817,9 @@ async fn run_engage(
     preview: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    if !opts.policy.allows(cmd) {
+        return (serde_json::json!({"error": opts.policy.denial(cmd)}), 2);
+    }
     let stdin_is_tty = true;
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),

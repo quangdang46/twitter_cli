@@ -4,6 +4,8 @@
 //! `--toon` is intentionally NOT here — per the bead, TOON is a P3 renderer
 //! over the same envelope, not a P1 output mode.
 
+use crate::policy::Policy;
+
 /// Which machine format to render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -51,6 +53,8 @@ pub struct OutputOptions {
     pub dry_run: bool,
     /// Never prompt; ambiguous writes become exit 2.
     pub no_interactive: bool,
+    /// Write policy tier (plan §5.3 --policy).
+    pub policy: Policy,
 }
 
 impl OutputOptions {
