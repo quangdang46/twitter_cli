@@ -2099,7 +2099,9 @@ fn run_completions(shell: &str) -> anyhow::Result<()> {
         "bash" => generate(shells::Bash, &mut cmd, "twr", &mut stdout()),
         "zsh" => generate(shells::Zsh, &mut cmd, "twr", &mut stdout()),
         "fish" => generate(shells::Fish, &mut cmd, "twr", &mut stdout()),
-        "powershell" | "power-shell" => generate(shells::PowerShell, &mut cmd, "twr", &mut stdout()),
+        "powershell" | "power-shell" => {
+            generate(shells::PowerShell, &mut cmd, "twr", &mut stdout())
+        }
         "elvish" => generate(shells::Elvish, &mut cmd, "twr", &mut stdout()),
         other => {
             eprintln!("unknown shell: {other} (bash|zsh|fish|powershell|elvish)");
