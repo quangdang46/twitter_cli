@@ -117,6 +117,64 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+    /// Delete a tweet (always previews first, even with --apply).
+    Delete {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Like a tweet (alias: favorite).
+    #[command(visible_alias = "favorite")]
+    Like {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unlike (alias: unfavorite).
+    #[command(visible_alias = "unfavorite")]
+    Unlike {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Retweet.
+    Retweet {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unretweet.
+    Unretweet {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Bookmark.
+    #[command(visible_alias = "favorite-board")]
+    Bookmark {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unbookmark (alias: unbookmark alias `unfavorite-board`).
+    #[command(visible_alias = "unfavorite-board")]
+    Unbookmark {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Follow a user id.
+    Follow {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unfollow a user id.
+    Unfollow {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Home/feed timeline.
     Feed {
         /// for-you or following.
@@ -347,6 +405,90 @@ async fn main() -> anyhow::Result<()> {
                 },
             )
             .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Delete {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            // Delete preview: resolve text prefix best-effort (offline-safe: id only).
+            let (d, code) = run_engage(&opts, &config, "delete", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Like {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "like", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unlike {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "unlike", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Retweet {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "retweet", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unretweet {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) =
+                run_engage(&opts, &config, "unretweet", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Bookmark {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "bookmark", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unbookmark {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) =
+                run_engage(&opts, &config, "unbookmark", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Follow {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "follow", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unfollow {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "unfollow", id, idempotency_key, None).await;
             data = d;
             exit_code = code;
         }
@@ -1553,4 +1695,208 @@ fn mark_unknown(
         );
         let _ = twr_core::idempotency::save(p, &s);
     }
+}
+
+// ── engagement/management writes (bead 3.4.4) ────────────────────────────
+
+/// Operation descriptor for the engagement writes.
+struct EngageOp {
+    op: &'static str,
+    use_friendships: bool,
+}
+
+/// Map subcommand to GraphQL op (or 1.1 friendships endpoint).
+fn engage_op_of(cmd: &str) -> EngageOp {
+    match cmd {
+        "delete" => EngageOp {
+            op: "DeleteTweet",
+            use_friendships: false,
+        },
+        "like" => EngageOp {
+            op: "FavoriteTweet",
+            use_friendships: false,
+        },
+        "unlike" => EngageOp {
+            op: "UnfavoriteTweet",
+            use_friendships: false,
+        },
+        "retweet" => EngageOp {
+            op: "CreateRetweet",
+            use_friendships: false,
+        },
+        "unretweet" => EngageOp {
+            op: "DeleteRetweet",
+            use_friendships: false,
+        },
+        "bookmark" => EngageOp {
+            op: "CreateBookmark",
+            use_friendships: false,
+        },
+        "unbookmark" => EngageOp {
+            op: "DeleteBookmark",
+            use_friendships: false,
+        },
+        "follow" => EngageOp {
+            op: "friendships/create",
+            use_friendships: true,
+        },
+        _ => EngageOp {
+            op: "friendships/destroy",
+            use_friendships: true,
+        },
+    }
+}
+
+async fn run_engage(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    cmd: &'static str,
+    target_id: String,
+    idempotency_key: Option<String>,
+    preview: Option<String>,
+) -> (serde_json::Value, i32) {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    let stdin_is_tty = true;
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
+        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Preview => return (dry_run_data(cmd), 0),
+        Decision::Prompt => {
+            eprintln!("This will {cmd} \"{target_id}\". Type 'yes' to proceed:");
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data(cmd), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data(cmd), 0),
+    }
+
+    // Delete always previews (text prefix + id) even with --apply (§5.5).
+    if cmd == "delete" {
+        if let Some(p) = preview {
+            eprintln!("delete preview: {p} (id {target_id})");
+        } else {
+            eprintln!("delete preview: id {target_id}");
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
+    let store = store_path
+        .as_deref()
+        .map(|p| twr_core::idempotency::load(p, now))
+        .unwrap_or_default();
+    if let Some(key) = &idempotency_key {
+        match twr_core::idempotency::pre_check(&store, key) {
+            twr_core::PreCheck::ReplayCached(result) => {
+                return (
+                    serde_json::json!({"idempotent_replay": true, "result": result}),
+                    0,
+                )
+            }
+            twr_core::PreCheck::RefuseUnknown => {
+                return (
+                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                    1,
+                )
+            }
+            twr_core::PreCheck::Proceed => {}
+        }
+    }
+
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let ctx = build_ctx(opts, config, &transport, &auth);
+    let desc = engage_op_of(cmd);
+    let ok = if desc.use_friendships {
+        // 1.1 friendships form-POST (follow/unfollow), mirrors Python.
+        let url = format!("https://x.com/i/api/1.1/{}.json", desc.op);
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: None,
+        });
+        let mut refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        refs.push(("Content-Type", "application/x-www-form-urlencoded"));
+        let body = format!("user_id={target_id}&include_profile_interstitial_type=1");
+        match ctx.transport.post_json(&url, &refs, body.as_bytes()).await {
+            Ok(r) => (200..300).contains(&r.status),
+            Err(_) => false,
+        }
+    } else {
+        let qid = ctx
+            .query_id(desc.op)
+            .map(|r| r.query_id)
+            .unwrap_or_default();
+        let url = format!("https://x.com/i/api/graphql/{qid}/{}", desc.op);
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: None,
+        });
+        let refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let vars = cli::write::tweet_id_vars(desc.op, &target_id);
+        let mut body = serde_json::Map::new();
+        body.insert("variables".into(), vars);
+        body.insert(
+            "features".into(),
+            serde_json::Value::Object(twr_graphql::compact_features(desc.op)),
+        );
+        let raw = serde_json::to_vec(&body).unwrap_or_default();
+        match ctx.transport.post_json(&url, &refs, &raw).await {
+            Ok(r) => {
+                if r.status == 429 {
+                    return (serde_json::json!({"error": "rate limited"}), 4);
+                }
+                (200..300).contains(&r.status)
+            }
+            Err(_) => false,
+        }
+    };
+    let u01 = (now % 1000) as f64 / 1000.0;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        cli::write::write_delay_secs(u01),
+    ))
+    .await;
+    if !ok {
+        return (serde_json::json!({"error": format!("{cmd} failed")}), 6);
+    }
+    if let (Some(key), Some(p)) = (&idempotency_key, &store_path) {
+        let mut s = twr_core::idempotency::load(p, now);
+        s.insert(
+            key.clone(),
+            twr_core::IdempotencyEntry {
+                state: twr_core::WriteState::Acknowledged,
+                created_at_secs: now,
+                result: Some(serde_json::json!({"ok": true, "operation": cmd})),
+            },
+        );
+        let _ = twr_core::idempotency::save(p, &s);
+    }
+    (
+        serde_json::json!({"ok": true, "operation": cmd, "target": target_id}),
+        0,
+    )
 }
