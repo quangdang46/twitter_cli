@@ -117,7 +117,7 @@ twr search "x" --policy read_only --json     # read_only scope: writes are impos
 | Agent-first, human second | Table/color rendering is a view over the same structs the JSON envelope uses |
 | Stable contract > convenience | Exit codes and envelope `type`s are frozen after Phase 1 — no silent renumbering |
 | Fail loud, fail structured | Every error has `suggestion` + `retryable`; no bare `Exception` text |
-| Safe by default | Destructive ops need `--apply`; every write supports `--dry-run`; a daily mutation budget exists |
+| Safe by default | Every write — post, like, follow, delete, all of them — needs `--apply` to touch the network; omit it and you get a preview automatically; a daily mutation budget exists |
 | Transport is a trait, not a dependency | Browser-fingerprint TLS is swappable if detection tightens |
 | Secrets never leave the process | Cookies/tokens/transaction keys never appear in stdout, `doctor`, or traces |
 
