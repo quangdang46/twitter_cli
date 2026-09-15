@@ -1,0 +1,16 @@
+[package]
+name = "twr-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transport-abstracted client for X's internal GraphQL surface (see PLAN.md §4/§7)"
+
+[dependencies]
+twr-core = { path = "../twr-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

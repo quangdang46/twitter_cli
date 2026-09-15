@@ -1,0 +1,18 @@
+[package]
+name = "twr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent-first Rust CLI for X/Twitter over cookie-authenticated GraphQL"
+default-run = "twr"
+
+[[bin]]
+name = "twr"
+path = "src/main.rs"
+
+[dependencies]
+twr-core = { path = "../twr-core" }
+twr-client = { path = "../twr-client" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

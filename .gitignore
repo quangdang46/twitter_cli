@@ -1,0 +1,14 @@
+# Research clones (large, local-only reference material — never commit)
+tmp/
+# Rust
+target/
+Cargo.lock
+# Secrets / local sessions
+.env
+*.pem
+*.key
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
