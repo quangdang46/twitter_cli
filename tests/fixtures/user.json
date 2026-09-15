@@ -1,0 +1,33 @@
+{
+  "name": "user",
+  "input": {
+    "rest_id": "u1",
+    "core": {
+      "name": "Ada Lovelace",
+      "screen_name": "ada"
+    },
+    "legacy": {
+      "name": "Ada Lovelace",
+      "screen_name": "ada"
+    },
+    "is_blue_verified": true,
+    "avatar": {
+      "image_url": "https://img/x.jpg"
+    }
+  },
+  "python_output": {
+    "id": "u1",
+    "name": "Ada Lovelace",
+    "screen_name": "ada",
+    "bio": "",
+    "location": "",
+    "url": "",
+    "followers_count": 0,
+    "following_count": 0,
+    "tweets_count": 0,
+    "likes_count": 0,
+    "verified": true,
+    "profile_image_url": "https://img/x.jpg",
+    "created_at": ""
+  }
+}

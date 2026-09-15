@@ -1,0 +1,72 @@
+{
+  "name": "plain_tweet",
+  "input": {
+    "rest_id": "100",
+    "core": {
+      "user_results": {
+        "result": {
+          "rest_id": "u1",
+          "core": {
+            "name": "Ada Lovelace",
+            "screen_name": "ada"
+          },
+          "legacy": {
+            "name": "Ada Lovelace",
+            "screen_name": "ada"
+          },
+          "is_blue_verified": true,
+          "avatar": {
+            "image_url": "https://img/x.jpg"
+          }
+        }
+      }
+    },
+    "legacy": {
+      "full_text": "hello world",
+      "favorite_count": 10,
+      "retweet_count": 2,
+      "reply_count": 1,
+      "quote_count": 0,
+      "bookmark_count": 3,
+      "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+      "lang": "en",
+      "entities": {
+        "urls": []
+      }
+    },
+    "views": {
+      "count": "1,234"
+    }
+  },
+  "python_output": {
+    "id": "100",
+    "text": "hello world",
+    "author": {
+      "id": "u1",
+      "name": "Ada Lovelace",
+      "screen_name": "ada",
+      "profile_image_url": "https://img/x.jpg",
+      "verified": true
+    },
+    "metrics": {
+      "likes": 10,
+      "retweets": 2,
+      "replies": 1,
+      "quotes": 0,
+      "views": 1234,
+      "bookmarks": 3
+    },
+    "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+    "media": [],
+    "urls": [],
+    "is_retweet": false,
+    "lang": "en",
+    "retweeted_by": null,
+    "quoted_tweet": null,
+    "score": null,
+    "article_title": null,
+    "article_text": null,
+    "is_subscriber_only": false,
+    "is_promoted": false
+  }
+}

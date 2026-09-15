@@ -1,0 +1,7 @@
+{
+  "name": "tombstone",
+  "input": {
+    "__typename": "TweetTombstone"
+  },
+  "python_output": null
+}
