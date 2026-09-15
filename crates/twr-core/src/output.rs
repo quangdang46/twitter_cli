@@ -5,6 +5,7 @@
 //! over the same envelope, not a P1 output mode.
 
 use crate::policy::Policy;
+use crate::timefmt::TimeMode;
 
 /// Which machine format to render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -55,6 +56,8 @@ pub struct OutputOptions {
     pub no_interactive: bool,
     /// Write policy tier (plan §5.3 --policy).
     pub policy: Policy,
+    /// Human-table time display (issue #35; machine output always absolute).
+    pub time_mode: TimeMode,
 }
 
 impl OutputOptions {

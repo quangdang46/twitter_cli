@@ -55,6 +55,10 @@ struct Cli {
     /// like/rt/follow/bookmark only, write (default) allows all gated writes.
     #[arg(long, global = true, env = "TWR_POLICY", default_value = "write")]
     policy: String,
+    /// Human-table time display: relative|absolute|both (machine output
+    /// always carries absolute created_at).
+    #[arg(long, global = true, env = "TWR_TIME", default_value = "relative")]
+    time: String,
 
     #[command(subcommand)]
     command: Command,
@@ -317,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
     opts.dry_run = cli.dry_run;
     opts.no_interactive = cli.no_interactive;
     opts.policy = twr_core::Policy::parse(&cli.policy).unwrap_or_default();
+    opts.time_mode = twr_core::TimeMode::parse(&cli.time).unwrap_or_default();
 
     // The decision table is live for every invocation: read commands ignore
     // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
