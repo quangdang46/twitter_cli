@@ -14,6 +14,8 @@ pub enum OutputFormat {
     #[default]
     Json,
     Yaml,
+    /// `--toon`: same envelope, tabular renderer.
+    Toon,
 }
 
 impl OutputFormat {
@@ -21,7 +23,14 @@ impl OutputFormat {
     /// when neither is passed, piped stdout (non-TTY) auto-selects YAML to
     /// match the Python original, TTY defaults to JSON.
     pub fn resolve(json: bool, yaml: bool, stdout_is_tty: bool) -> Self {
-        if json {
+        Self::resolve_full(json, yaml, false, stdout_is_tty)
+    }
+
+    /// Full trio: --toon wins over --json/--yaml when combined.
+    pub fn resolve_full(json: bool, yaml: bool, toon: bool, stdout_is_tty: bool) -> Self {
+        if toon {
+            OutputFormat::Toon
+        } else if json {
             OutputFormat::Json
         } else if yaml {
             OutputFormat::Yaml

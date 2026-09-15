@@ -18,6 +18,10 @@ struct Cli {
     /// Machine output as YAML (auto when piped without a flag).
     #[arg(long, global = true, env = "TWR_YAML")]
     yaml: bool,
+    /// Token-efficient TOON rendering of the same envelope (lists tabular).
+    /// Errors always stay JSON/YAML, never TOON.
+    #[arg(long, global = true, env = "TWR_TOON")]
+    toon: bool,
     /// Strip heavy fields (profile images, media dims, expanded urls).
     #[arg(long, short = 'c', global = true, env = "TWR_COMPACT")]
     compact: bool,
@@ -306,7 +310,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let format = OutputFormat::resolve(cli.json, cli.yaml, true);
+    let format = OutputFormat::resolve_full(cli.json, cli.yaml, cli.toon, true);
     let mut opts = OutputOptions::new(cli.trace_id);
     opts.format = format;
     opts.compact = cli.compact;
@@ -690,7 +694,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Human view: no explicit machine flag → render the table from the same data.
-    if !cli.json && !cli.yaml {
+    if !cli.json && !cli.yaml && !cli.toon {
         let text = render_human(kind, &data, &opts);
         println!("{text}");
         if exit_code != 0 {
@@ -706,6 +710,8 @@ async fn main() -> anyhow::Result<()> {
     match opts.format {
         OutputFormat::Json => emit(&envelope),
         OutputFormat::Yaml => emit_yaml(&envelope)?,
+        // TOON renders data only; errors fall back to JSON inside emit_toon.
+        OutputFormat::Toon => twr_core::emit_toon(&envelope),
     }
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -1038,6 +1044,8 @@ fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (serde_json
             OutputFormat::Yaml => {
                 let _ = emit_yaml(&env_out);
             }
+            // Errors always stay JSON/YAML, never TOON.
+            OutputFormat::Toon => emit(&env_out),
         }
         (serde_json::json!({}), 77)
     })

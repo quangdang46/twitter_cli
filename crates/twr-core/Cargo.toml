@@ -9,3 +9,4 @@ description = "Shared model, error, and envelope types for twr"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+toon = "0.1.2"

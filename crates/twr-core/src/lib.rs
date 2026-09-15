@@ -10,6 +10,7 @@ pub mod idempotency;
 pub mod output;
 pub mod policy;
 pub mod timefmt;
+pub mod toon;
 
 pub use apply::{ambiguous_message, cancelled_data, decide, dry_run_data, ApplyInput, Decision};
 pub use budget::{
@@ -29,3 +30,4 @@ pub use idempotency::{
 pub use output::{new_trace_id, OutputFormat, OutputOptions};
 pub use policy::Policy;
 pub use timefmt::{absolute, display, parse_twitter_time, relative, TimeMode};
+pub use toon::{emit_toon, render_data_toon};
