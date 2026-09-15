@@ -98,6 +98,17 @@ enum Command {
         guide: bool,
     },
     Logout,
+    /// Search the local SQLite cache (FTS5, offline).
+    CacheSearch {
+        query: String,
+        #[arg(long, short = 'n', default_value = "20")]
+        max: usize,
+    },
+    /// Watchlist management.
+    Watch {
+        #[command(subcommand)]
+        op: WatchOp,
+    },
     /// Print shell completions (script to stdout, instructions to stderr).
     Completions {
         /// Shell: bash|zsh|fish|powershell|elvish.
@@ -307,6 +318,16 @@ enum Command {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum WatchOp {
+    /// Add a handle to the watchlist.
+    Add { handle: String },
+    /// Remove a handle.
+    Remove { handle: String },
+    /// List watched handles.
+    List,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -392,6 +413,18 @@ async fn main() -> anyhow::Result<()> {
         Command::Logout => {
             kind = "auth";
             let (d, code) = logout_data();
+            data = d;
+            exit_code = code;
+        }
+        Command::CacheSearch { query, max } => {
+            kind = "tweet_list";
+            let (d, code) = run_cache_search(&query, max);
+            data = d;
+            exit_code = code;
+        }
+        Command::Watch { op } => {
+            kind = "watchlist";
+            let (d, code) = run_watch(op);
             data = d;
             exit_code = code;
         }
@@ -2221,4 +2254,49 @@ fn emit_fail(opts: &OutputOptions, err: twr_core::TwrError, code: i32) -> (serde
         OutputFormat::Toon => emit(&envelope),
     }
     std::process::exit(code);
+}
+
+fn run_cache_search(query: &str, max: usize) -> (serde_json::Value, i32) {
+    let path = match twr_cache::default_db_path() {
+        Some(p) => p,
+        None => return (serde_json::json!({"error": "no home dir"}), 1),
+    };
+    let conn = match twr_cache::open(&path) {
+        Ok(c) => c,
+        Err(e) => return (serde_json::json!({"error": e.to_string()}), 7),
+    };
+    match twr_cache::search(&conn, query, max) {
+        Ok(ids) => (serde_json::json!({"ids": ids, "query": query}), 0),
+        Err(e) => (serde_json::json!({"error": e.to_string()}), 2),
+    }
+}
+
+fn run_watch(op: WatchOp) -> (serde_json::Value, i32) {
+    let path = match twr_cache::default_db_path() {
+        Some(p) => p,
+        None => return (serde_json::json!({"error": "no home dir"}), 1),
+    };
+    let conn = match twr_cache::open(&path) {
+        Ok(c) => c,
+        Err(e) => return (serde_json::json!({"error": e.to_string()}), 7),
+    };
+    match op {
+        WatchOp::Add { handle } => {
+            match twr_cache::watch_add(&conn, handle.trim_start_matches('@')) {
+                Ok(()) => (serde_json::json!({"watched": true}), 0),
+                Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
+            }
+        }
+        WatchOp::Remove { handle } => {
+            match twr_cache::watch_remove(&conn, handle.trim_start_matches('@')) {
+                Ok(true) => (serde_json::json!({"unwatched": true}), 0),
+                Ok(false) => (serde_json::json!({"error": "not on watchlist"}), 3),
+                Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
+            }
+        }
+        WatchOp::List => match twr_cache::watch_list(&conn) {
+            Ok(list) => (serde_json::json!({"watchlist": list}), 0),
+            Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
+        },
+    }
 }

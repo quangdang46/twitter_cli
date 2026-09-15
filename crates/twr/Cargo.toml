@@ -19,6 +19,7 @@ twr-graphql = { path = "../twr-graphql" }
 twr-tx = { path = "../twr-tx" }
 twr-model = { path = "../twr-model" }
 twr-filter = { path = "../twr-filter" }
+twr-cache = { path = "../twr-cache" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 comfy-table = "7"

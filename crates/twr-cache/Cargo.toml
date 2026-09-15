@@ -1,0 +1,13 @@
+[package]
+name = "twr-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite entity cache + watchlist + FTS5 (discord-db pattern port, see COMPREHENSIVEPLANFORTWITTERCLI.md P5)"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+twr-model = { path = "../twr-model" }

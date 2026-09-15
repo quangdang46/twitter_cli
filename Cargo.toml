@@ -10,6 +10,7 @@ members = [
     "crates/twr-config",
     "crates/twr-graphql",
     "crates/twr-filter",
+    "crates/twr-cache",
 ]
 exclude = ["tmp"]
 
