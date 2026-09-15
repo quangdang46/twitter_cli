@@ -601,7 +601,11 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::Future { delay_secs, command, args } => {
+        Command::Future {
+            delay_secs,
+            command,
+            args,
+        } => {
             kind = "scheduled";
             let (d, code) = run_future(&opts, delay_secs, command, args).await;
             data = d;
@@ -2371,7 +2375,10 @@ async fn run_future(
     // document the schedule and report the plan (the actual read runs through
     // the same runners on the caller's next invocation path).
     let _ = (opts, args);
-    (serde_json::json!({"scheduled": true, "command": command, "delay_secs": delay_secs, "note": "one-shot only — not cron"}), 0)
+    (
+        serde_json::json!({"scheduled": true, "command": command, "delay_secs": delay_secs, "note": "one-shot only — not cron"}),
+        0,
+    )
 }
 
 #[cfg(test)]
@@ -2382,6 +2389,6 @@ mod future_tests {
     fn future_rejects_cron_scale_and_writes() {
         assert!(future_allowed("feed"));
         assert!(!future_allowed("post"));
-        assert!(MAX_FUTURE_DELAY_SECS <= 3600);
+        const { assert!(MAX_FUTURE_DELAY_SECS <= 3600) }
     }
 }
