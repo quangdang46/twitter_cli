@@ -5,9 +5,8 @@
 //! stderr.
 
 use clap::{Parser, Subcommand};
-use twr_core::{emit, Envelope, Meta, OutputFormat, OutputOptions};
+use twr_core::{decide, emit, ApplyInput, Envelope, Meta, OutputFormat, OutputOptions};
 
-mod apply;
 mod cli;
 
 #[derive(Parser)]
@@ -43,6 +42,15 @@ struct Cli {
     /// Max retries override.
     #[arg(long, global = true, env = "TWR_MAX_RETRIES")]
     max_retries: Option<u32>,
+    /// Execute a write for real (required for any mutation).
+    #[arg(long, global = true, env = "TWR_APPLY")]
+    apply: bool,
+    /// Preview a write without touching the network.
+    #[arg(long, global = true, env = "TWR_DRY_RUN")]
+    dry_run: bool,
+    /// Never prompt; ambiguous writes become exit 2.
+    #[arg(long, global = true, env = "TWR_NO_INTERACTIVE")]
+    no_interactive: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -187,6 +195,19 @@ async fn main() -> anyhow::Result<()> {
     opts.no_color = cli.no_color;
     opts.timeout_secs = cli.timeout;
     opts.max_retries = cli.max_retries;
+    opts.apply = cli.apply;
+    opts.dry_run = cli.dry_run;
+    opts.no_interactive = cli.no_interactive;
+
+    // The decision table is live for every invocation: read commands ignore
+    // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
+    // here keeps the module consumed from bead 3.4.1 onward.
+    let _ = decide(&ApplyInput {
+        apply: opts.apply,
+        dry_run: opts.dry_run,
+        no_interactive: opts.no_interactive,
+        stdin_is_tty: true,
+    });
 
     if opts.verbosity() >= 1 {
         eprintln!("twr trace_id={} command starting", opts.trace_id);

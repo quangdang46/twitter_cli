@@ -2,10 +2,12 @@
 //!
 //! Envelope + error + output-flag contract from `PLAN.md` §5 (Agent Contract).
 
+pub mod apply;
 pub mod envelope;
 pub mod error;
 pub mod output;
 
+pub use apply::{ambiguous_message, cancelled_data, decide, dry_run_data, ApplyInput, Decision};
 pub use envelope::{
     apply_compact, apply_fields, emit, parse_fields, render_json, Envelope, Meta, Pagination,
 };

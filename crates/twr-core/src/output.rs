@@ -45,6 +45,12 @@ pub struct OutputOptions {
     pub no_color: bool,
     pub timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    /// Execute a write for real (required for any mutation, plan §5.3).
+    pub apply: bool,
+    /// Preview a write without touching the network.
+    pub dry_run: bool,
+    /// Never prompt; ambiguous writes become exit 2.
+    pub no_interactive: bool,
 }
 
 impl OutputOptions {
