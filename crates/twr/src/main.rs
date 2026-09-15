@@ -7,6 +7,7 @@
 use clap::{Parser, Subcommand};
 use twr_core::{emit, Envelope, Meta, OutputFormat, OutputOptions};
 
+mod apply;
 mod cli;
 
 #[derive(Parser)]
