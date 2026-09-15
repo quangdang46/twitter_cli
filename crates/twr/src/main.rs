@@ -1020,7 +1020,12 @@ fn logout_data() -> (serde_json::Value, i32) {
 
 // ── read-command runners (plan §1.1 matrix) ──────────────────────────────
 
-fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (serde_json::Value, i32)> {
+enum AuthFail {
+    Envelope(twr_core::TwrError),
+}
+
+#[allow(clippy::result_large_err)]
+fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (AuthFail, i32)> {
     let flags = twr_auth::FlagInput::default();
     let env = twr_auth::read_env();
     let file = home_path()
@@ -1033,21 +1038,13 @@ fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (serde_json
     let resolved = twr_auth::resolve(&flags, &env, file.clone(), || {
         (twr_auth::SessionCookies::default(), vec![])
     });
+    // NOTE: single-print-owner — do NOT emit here. The caller emits one
+    // Envelope::err and sets exit 77.
     resolved.ok_or_else(|| {
         let err = twr_core::TwrError::auth_required("no X session — run `twr login --guide`")
             .with_failing_input("--auth-token", "missing");
-        let env_out: Envelope<serde_json::Value> =
-            Envelope::err(err).with_meta(Meta::new(opts.trace_id.clone()));
-        // Error path bypasses the ok-envelope flow: render + exit here.
-        match opts.format {
-            OutputFormat::Json => emit(&env_out),
-            OutputFormat::Yaml => {
-                let _ = emit_yaml(&env_out);
-            }
-            // Errors always stay JSON/YAML, never TOON.
-            OutputFormat::Toon => emit(&env_out),
-        }
-        (serde_json::json!({}), 77)
+        let _ = opts;
+        (AuthFail::Envelope(err), 77)
     })
 }
 
@@ -1177,7 +1174,9 @@ async fn run_feed(
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1214,7 +1213,9 @@ async fn run_bookmarks(
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1247,7 +1248,9 @@ async fn run_search(
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1284,7 +1287,9 @@ async fn run_tweet(
     };
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1386,7 +1391,9 @@ async fn run_list(
     };
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1423,7 +1430,9 @@ async fn run_user(
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1493,7 +1502,9 @@ async fn run_user_posts(
     };
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1533,7 +1544,9 @@ async fn run_likes(
     };
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1582,7 +1595,9 @@ async fn run_user_list(
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -1750,7 +1765,9 @@ async fn run_post_write(
 
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -2046,7 +2063,9 @@ async fn run_engage(
 
     let auth = match read_auth(opts) {
         Ok(a) => a,
-        Err(e) => return e,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
@@ -2185,4 +2204,21 @@ fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> S
     }
     // Fallback for status/doctor/query-ids/auth: pretty JSON (human-readable).
     serde_json::to_string_pretty(data).unwrap_or_default()
+}
+
+/// Auth-failure path: emit exactly one `ok:false` envelope and exit.
+/// Diverges (never returns) so the single-print-owner discipline holds —
+/// main's own emit is skipped because we exit here.
+fn emit_fail(opts: &OutputOptions, err: twr_core::TwrError, code: i32) -> (serde_json::Value, i32) {
+    let envelope: Envelope<serde_json::Value> =
+        Envelope::err(err).with_meta(Meta::new(opts.trace_id.clone()));
+    match opts.format {
+        OutputFormat::Json => emit(&envelope),
+        OutputFormat::Yaml => {
+            let _ = emit_yaml(&envelope);
+        }
+        // Errors always stay JSON/YAML, never TOON.
+        OutputFormat::Toon => emit(&envelope),
+    }
+    std::process::exit(code);
 }
