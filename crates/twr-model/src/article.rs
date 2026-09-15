@@ -363,3 +363,62 @@ pub fn parse_article(tweet_data: &Value) -> ArticleFields {
     };
     ArticleFields { title, text }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn article_tweet(blocks: serde_json::Value) -> serde_json::Value {
+        json!({
+            "article": {
+                "article_results": {
+                    "result": {
+                        "title": "My Title",
+                        "content_state": {
+                            "blocks": blocks,
+                            "entityMap": {},
+                        },
+                    },
+                },
+            },
+        })
+    }
+
+    fn text_block(text: &str, kind: &str) -> serde_json::Value {
+        json!({"text": text, "type": kind, "entityRanges": [], "inlineStyleRanges": []})
+    }
+
+    #[test]
+    fn renders_headings_quote_lists_code() {
+        let blocks = json!([
+            text_block("H1", "header-one"),
+            text_block("H2", "header-two"),
+            text_block("H3", "header-three"),
+            text_block("quoted", "blockquote"),
+            text_block("u1", "unordered-list-item"),
+            text_block("o1", "ordered-list-item"),
+            text_block("o2", "ordered-list-item"),
+            text_block("code!", "code-block"),
+            text_block("plain", "unstyled"),
+        ]);
+        let out = parse_article(&article_tweet(blocks));
+        assert_eq!(out.title.as_deref(), Some("My Title"));
+        let text = out.text.unwrap();
+        assert!(text.contains("# H1"));
+        assert!(text.contains("## H2"));
+        assert!(text.contains("### H3"));
+        assert!(text.contains("> quoted"));
+        assert!(text.contains("- u1"));
+        assert!(text.contains("1. o1"));
+        assert!(text.contains("2. o2"));
+        assert!(text.contains("```\ncode!\n```"));
+        assert!(text.contains("plain"));
+    }
+
+    #[test]
+    fn missing_article_yields_nones() {
+        let out = parse_article(&json!({}));
+        assert!(out.title.is_none() && out.text.is_none());
+    }
+}

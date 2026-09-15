@@ -1324,19 +1324,43 @@ async fn run_article(
     output: Option<String>,
 ) -> (serde_json::Value, i32) {
     let (data, code) = run_tweet(opts, config, id).await;
-    if code != 0 || !markdown {
-        if code == 0 {
-            if let Some(path) = output {
-                let _ = std::fs::write(
-                    &path,
-                    serde_json::to_string_pretty(&data).unwrap_or_default(),
-                );
-            }
+    if code != 0 {
+        return (data, code);
+    }
+    // article_title/article_text already carry the Draft.js→Markdown render
+    // from twr-model (h1-3/quote/lists/code/links/images). --markdown selects
+    // the markdown document shape; --output writes it to a file.
+    if !markdown {
+        if let Some(path) = output {
+            let _ = std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&data).unwrap_or_default(),
+            );
         }
         return (data, code);
     }
-    // --markdown: article fields already carry title/text from twr-model.
-    (data, 0)
+    let title = data
+        .get("article_title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let text = data
+        .get("article_text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let doc = if title.is_empty() {
+        text.to_string()
+    } else {
+        format!("# {title}\n\n{text}")
+    };
+    if let Some(path) = output {
+        if std::fs::write(&path, &doc).is_err() {
+            return (
+                serde_json::json!({"error": format!("cannot write {path}")}),
+                7,
+            );
+        }
+    }
+    (serde_json::json!({"title": title, "markdown": doc}), 0)
 }
 
 async fn run_list(
