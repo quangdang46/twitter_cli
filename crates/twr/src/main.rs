@@ -11,28 +11,34 @@ use twr_core::{emit, Envelope, Meta, OutputFormat, OutputOptions};
 #[command(name = "twr", version, about = "Agent-first CLI for X/Twitter")]
 struct Cli {
     /// Machine output as JSON.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_JSON")]
     json: bool,
     /// Machine output as YAML (auto when piped without a flag).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_YAML")]
     yaml: bool,
     /// Strip heavy fields (profile images, media dims, expanded urls).
-    #[arg(long, short = 'c', global = true)]
+    #[arg(long, short = 'c', global = true, env = "TWR_COMPACT")]
     compact: bool,
     /// Project dotted-path fields, e.g. --fields id,text,author.screen_name.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_FIELDS")]
     fields: Option<String>,
     /// Trace id (auto-generated when omitted).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_TRACE_ID")]
     trace_id: Option<String>,
-    /// Verbose diagnostics to stderr only (never stdout).
-    #[arg(long, short = 'v', global = true)]
-    verbose: bool,
+    /// Verbose diagnostics to stderr only (never stdout). Repeat for more detail.
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count, env = "TWR_VERBOSE")]
+    verbose: u8,
+    /// Silence even warnings on stderr.
+    #[arg(long, short = 'q', global = true, env = "TWR_QUIET")]
+    quiet: bool,
+    /// Disable colored output (also honors NO_COLOR).
+    #[arg(long, global = true, env = "TWR_NO_COLOR")]
+    no_color: bool,
     /// Request timeout override (seconds).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_TIMEOUT")]
     timeout: Option<u64>,
     /// Max retries override.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "TWR_MAX_RETRIES")]
     max_retries: Option<u32>,
 
     #[command(subcommand)]
@@ -79,10 +85,12 @@ fn main() -> anyhow::Result<()> {
         .map(twr_core::parse_fields)
         .unwrap_or_default();
     opts.verbose = cli.verbose;
+    opts.quiet = cli.quiet;
+    opts.no_color = cli.no_color;
     opts.timeout_secs = cli.timeout;
     opts.max_retries = cli.max_retries;
 
-    if opts.verbose {
+    if opts.verbosity() >= 1 {
         eprintln!("twr trace_id={} command starting", opts.trace_id);
     }
 
@@ -91,8 +99,10 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from);
     let (config, config_errors) = twr_config::load(&cwd, home.as_deref());
-    for err in &config_errors {
-        eprintln!("twr config warning: {err}");
+    if opts.log_warnings() {
+        for err in &config_errors {
+            eprintln!("twr config warning: {err}");
+        }
     }
 
     let kind: &'static str;

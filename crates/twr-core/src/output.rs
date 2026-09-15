@@ -37,9 +37,35 @@ pub struct OutputOptions {
     pub compact: bool,
     pub fields: Vec<String>,
     pub trace_id: String,
-    pub verbose: bool,
+    /// Counted verbosity (-v/-vv); 0 = normal.
+    pub verbose: u8,
+    /// Silence even warnings on stderr (wins over verbose).
+    pub quiet: bool,
+    /// Disable colored output (also honors NO_COLOR env).
+    pub no_color: bool,
     pub timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+}
+
+impl OutputOptions {
+    /// True unless silenced by --quiet.
+    pub fn log_warnings(&self) -> bool {
+        !self.quiet
+    }
+
+    /// Stderr detail level after quiet is applied.
+    pub fn verbosity(&self) -> u8 {
+        if self.quiet {
+            0
+        } else {
+            self.verbose
+        }
+    }
+
+    /// Effective no-color: flag OR NO_COLOR env.
+    pub fn effective_no_color(&self) -> bool {
+        self.no_color || std::env::var_os("NO_COLOR").is_some()
+    }
 }
 
 impl OutputOptions {
@@ -96,6 +122,20 @@ mod tests {
             OutputFormat::resolve(false, false, false),
             OutputFormat::Yaml
         );
+    }
+
+    #[test]
+    fn quiet_wins_over_verbose_and_no_color_honors_env() {
+        let mut opts = OutputOptions::new(Some("t".into()));
+        opts.verbose = 2;
+        assert_eq!(opts.verbosity(), 2);
+        assert!(opts.log_warnings());
+        opts.quiet = true;
+        assert_eq!(opts.verbosity(), 0);
+        assert!(!opts.log_warnings());
+        assert!(!opts.effective_no_color());
+        opts.no_color = true;
+        assert!(opts.effective_no_color());
     }
 
     #[test]
