@@ -4,7 +4,7 @@
 //! final envelope go through `emit` / `emit_yaml` below. Everything else is
 //! stderr.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use twr_core::{decide, emit, ApplyInput, Envelope, Meta, OutputFormat, OutputOptions};
 
 mod cli;
@@ -87,6 +87,11 @@ enum Command {
         guide: bool,
     },
     Logout,
+    /// Print shell completions (script to stdout, instructions to stderr).
+    Completions {
+        /// Shell: bash|zsh|fish|powershell|elvish.
+        shell: String,
+    },
     /// Post a tweet (needs --apply; --dry-run to preview).
     Post {
         text: String,
@@ -376,6 +381,9 @@ async fn main() -> anyhow::Result<()> {
             let (d, code) = logout_data();
             data = d;
             exit_code = code;
+        }
+        Command::Completions { shell } => {
+            return run_completions(&shell);
         }
         Command::Post {
             text,
@@ -2079,4 +2087,25 @@ async fn run_engage(
         serde_json::json!({"ok": true, "operation": cmd, "target": target_id}),
         0,
     )
+}
+
+/// `twr completions <shell>`: script to stdout, instructions to stderr
+/// (xf split — keeps output pipeable). Not an envelope command.
+fn run_completions(shell: &str) -> anyhow::Result<()> {
+    use clap_complete::{generate, shells};
+    use std::io::stdout;
+    let mut cmd = Cli::command();
+    match shell.to_lowercase().as_str() {
+        "bash" => generate(shells::Bash, &mut cmd, "twr", &mut stdout()),
+        "zsh" => generate(shells::Zsh, &mut cmd, "twr", &mut stdout()),
+        "fish" => generate(shells::Fish, &mut cmd, "twr", &mut stdout()),
+        "powershell" | "power-shell" => generate(shells::PowerShell, &mut cmd, "twr", &mut stdout()),
+        "elvish" => generate(shells::Elvish, &mut cmd, "twr", &mut stdout()),
+        other => {
+            eprintln!("unknown shell: {other} (bash|zsh|fish|powershell|elvish)");
+            std::process::exit(2);
+        }
+    }
+    eprintln!("install: save stdout to your shell's completion dir (bash: /etc/bash_completion.d/ or ~/.local/share/bash-completion/; zsh: a dir on $fpath then `compinit`; fish: ~/.config/fish/completions/twr.fish)");
+    Ok(())
 }
