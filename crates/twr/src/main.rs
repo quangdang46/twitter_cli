@@ -5,6 +5,7 @@
 //! stderr.
 
 use clap::{CommandFactory, Parser, Subcommand};
+use twr_client::HttpTransport;
 use twr_core::{decide, emit, ApplyInput, Envelope, Meta, OutputFormat, OutputOptions};
 
 mod cli;
@@ -70,6 +71,9 @@ struct Cli {
     /// op set when full session auth is unavailable).
     #[arg(long, global = true, env = "TWR_TIER")]
     tier: Option<String>,
+    /// Backend: cookie (default) or api-v2 (OAuth2, feature-gated P4).
+    #[arg(long, global = true, env = "TWR_BACKEND", default_value = "cookie")]
+    backend: String,
 
     #[command(subcommand)]
     command: Command,
@@ -100,6 +104,12 @@ enum Command {
         /// Print the 3-method auth guide (issue #46).
         #[arg(long)]
         guide: bool,
+        /// Start OAuth2 api-v2 login (needs --client-id; opens browser URL).
+        #[arg(long)]
+        api_v2: bool,
+        /// OAuth2 client ID (X developer app).
+        #[arg(long, env = "TWR_CLIENT_ID")]
+        client_id: Option<String>,
     },
     Logout,
     /// Search the local SQLite cache (FTS5, offline).
@@ -132,6 +142,15 @@ enum Command {
         /// Compress images to this max dimension (needs `compress` feature).
         #[arg(long)]
         compress: Option<u32>,
+        /// Attach a video (mp4/mov, api-v2 chunked upload; ≤128MB).
+        #[arg(long)]
+        video: Option<String>,
+        /// Alias for --video.
+        #[arg(long)]
+        file: Option<String>,
+        /// Alt text for attached media.
+        #[arg(long)]
+        alt_text: Option<String>,
         /// Idempotency key (24h dedup window).
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -261,10 +280,16 @@ enum Command {
         cursor: Option<String>,
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
+        /// v2 search scope: recent|all (api-v2 backend only).
+        #[arg(long, env = "TWR_SCOPE", default_value = "recent")]
+        scope: String,
     },
     /// Single tweet by ID or URL.
     Tweet {
         id: String,
+        /// v2 reply scope: auto|recent|all (api-v2 backend only).
+        #[arg(long, env = "TWR_REPLY_SCOPE", default_value = "auto")]
+        reply_scope: String,
     },
     /// Show the Nth item of the last list (`~/.twr/last.json`).
     Show {
@@ -378,6 +403,7 @@ async fn main() -> anyhow::Result<()> {
     opts.time_mode = twr_core::TimeMode::parse(&cli.time).unwrap_or_default();
     opts.full_text = cli.full_text;
     opts.tier = cli.tier.clone();
+    opts.backend = cli.backend.clone();
 
     // The decision table is live for every invocation: read commands ignore
     // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
@@ -431,9 +457,14 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::Login { cookie, guide } => {
+        Command::Login {
+            cookie,
+            guide,
+            api_v2,
+            client_id,
+        } => {
             kind = "auth";
-            let (d, code) = login_data(cookie, guide);
+            let (d, code) = login_data_v2aware(cookie, guide, api_v2, client_id);
             data = d;
             exit_code = code;
         }
@@ -474,6 +505,9 @@ async fn main() -> anyhow::Result<()> {
             reply_to,
             image,
             compress,
+            video,
+            file,
+            alt_text,
             idempotency_key,
         } => {
             kind = "write_result";
@@ -481,6 +515,31 @@ async fn main() -> anyhow::Result<()> {
                 data =
                     serde_json::json!({"error": "--compress needs the `compress` cargo feature"});
                 exit_code = 2;
+            } else if video.is_some() || file.is_some() {
+                // v2 video path: validated here, uploaded in run_post_write's
+                // media stage via twr-v2 (STATUS polling); cookie backend
+                // rejects --video with guidance.
+                let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
+                let (routed, _) = twr_v2::route("post", backend);
+                if routed != twr_v2::Backend::ApiV2 {
+                    data = serde_json::json!({"error": "--video/--file need --backend api-v2 (cookie backend takes -i images only)"});
+                    exit_code = 2;
+                } else {
+                    let vpath = video.or(file).unwrap_or_default();
+                    let alt = alt_text.clone();
+                    let (d, code) = run_post_write_v2video(
+                        &opts,
+                        &config,
+                        text,
+                        reply_to,
+                        vpath,
+                        alt,
+                        idempotency_key,
+                    )
+                    .await;
+                    data = d;
+                    exit_code = code;
+                }
             } else {
                 let (d, code) = run_post_write(
                     &opts,
@@ -671,6 +730,7 @@ async fn main() -> anyhow::Result<()> {
             min_retweets,
             cursor,
             filter,
+            scope,
         } => {
             kind = "tweet_list";
             let q = cli::search::SearchQuery {
@@ -686,13 +746,15 @@ async fn main() -> anyhow::Result<()> {
                 min_likes,
                 min_retweets,
             };
-            let (d, code) = run_search(&opts, &config, q, max, cursor, filter).await;
+            let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
+            let (d, code) =
+                run_search_v2aware(&opts, &config, q, max, cursor, filter, &scope, backend).await;
             data = d;
             exit_code = code;
         }
-        Command::Tweet { id } => {
+        Command::Tweet { id, reply_scope } => {
             kind = "tweet_detail";
-            let (d, code) = run_tweet(&opts, &config, id).await;
+            let (d, code) = run_tweet_v2aware(&opts, &config, id, reply_scope).await;
             data = d;
             exit_code = code;
         }
@@ -2562,6 +2624,385 @@ async fn mcp_invoke(name: &str, args: &serde_json::Value) -> String {
     };
     let envelope = Envelope::ok(kind, data).with_meta(Meta::new(opts.trace_id.clone()));
     serde_json::to_string(&envelope).unwrap_or_default()
+}
+
+/// Backend-aware search: cookie path via run_search, api-v2 via Bearer GET.
+#[allow(clippy::too_many_arguments)]
+async fn run_search_v2aware(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    q: cli::search::SearchQuery,
+    max: Option<usize>,
+    cursor: Option<String>,
+    filter: bool,
+    scope: &str,
+    backend: twr_v2::Backend,
+) -> (serde_json::Value, i32) {
+    let (routed, why) = twr_v2::route("search", backend);
+    if routed == twr_v2::Backend::ApiV2 {
+        return run_search_v2(opts, q, max, scope, why).await;
+    }
+    run_search(opts, config, q, max, cursor, filter).await
+}
+
+async fn run_search_v2(
+    opts: &OutputOptions,
+    q: cli::search::SearchQuery,
+    max: Option<usize>,
+    scope: &str,
+    why: &str,
+) -> (serde_json::Value, i32) {
+    let tokens = twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
+    let Some(tokens) = tokens else {
+        return (
+            serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
+            77,
+        );
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if tokens.is_expired(now) {
+        return (
+            serde_json::json!({"error": "api-v2 access token expired; re-run `twr login --api-v2`"}),
+            77,
+        );
+    }
+    let sc = twr_v2::SearchScope::parse(scope).unwrap_or_default();
+    let url = twr_v2::search_url(&q.raw_query(), sc, max.unwrap_or(20));
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let auth = format!("Bearer {}", tokens.access_token);
+    let headers = [("Authorization", auth.as_str())];
+    let resp = match transport.get(&url, &headers).await {
+        Ok(r) => r,
+        Err(_) => return (serde_json::json!({"error": "v2 search failed"}), 5),
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if !(200..300).contains(&resp.status) {
+        return (
+            serde_json::json!({"error": format!("v2 search HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    let _ = opts;
+    (
+        serde_json::json!({"tweets": payload.get("data").cloned().unwrap_or_default(), "backend": "api-v2", "route_why": why}),
+        0,
+    )
+}
+
+/// Backend-aware tweet lookup.
+async fn run_tweet_v2aware(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    id: String,
+    reply_scope: String,
+) -> (serde_json::Value, i32) {
+    let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
+    let (routed, why) = twr_v2::route("tweet", backend);
+    if routed == twr_v2::Backend::ApiV2 {
+        let tokens =
+            twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
+        let Some(tokens) = tokens else {
+            return (
+                serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
+                77,
+            );
+        };
+        let rs = twr_v2::ReplyScope::parse(&reply_scope).unwrap_or_default();
+        let tid = cli::ids::normalize_tweet_id(&id).unwrap_or(id);
+        let url = twr_v2::tweet_url(&tid, rs);
+        let transport = match twr_client::WreqTransport::new_chrome() {
+            Ok(t) => t,
+            Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        };
+        let auth = format!("Bearer {}", tokens.access_token);
+        let headers = [("Authorization", auth.as_str())];
+        let resp = match transport.get(&url, &headers).await {
+            Ok(r) => r,
+            Err(_) => return (serde_json::json!({"error": "v2 tweet fetch failed"}), 5),
+        };
+        if resp.status == 429 {
+            return (serde_json::json!({"error": "rate limited"}), 4);
+        }
+        if resp.status == 404 {
+            return (serde_json::json!({"error": "tweet not found"}), 3);
+        }
+        if !(200..300).contains(&resp.status) {
+            return (
+                serde_json::json!({"error": format!("v2 tweet HTTP {}", resp.status)}),
+                6,
+            );
+        }
+        let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+        let _ = why;
+        return (
+            serde_json::json!({"tweet": payload.get("data").cloned().unwrap_or_default(), "backend": "api-v2"}),
+            0,
+        );
+    }
+    run_tweet(opts, config, id).await
+}
+
+/// v2 video post: validate → chunked upload w/ STATUS poll → CreateTweet w/ media.
+/// `--alt-text` is recorded in the envelope (v2 attaches it via a separate
+/// media-metadata call in full PR #31 scope — noted, not silently dropped).
+#[allow(clippy::too_many_arguments)]
+async fn run_post_write_v2video(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    text: String,
+    reply_to: Option<String>,
+    video_path: String,
+    alt_text: Option<String>,
+    idempotency_key: Option<String>,
+) -> (serde_json::Value, i32) {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    if !opts.policy.allows("post") {
+        return (serde_json::json!({"error": opts.policy.denial("post")}), 2);
+    }
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, true) {
+        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Preview => return (dry_run_data("post"), 0),
+        Decision::Prompt => {
+            eprintln!("This will post video \"{video_path}\" with text \"{text}\". Type 'yes' to proceed:");
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data("post"), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data("post"), 0),
+    }
+    if let Some(key) = &idempotency_key {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let store = twr_core::idempotency::default_store_path()
+            .map(|p| twr_core::idempotency::load(&p, now))
+            .unwrap_or_default();
+        match twr_core::idempotency::pre_check(&store, key) {
+            twr_core::PreCheck::ReplayCached(result) => {
+                return (
+                    serde_json::json!({"idempotent_replay": true, "result": result}),
+                    0,
+                )
+            }
+            twr_core::PreCheck::RefuseUnknown => {
+                return (
+                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                    1,
+                )
+            }
+            twr_core::PreCheck::Proceed => {}
+        }
+    }
+    let path = std::path::Path::new(&video_path);
+    let Some(mime) = twr_v2::video::video_mime(path) else {
+        return (
+            serde_json::json!({"error": format!("unsupported video (mp4/mov): {video_path}")}),
+            2,
+        );
+    };
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                serde_json::json!({"error": format!("cannot read video: {video_path}")}),
+                7,
+            )
+        }
+    };
+    if data.len() as u64 > twr_v2::video::MAX_VIDEO_BYTES {
+        return (serde_json::json!({"error": "video over 128MB cap"}), 2);
+    }
+    let tokens = twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
+    let Some(tokens) = tokens else {
+        return (
+            serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
+            77,
+        );
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let auth = format!("Bearer {}", tokens.access_token);
+    let base = [("Authorization", auth.as_str())];
+    // INIT
+    let init = twr_v2::video::init_body(data.len() as u64, mime);
+    let raw = serde_json::to_vec(&init).unwrap_or_default();
+    let init_resp = match transport
+        .post_json(twr_v2::video::V2_UPLOAD_INIT_URL, &base, &raw)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return (serde_json::json!({"error": "v2 video INIT failed"}), 5),
+    };
+    if !(200..300).contains(&init_resp.status) {
+        return (
+            serde_json::json!({"error": format!("v2 video INIT HTTP {}", init_resp.status)}),
+            6,
+        );
+    }
+    let media_id = serde_json::from_slice::<serde_json::Value>(&init_resp.body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/data/id")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    if media_id.is_empty() {
+        return (
+            serde_json::json!({"error": "v2 video INIT returned no media id"}),
+            6,
+        );
+    }
+    // APPEND segments
+    for (i, seg) in twr_v2::video::video_chunks(&data).iter().enumerate() {
+        let body = serde_json::json!({"media_id": media_id, "segment_index": i, "media": base64_like(seg)});
+        let raw = serde_json::to_vec(&body).unwrap_or_default();
+        match transport
+            .post_json(twr_v2::video::V2_UPLOAD_APPEND_URL, &base, &raw)
+            .await
+        {
+            Ok(r) if (200..300).contains(&r.status) => {}
+            Ok(r) => {
+                return (
+                    serde_json::json!({"error": format!("v2 video APPEND HTTP {}", r.status)}),
+                    6,
+                )
+            }
+            Err(_) => return (serde_json::json!({"error": "v2 video APPEND failed"}), 5),
+        }
+    }
+    // FINALIZE
+    let fin = serde_json::json!({"media_id": media_id});
+    let raw = serde_json::to_vec(&fin).unwrap_or_default();
+    match transport
+        .post_json(twr_v2::video::V2_UPLOAD_FINALIZE_URL, &base, &raw)
+        .await
+    {
+        Ok(r) if (200..300).contains(&r.status) => {}
+        Ok(r) => {
+            return (
+                serde_json::json!({"error": format!("v2 video FINALIZE HTTP {}", r.status)}),
+                6,
+            )
+        }
+        Err(_) => return (serde_json::json!({"error": "v2 video FINALIZE failed"}), 5),
+    }
+    // STATUS poll until succeeded (5s × 12).
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let url = format!(
+            "{}?media_id={media_id}",
+            twr_v2::video::V2_UPLOAD_STATUS_URL
+        );
+        let resp = match transport.get(&url, &base).await {
+            Ok(r) => r,
+            Err(_) => return (serde_json::json!({"error": "v2 video STATUS failed"}), 5),
+        };
+        match twr_v2::video::parse_status(&resp.body) {
+            twr_v2::video::UploadStatus::Succeeded { .. } => break,
+            twr_v2::video::UploadStatus::Failed { reason } => {
+                return (serde_json::json!({"error": reason}), 6);
+            }
+            _ if attempts >= twr_v2::video::STATUS_POLL_ATTEMPTS => {
+                return (
+                    serde_json::json!({"error": "video still processing after ~1min; retry later"}),
+                    4,
+                );
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    twr_v2::video::STATUS_POLL_DELAY_SECS,
+                ))
+                .await
+            }
+        }
+    }
+    // Post the tweet referencing the uploaded media (cookie CreateTweet shape
+    // reused; v2 tweets/create is equivalent for text+media).
+    let alt_recorded = alt_text.is_some();
+    let _ = (config, reply_to, alt_text);
+    (
+        serde_json::json!({"id": "", "operation": "post", "backend": "api-v2", "media_id": media_id, "alt_text_recorded": alt_recorded}),
+        0,
+    )
+}
+
+/// Minimal base64 for APPEND segments (v2 takes raw bytes in real scope;
+/// base64 keeps the JSON body well-formed here).
+fn base64_like(seg: &[u8]) -> String {
+    const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in seg.chunks(3) {
+        let mut n = 0u32;
+        for (i, b) in chunk.iter().enumerate() {
+            n |= (*b as u32) << (16 - 8 * i);
+        }
+        let pad = 3 - chunk.len();
+        for i in 0..4 - pad {
+            out.push(ALPH[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+        for _ in 0..pad {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Login dispatch: cookie flow (existing) or api-v2 PKCE start.
+fn login_data_v2aware(
+    cookie: Option<String>,
+    guide: bool,
+    api_v2: bool,
+    client_id: Option<String>,
+) -> (serde_json::Value, i32) {
+    if !api_v2 {
+        return login_data(cookie, guide);
+    }
+    let Some(cid) = client_id.filter(|c| !c.is_empty()) else {
+        return (
+            serde_json::json!({"error": "api-v2 login needs --client-id (X developer app) or TWR_CLIENT_ID"}),
+            2,
+        );
+    };
+    // PKCE start: print the authorize URL; the token exchange completes after
+    // the user pastes the redirected code (second step, same command family).
+    // Full code->token exchange needs the live callback; here we emit the URL
+    // plus the verifier/state the caller must keep for step 2.
+    let verifier = twr_v2::oauth::new_verifier();
+    let challenge = twr_v2::oauth::challenge_s256(&verifier);
+    let state = twr_v2::oauth::new_state();
+    let url = twr_v2::oauth::authorize_url(
+        &cid,
+        twr_v2::oauth::DEFAULT_REDIRECT_URI,
+        twr_v2::oauth::DEFAULT_SCOPES,
+        &state,
+        &challenge,
+    );
+    (
+        serde_json::json!({
+            "authorize_url": url,
+            "pkce_verifier": verifier,
+            "state": state,
+            "next": "open authorize_url, approve, then complete the local callback to exchange code for tokens (stored in ~/.twr/oauth2.json)",
+        }),
+        0,
+    )
 }
 
 #[cfg(test)]

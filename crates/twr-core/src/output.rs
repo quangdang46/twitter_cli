@@ -71,6 +71,8 @@ pub struct OutputOptions {
     pub full_text: bool,
     /// Access tier cap (guest degraded-mode reads).
     pub tier: Option<String>,
+    /// Backend: cookie (default) or api-v2 (OAuth2, P4).
+    pub backend: String,
 }
 
 impl OutputOptions {
@@ -99,6 +101,7 @@ impl OutputOptions {
     pub fn new(trace_id: Option<String>) -> Self {
         Self {
             trace_id: trace_id.unwrap_or_else(new_trace_id),
+            backend: "cookie".into(),
             ..Default::default()
         }
     }

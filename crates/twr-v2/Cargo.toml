@@ -1,0 +1,14 @@
+[package]
+name = "twr-v2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Official API v2 backend (OAuth2 user-context, dual-backend routing, video upload) — feature-gated, see COMPREHENSIVEPLANFORTWITTERCLI.md P4"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
