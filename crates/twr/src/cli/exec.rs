@@ -51,13 +51,25 @@ impl<'a> ExecCtx<'a> {
 }
 
 /// GraphQL GET URL: `/i/api/graphql/<qid>/<op>?variables=..&features=..`.
-pub fn graphql_get_url(query_id: &str, operation: &str, variables: &serde_json::Value) -> String {
+pub fn graphql_get_url(
+    query_id: &str,
+    operation: &str,
+    variables: &serde_json::Value,
+    field_toggles: Option<&serde_json::Value>,
+) -> String {
     let features = serde_json::Value::Object(compact_features(operation));
-    format!(
+    let mut url = format!(
         "https://x.com/i/api/graphql/{query_id}/{operation}?variables={}&features={}",
         url_encode(&variables.to_string()),
         url_encode(&features.to_string()),
-    )
+    );
+    if let Some(toggles) = field_toggles {
+        url.push_str(&format!(
+            "&fieldToggles={}",
+            url_encode(&toggles.to_string())
+        ));
+    }
+    url
 }
 
 fn url_encode(s: &str) -> String {
@@ -80,6 +92,18 @@ pub async fn fetch_parsed_page(
     operation: &str,
     variables: serde_json::Value,
     instructions: fn(&serde_json::Value) -> Option<&Vec<serde_json::Value>>,
+) -> Result<(Vec<twr_model::Tweet>, Option<String>), PageError> {
+    fetch_parsed_page_with_toggles(ctx, operation, variables, instructions, None).await
+}
+
+/// Toggle-aware variant (TweetDetail needs fieldToggles; others pass None).
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_parsed_page_with_toggles(
+    ctx: &mut ExecCtx<'_>,
+    operation: &str,
+    variables: serde_json::Value,
+    instructions: fn(&serde_json::Value) -> Option<&Vec<serde_json::Value>>,
+    field_toggles: Option<serde_json::Value>,
 ) -> Result<(Vec<twr_model::Tweet>, Option<String>), PageError> {
     let qid = ctx
         .query_id(operation)
@@ -123,7 +147,7 @@ pub async fn fetch_parsed_page(
             .await
             .map_err(|_| PageError::Fatal)?
     } else {
-        let url = graphql_get_url(&qid, operation, &variables);
+        let url = graphql_get_url(&qid, operation, &variables, field_toggles.as_ref());
         ctx.transport
             .get(&url, &header_refs)
             .await
@@ -228,7 +252,12 @@ mod tests {
 
     #[test]
     fn graphql_get_url_encodes_variables_and_features() {
-        let url = graphql_get_url("qid", "UserByScreenName", &serde_json::json!({"a": 1}));
+        let url = graphql_get_url(
+            "qid",
+            "UserByScreenName",
+            &serde_json::json!({"a": 1}),
+            None,
+        );
         assert!(url.starts_with("https://x.com/i/api/graphql/qid/UserByScreenName?variables="));
         assert!(url.contains("features="));
         assert!(!url.contains('{'));

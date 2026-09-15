@@ -1408,7 +1408,15 @@ async fn run_feed(
     };
     let count = max.unwrap_or(config.fetch.count as usize);
     let vars = serde_json::json!({"includePromotedContent": false, "latestControlAvailable": true, "requestContext": "launch"});
-    let out = cli::exec::fetch_tweets_paged(&mut ctx, op, count, cursor, vars, |_| None).await;
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        op,
+        count,
+        cursor,
+        vars,
+        cli::instructions::for_operation(op),
+    )
+    .await;
     match out {
         Ok((tweets, loop_out)) => {
             let mut fa = false;
@@ -1440,8 +1448,15 @@ async fn run_bookmarks(
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let count = max.unwrap_or(50);
     let vars = serde_json::json!({});
-    let out =
-        cli::exec::fetch_tweets_paged(&mut ctx, "Bookmarks", count, None, vars, |_| None).await;
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        "Bookmarks",
+        count,
+        None,
+        vars,
+        cli::instructions::for_operation("Bookmarks"),
+    )
+    .await;
     match out {
         Ok((tweets, loop_out)) => {
             let mut fa = false;
@@ -1479,9 +1494,15 @@ async fn run_search(
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let count = max.unwrap_or(config.fetch.count as usize);
     let vars = serde_json::json!({"rawQuery": q.raw_query(), "product": q.product.as_str()});
-    let out =
-        cli::exec::fetch_tweets_paged(&mut ctx, "SearchTimeline", count, cursor, vars, |_| None)
-            .await;
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        "SearchTimeline",
+        count,
+        cursor,
+        vars,
+        cli::instructions::for_operation("SearchTimeline"),
+    )
+    .await;
     match out {
         Ok((tweets, loop_out)) => {
             let mut fa = false;
@@ -1516,8 +1537,35 @@ async fn run_tweet(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
-    let vars = serde_json::json!({"focalTweetId": tweet_id});
-    match cli::exec::fetch_parsed_page(&mut ctx, "TweetDetail", vars, |_| None).await {
+    // Full variable set mirrors Python fetch_tweet_detail (focal + ranking
+    // + community/voice/birdwatch toggles); the detail endpoint rejects
+    // sparse variable sets.
+    let vars = serde_json::json!({
+        "focalTweetId": tweet_id,
+        "referrer": "tweet",
+        "with_rux_injections": false,
+        "includePromotedContent": true,
+        "rankingMode": "Relevance",
+        "withCommunity": true,
+        "withQuickPromoteEligibilityTweetFields": true,
+        "withBirdwatchNotes": true,
+        "withVoice": true,
+    });
+    let toggles = serde_json::json!({
+        "withArticleRichContentState": true,
+        "withArticlePlainText": false,
+        "withGrokAnalyze": false,
+        "withDisallowedReplyControls": false,
+    });
+    match cli::exec::fetch_parsed_page_with_toggles(
+        &mut ctx,
+        "TweetDetail",
+        vars,
+        cli::instructions::for_operation("TweetDetail"),
+        Some(toggles),
+    )
+    .await
+    {
         Ok((mut tweets, _)) => {
             if tweets.is_empty() {
                 return (
@@ -1628,7 +1676,7 @@ async fn run_list(
         count,
         None,
         vars,
-        |_| None,
+        cli::instructions::for_operation("ListLatestTweetsTimeline"),
     )
     .await;
     match out {
@@ -1665,7 +1713,7 @@ async fn run_user(
         .query_id("UserByScreenName")
         .map(|r| r.query_id)
         .unwrap_or_default();
-    let url = cli::exec::graphql_get_url(&qid, "UserByScreenName", &vars);
+    let url = cli::exec::graphql_get_url(&qid, "UserByScreenName", &vars, None);
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
         method: "GET",
@@ -1732,9 +1780,23 @@ async fn run_user_posts(
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let count = max.unwrap_or(config.fetch.count as usize);
-    let vars = serde_json::json!({"userId": uid});
-    let out =
-        cli::exec::fetch_tweets_paged(&mut ctx, "UserTweets", count, None, vars, |_| None).await;
+    // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
+    let vars = serde_json::json!({
+        "userId": uid,
+        "includePromotedContent": true,
+        "withQuickPromoteEligibilityTweetFields": true,
+        "withVoice": true,
+        "withV2Timeline": true,
+    });
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        "UserTweets",
+        count,
+        None,
+        vars,
+        cli::instructions::for_operation("UserTweets"),
+    )
+    .await;
     match out {
         Ok((tweets, loop_out)) => {
             let mut fa = false;
@@ -1774,8 +1836,23 @@ async fn run_likes(
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let count = max.unwrap_or(config.fetch.count as usize);
-    let vars = serde_json::json!({"userId": uid});
-    let out = cli::exec::fetch_tweets_paged(&mut ctx, "Likes", count, None, vars, |_| None).await;
+    // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
+    let vars = serde_json::json!({
+        "userId": uid,
+        "includePromotedContent": true,
+        "withQuickPromoteEligibilityTweetFields": true,
+        "withVoice": true,
+        "withV2Timeline": true,
+    });
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        "Likes",
+        count,
+        None,
+        vars,
+        cli::instructions::for_operation("Likes"),
+    )
+    .await;
     match out {
         Ok((tweets, loop_out)) => {
             let mut fa = false;

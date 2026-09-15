@@ -3,6 +3,7 @@
 pub mod exec;
 pub mod guard;
 pub mod ids;
+pub mod instructions;
 pub mod mcp;
 pub mod search;
 pub mod table;
