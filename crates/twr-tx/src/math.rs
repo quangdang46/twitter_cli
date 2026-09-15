@@ -178,7 +178,7 @@ pub(crate) fn animate(frame_row: &[i64], target_time: f64) -> String {
     let value = cubic_value(&curves, target_time);
     let color: Vec<f64> = interpolate(&from_color, &to_color, value)
         .into_iter()
-        .map(|item| item.max(0.0).min(255.0))
+        .map(|item| item.clamp(0.0, 255.0))
         .collect();
     let rotation = interpolate(&[0.0], &[to_rotation], value);
     let matrix = rotation_matrix(rotation[0]);

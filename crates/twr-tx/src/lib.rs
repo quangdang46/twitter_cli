@@ -113,7 +113,6 @@ pub fn compute_animation_key(
         .map(|segment| {
             let cleaned = NON_DIGIT_RE.replace_all(segment, " ");
             cleaned
-                .trim()
                 .split_whitespace()
                 .map(|n| n.parse::<i64>().unwrap())
                 .collect()

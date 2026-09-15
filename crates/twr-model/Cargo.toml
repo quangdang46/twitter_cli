@@ -1,0 +1,10 @@
+[package]
+name = "twr-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tweet/User/Media structs + GraphQL response parser, ported from twitter_cli/{models,parser}.py (see COMPREHENSIVEPLANFORTWITTERCLI.md §7)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
