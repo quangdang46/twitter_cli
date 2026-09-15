@@ -18,6 +18,7 @@ twr-config = { path = "../twr-config" }
 twr-graphql = { path = "../twr-graphql" }
 twr-tx = { path = "../twr-tx" }
 twr-model = { path = "../twr-model" }
+twr-filter = { path = "../twr-filter" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

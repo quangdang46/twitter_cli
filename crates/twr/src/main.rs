@@ -188,11 +188,16 @@ enum Command {
         max: Option<usize>,
         #[arg(long)]
         cursor: Option<String>,
+        /// Score-based filtering (opt-in, off by default).
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Bookmarks (own account).
     Bookmarks {
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Search with the full operator flags.
     Search {
@@ -221,6 +226,8 @@ enum Command {
         min_retweets: Option<u64>,
         #[arg(long)]
         cursor: Option<String>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Single tweet by ID or URL.
     Tweet {
@@ -243,6 +250,8 @@ enum Command {
         id: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// User profile by handle.
     User {
@@ -253,24 +262,32 @@ enum Command {
         handle: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Own-account likes (X restricts this to self).
     Likes {
         handle: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Followers of a user id.
     Followers {
         id: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
     /// Accounts a user id follows.
     Following {
         id: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
     },
 }
 
@@ -520,15 +537,20 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::Feed { tab, max, cursor } => {
+        Command::Feed {
+            tab,
+            max,
+            cursor,
+            filter,
+        } => {
             kind = "tweet_list";
-            let (d, code) = run_feed(&opts, &config, tab, max, cursor).await;
+            let (d, code) = run_feed(&opts, &config, tab, max, cursor, filter).await;
             data = d;
             exit_code = code;
         }
-        Command::Bookmarks { max } => {
+        Command::Bookmarks { max, filter } => {
             kind = "tweet_list";
-            let (d, code) = run_bookmarks(&opts, &config, max).await;
+            let (d, code) = run_bookmarks(&opts, &config, max, filter).await;
             data = d;
             exit_code = code;
         }
@@ -546,6 +568,7 @@ async fn main() -> anyhow::Result<()> {
             min_likes,
             min_retweets,
             cursor,
+            filter,
         } => {
             kind = "tweet_list";
             let q = cli::search::SearchQuery {
@@ -561,7 +584,7 @@ async fn main() -> anyhow::Result<()> {
                 min_likes,
                 min_retweets,
             };
-            let (d, code) = run_search(&opts, &config, q, max, cursor).await;
+            let (d, code) = run_search(&opts, &config, q, max, cursor, filter).await;
             data = d;
             exit_code = code;
         }
@@ -587,9 +610,9 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::List { id, max } => {
+        Command::List { id, max, filter } => {
             kind = "tweet_list";
-            let (d, code) = run_list(&opts, &config, id, max).await;
+            let (d, code) = run_list(&opts, &config, id, max, filter).await;
             data = d;
             exit_code = code;
         }
@@ -599,25 +622,41 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::UserPosts { handle, max } => {
+        Command::UserPosts {
+            handle,
+            max,
+            filter,
+        } => {
             kind = "tweet_list";
-            let (d, code) = run_user_posts(&opts, &config, handle, max).await;
+            let (d, code) = run_user_posts(&opts, &config, handle, max, filter).await;
             data = d;
             exit_code = code;
         }
-        Command::Likes { handle, max } => {
+        Command::Likes {
+            handle,
+            max,
+            filter,
+        } => {
             kind = "tweet_list";
-            let (d, code) = run_likes(&opts, &config, handle, max).await;
+            let (d, code) = run_likes(&opts, &config, handle, max, filter).await;
             data = d;
             exit_code = code;
         }
-        Command::Followers { id, max } => {
+        Command::Followers {
+            id,
+            max,
+            filter: _filter,
+        } => {
             kind = "user_list";
             let (d, code) = run_followers(&opts, &config, id, max).await;
             data = d;
             exit_code = code;
         }
-        Command::Following { id, max } => {
+        Command::Following {
+            id,
+            max,
+            filter: _filter,
+        } => {
             kind = "user_list";
             let (d, code) = run_following(&opts, &config, id, max).await;
             data = d;
@@ -1046,15 +1085,35 @@ fn configured_throttle() -> twr_client::Throttle {
 }
 
 fn finish_tweets(
-    _opts: &OutputOptions,
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
     tweets: Vec<twr_model::Tweet>,
     loop_out: twr_client::TimelineResult,
     max: Option<usize>,
+    do_filter: bool,
+    filter_applied_out: &mut bool,
 ) -> (serde_json::Value, i32) {
     if let Some(path) = cli::ids::default_last_path() {
         let ids: Vec<String> = tweets.iter().map(|t| t.id.clone()).collect();
         let _ = cli::ids::write_last(&path, &ids);
     }
+    let tweets = if do_filter {
+        *filter_applied_out = true;
+        let cfg = twr_filter::FilterConfig::from_json(&serde_json::json!({
+            "mode": config.filter.mode,
+            "topN": config.filter.top_n,
+            "weights": {
+                "likes": config.filter.weights.likes,
+                "retweets": config.filter.weights.retweets,
+                "replies": config.filter.weights.replies,
+                "bookmarks": config.filter.weights.bookmarks,
+                "views_log": config.filter.weights.views_log,
+            },
+        }));
+        twr_filter::filter_tweets(tweets, &cfg)
+    } else {
+        tweets
+    };
     let returned = tweets.len();
     let data = serde_json::to_value(&tweets).unwrap_or_default();
     let mut meta_extra = serde_json::json!({
@@ -1068,6 +1127,8 @@ fn finish_tweets(
     if let Some(m) = max {
         meta_extra["maxRequested"] = serde_json::json!(m);
     }
+    meta_extra["filterApplied"] = serde_json::json!(*filter_applied_out);
+    let _ = opts;
     (serde_json::json!({"tweets": data, "page": meta_extra}), 0)
 }
 
@@ -1077,6 +1138,7 @@ async fn run_feed(
     tab: String,
     max: Option<usize>,
     cursor: Option<String>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
@@ -1098,7 +1160,10 @@ async fn run_feed(
     let vars = serde_json::json!({"includePromotedContent": false, "latestControlAvailable": true, "requestContext": "launch"});
     let out = cli::exec::fetch_tweets_paged(&mut ctx, op, count, cursor, vars, |_| None).await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
@@ -1110,6 +1175,7 @@ async fn run_bookmarks(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     max: Option<usize>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
@@ -1125,7 +1191,10 @@ async fn run_bookmarks(
     let out =
         cli::exec::fetch_tweets_paged(&mut ctx, "Bookmarks", count, None, vars, |_| None).await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
@@ -1139,6 +1208,7 @@ async fn run_search(
     q: cli::search::SearchQuery,
     max: Option<usize>,
     cursor: Option<String>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     let auth = match read_auth(opts) {
         Ok(a) => a,
@@ -1155,7 +1225,10 @@ async fn run_search(
         cli::exec::fetch_tweets_paged(&mut ctx, "SearchTimeline", count, cursor, vars, |_| None)
             .await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
@@ -1244,6 +1317,7 @@ async fn run_list(
     config: &twr_config::TwrConfig,
     id: String,
     max: Option<usize>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     let Some(list_id) = cli::ids::normalize_list_id(&id) else {
         return (
@@ -1272,7 +1346,10 @@ async fn run_list(
     )
     .await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
@@ -1345,6 +1422,7 @@ async fn run_user_posts(
     config: &twr_config::TwrConfig,
     handle: String,
     max: Option<usize>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     // Resolve handle -> user id first, then UserTweets.
     let (udata, code) = run_user(opts, config, handle.clone()).await;
@@ -1368,7 +1446,10 @@ async fn run_user_posts(
     let out =
         cli::exec::fetch_tweets_paged(&mut ctx, "UserTweets", count, None, vars, |_| None).await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
@@ -1381,6 +1462,7 @@ async fn run_likes(
     config: &twr_config::TwrConfig,
     handle: String,
     max: Option<usize>,
+    filter: bool,
 ) -> (serde_json::Value, i32) {
     // Own-account-only per X; noted in schema. Same plumbing as user-posts.
     let (udata, code) = run_user(opts, config, handle.clone()).await;
@@ -1403,7 +1485,10 @@ async fn run_likes(
     let vars = serde_json::json!({"userId": uid});
     let out = cli::exec::fetch_tweets_paged(&mut ctx, "Likes", count, None, vars, |_| None).await;
     match out {
-        Ok((tweets, loop_out)) => finish_tweets(opts, tweets, loop_out, max),
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
