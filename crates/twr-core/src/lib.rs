@@ -5,6 +5,7 @@
 pub mod apply;
 pub mod envelope;
 pub mod error;
+pub mod idempotency;
 pub mod output;
 
 pub use apply::{ambiguous_message, cancelled_data, decide, dry_run_data, ApplyInput, Decision};
@@ -14,5 +15,9 @@ pub use envelope::{
 pub use error::{
     classify_api_code, is_not_found_payload, is_secret_flag, ErrorKind, FailingInput, TwrError,
     RATE_LIMIT_API_CODES, REDACTED, SECRET_FLAGS,
+};
+pub use idempotency::{
+    IdempotencyEntry, IdempotencyStore, PreCheck, WriteState, IDEMPOTENCY_TTL_SECS,
+    UNKNOWN_SUGGESTION,
 };
 pub use output::{new_trace_id, OutputFormat, OutputOptions};
