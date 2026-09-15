@@ -4,13 +4,30 @@
 //! the default `wreq`-based impersonation transport can be swapped for a
 //! `curl-impersonate` subprocess fallback without touching call sites.
 //!
-//! Everything here is a stub — the P0 spike (PLAN.md §9) decides whether this
-//! crate proceeds past a single `UserByScreenName` proof of concept.
+//! Modules: [`headers`] (full `_build_headers` port), [`throttle`]
+//! (per-endpoint token bucket + page-count/jitter math), [`timeline`] (the
+//! `_fetch_timeline` pagination loop), [`wreq_transport`] (default impl).
 
+pub mod headers;
+pub mod throttle;
+pub mod timeline;
 mod wreq_transport;
 pub use wreq_transport::WreqTransport;
 
+pub use headers::{build_headers, Credentials, HeaderInput, Os, BEARER_TOKEN};
+pub use throttle::{jittered_delay_secs, page_count, use_post, BucketConfig, Throttle, POST_OPS};
+pub use timeline::{backoff_delays_secs, fetch_timeline, Page, PageError, TimelineResult};
+
 use async_trait::async_trait;
+
+/// `TWITTER_PROXY` env var (plan §1.2). Read by the transport constructor in
+/// the binary crate; documented here so both layers agree on the name.
+pub const PROXY_ENV_VAR: &str = "TWITTER_PROXY";
+
+/// Read the proxy URL from the environment, if set and non-empty.
+pub fn proxy_from_env() -> Option<String> {
+    std::env::var(PROXY_ENV_VAR).ok().filter(|v| !v.is_empty())
+}
 
 #[async_trait]
 pub trait HttpTransport: Send + Sync {
