@@ -21,6 +21,9 @@ struct Cli {
     /// Strip heavy fields (profile images, media dims, expanded urls).
     #[arg(long, short = 'c', global = true, env = "TWR_COMPACT")]
     compact: bool,
+    /// Show full tweet text in the human table (no 120-char truncation).
+    #[arg(long, global = true, env = "TWR_FULL_TEXT")]
+    full_text: bool,
     /// Project dotted-path fields, e.g. --fields id,text,author.screen_name.
     #[arg(long, global = true, env = "TWR_FIELDS")]
     fields: Option<String>,
@@ -322,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
     opts.no_interactive = cli.no_interactive;
     opts.policy = twr_core::Policy::parse(&cli.policy).unwrap_or_default();
     opts.time_mode = twr_core::TimeMode::parse(&cli.time).unwrap_or_default();
+    opts.full_text = cli.full_text;
 
     // The decision table is live for every invocation: read commands ignore
     // it, write commands (3.4.3/3.4.4) call apply::decide. Referencing it
@@ -683,6 +687,16 @@ async fn main() -> anyhow::Result<()> {
     }
     if !opts.fields.is_empty() {
         data = twr_core::apply_fields(&data, &opts.fields);
+    }
+
+    // Human view: no explicit machine flag → render the table from the same data.
+    if !cli.json && !cli.yaml {
+        let text = render_human(kind, &data, &opts);
+        println!("{text}");
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
     }
 
     let mut meta = Meta::new(opts.trace_id.clone());
@@ -2115,4 +2129,28 @@ fn run_completions(shell: &str) -> anyhow::Result<()> {
     }
     eprintln!("install: save stdout to your shell's completion dir (bash: /etc/bash_completion.d/ or ~/.local/share/bash-completion/; zsh: a dir on $fpath then `compinit`; fish: ~/.config/fish/completions/twr.fish)");
     Ok(())
+}
+
+/// Human renderer: same structs as JSON, table view (plan §0.1).
+fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> String {
+    let tweets: Vec<twr_model::Tweet> = data
+        .get("tweets")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    if !tweets.is_empty() || kind == "tweet_list" {
+        let show_score = tweets.iter().any(|t| t.score.is_some());
+        return cli::table::tweet_table(&tweets, opts.full_text, opts.time_mode, show_score);
+    }
+    if kind == "user" {
+        if let Ok(u) = serde_json::from_value::<twr_model::UserProfile>(data.clone()) {
+            return cli::table::user_card(&u);
+        }
+    }
+    if kind == "tweet_detail" || kind == "article" {
+        if let Ok(t) = serde_json::from_value::<twr_model::Tweet>(data.clone()) {
+            return cli::table::tweet_table(std::slice::from_ref(&t), true, opts.time_mode, false);
+        }
+    }
+    // Fallback for status/doctor/query-ids/auth: pretty JSON (human-readable).
+    serde_json::to_string_pretty(data).unwrap_or_default()
 }

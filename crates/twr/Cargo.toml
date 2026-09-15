@@ -21,6 +21,7 @@ twr-model = { path = "../twr-model" }
 twr-filter = { path = "../twr-filter" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+comfy-table = "7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

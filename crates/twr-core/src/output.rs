@@ -58,6 +58,8 @@ pub struct OutputOptions {
     pub policy: Policy,
     /// Human-table time display (issue #35; machine output always absolute).
     pub time_mode: TimeMode,
+    /// Human table shows full text (no 120-char truncation).
+    pub full_text: bool,
 }
 
 impl OutputOptions {
