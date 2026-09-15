@@ -95,6 +95,10 @@ enum Command {
         /// Re-anchor query IDs + transaction key from a live rescrape.
         #[arg(long)]
         refresh: bool,
+        /// Live probe: real UserByScreenName call for HANDLE (needs session;
+        /// explicit opt-in, touches x.com — this is the P0-4 validation).
+        #[arg(long)]
+        probe_user: Option<String>,
     },
     /// Manage credentials: login/logout/guide.
     Login {
@@ -451,9 +455,12 @@ async fn main() -> anyhow::Result<()> {
             kind = "query-ids";
             data = query_ids_data();
         }
-        Command::Doctor { refresh } => {
+        Command::Doctor {
+            refresh,
+            probe_user,
+        } => {
             kind = "doctor";
-            let (d, code) = doctor_data(refresh, &opts);
+            let (d, code) = doctor_data_probe(refresh, probe_user, &opts, &config).await;
             data = d;
             exit_code = code;
         }
@@ -3003,6 +3010,41 @@ fn login_data_v2aware(
         }),
         0,
     )
+}
+
+/// doctor + optional live P0-4 probe: real UserByScreenName call for HANDLE.
+/// Opt-in only (touches x.com with the user's session). Returns the probe as
+/// an extra check entry; exit follows the worst check.
+async fn doctor_data_probe(
+    refresh: bool,
+    probe_user: Option<String>,
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+) -> (serde_json::Value, i32) {
+    let (mut data, mut code) = doctor_data(refresh, opts);
+    let Some(handle) = probe_user else {
+        return (data, code);
+    };
+    let (udata, ucode) = run_user(opts, config, handle.clone()).await;
+    let entry = if ucode == 0 {
+        code = code.max(0);
+        serde_json::json!({
+            "check": "LIVE_PROBE",
+            "status": "pass",
+            "detail": {"handle": handle, "id": udata.get("id"), "name": udata.get("name")},
+        })
+    } else {
+        code = code.max(ucode);
+        serde_json::json!({
+            "check": "LIVE_PROBE",
+            "status": "fail",
+            "detail": {"handle": handle, "exit": ucode, "error": udata},
+        })
+    };
+    if let Some(checks) = data.get_mut("checks").and_then(|c| c.as_array_mut()) {
+        checks.push(entry);
+    }
+    (data, code)
 }
 
 #[cfg(test)]
