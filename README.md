@@ -1,6 +1,10 @@
 # twr — Agent-First X/Twitter CLI
 
 <div align="center">
+  <img src="assets/twr_illustration.webp" alt="twr — an agent-first Rust CLI that plugs a cookie key into X/Twitter instead of an API key, streaming structured JSON envelopes to another agent">
+</div>
+
+<div align="center">
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
