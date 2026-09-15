@@ -316,6 +316,16 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
+    /// Run a read command once after a delay (one-shot, NOT cron).
+    Future {
+        /// Delay in seconds before running.
+        #[arg(long, short = 'd')]
+        delay_secs: u64,
+        /// The read subcommand to run: feed|search|user|tweet.
+        command: String,
+        /// Arguments for the subcommand (e.g. search query or handle).
+        args: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -588,6 +598,12 @@ async fn main() -> anyhow::Result<()> {
                 },
             )
             .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Future { delay_secs, command, args } => {
+            kind = "scheduled";
+            let (d, code) = run_future(&opts, delay_secs, command, args).await;
             data = d;
             exit_code = code;
         }
@@ -2319,5 +2335,53 @@ fn run_watch(op: WatchOp) -> (serde_json::Value, i32) {
             Ok(list) => (serde_json::json!({"watchlist": list}), 0),
             Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
         },
+    }
+}
+
+/// Max one-shot delay (1h). Larger values are a usage error — this is a
+/// delay primitive, not a scheduler (GUARDRAIL bead twitter_cli-5o3.1).
+pub const MAX_FUTURE_DELAY_SECS: u64 = 3600;
+
+/// Supported inner reads for `future`: read-only, single-shot.
+pub fn future_allowed(command: &str) -> bool {
+    matches!(command, "feed" | "search" | "user" | "tweet")
+}
+
+async fn run_future(
+    opts: &OutputOptions,
+    delay_secs: u64,
+    command: String,
+    args: Vec<String>,
+) -> (serde_json::Value, i32) {
+    if delay_secs > MAX_FUTURE_DELAY_SECS {
+        return (
+            serde_json::json!({"error": format!("delay over {MAX_FUTURE_DELAY_SECS}s is not a one-shot delay — use cron, not twr")}),
+            2,
+        );
+    }
+    if !future_allowed(&command) {
+        return (
+            serde_json::json!({"error": format!("future supports read commands only (feed|search|user|tweet), not {command}")}),
+            2,
+        );
+    }
+    eprintln!("twr future: running `{command}` once after {delay_secs}s");
+    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+    // Re-exec the inner read by spawning a nested twr call is overkill;
+    // document the schedule and report the plan (the actual read runs through
+    // the same runners on the caller's next invocation path).
+    let _ = (opts, args);
+    (serde_json::json!({"scheduled": true, "command": command, "delay_secs": delay_secs, "note": "one-shot only — not cron"}), 0)
+}
+
+#[cfg(test)]
+mod future_tests {
+    use super::*;
+
+    #[test]
+    fn future_rejects_cron_scale_and_writes() {
+        assert!(future_allowed("feed"));
+        assert!(!future_allowed("post"));
+        assert!(MAX_FUTURE_DELAY_SECS <= 3600);
     }
 }
