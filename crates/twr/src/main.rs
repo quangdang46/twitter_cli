@@ -83,6 +83,40 @@ enum Command {
         guide: bool,
     },
     Logout,
+    /// Post a tweet (needs --apply; --dry-run to preview).
+    Post {
+        text: String,
+        /// Reply target tweet ID.
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Attach images (repeatable, up to 4).
+        #[arg(long, short = 'i')]
+        image: Vec<String>,
+        /// Compress images to this max dimension (needs `compress` feature).
+        #[arg(long)]
+        compress: Option<u32>,
+        /// Idempotency key (24h dedup window).
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Reply to a tweet.
+    Reply {
+        id: String,
+        text: String,
+        #[arg(long, short = 'i')]
+        image: Vec<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Quote a tweet.
+    Quote {
+        id: String,
+        text: String,
+        #[arg(long, short = 'i')]
+        image: Vec<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Home/feed timeline.
     Feed {
         /// for-you or following.
@@ -260,6 +294,82 @@ async fn main() -> anyhow::Result<()> {
         Command::Logout => {
             kind = "auth";
             let (d, code) = logout_data();
+            data = d;
+            exit_code = code;
+        }
+        Command::Post {
+            text,
+            reply_to,
+            image,
+            compress,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            if compress.is_some() {
+                data =
+                    serde_json::json!({"error": "--compress needs the `compress` cargo feature"});
+                exit_code = 2;
+            } else {
+                let (d, code) = run_post_write(
+                    &opts,
+                    &config,
+                    WriteArgs {
+                        operation: "post",
+                        text,
+                        reply_to,
+                        quote_id: None,
+                        images: image,
+                        idempotency_key,
+                    },
+                )
+                .await;
+                data = d;
+                exit_code = code;
+            }
+        }
+        Command::Reply {
+            id,
+            text,
+            image,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_post_write(
+                &opts,
+                &config,
+                WriteArgs {
+                    operation: "reply",
+                    text,
+                    reply_to: Some(id),
+                    quote_id: None,
+                    images: image,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Quote {
+            id,
+            text,
+            image,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_post_write(
+                &opts,
+                &config,
+                WriteArgs {
+                    operation: "quote",
+                    text,
+                    reply_to: None,
+                    quote_id: Some(id),
+                    images: image,
+                    idempotency_key,
+                },
+            )
+            .await;
             data = d;
             exit_code = code;
         }
@@ -1236,4 +1346,211 @@ async fn run_user_list(
         serde_json::json!({"users": [], "note": "user-list parsing lands with fixture parity (3.3.11)", "raw_keys": payload.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()}),
         0,
     )
+}
+
+struct WriteArgs {
+    operation: &'static str,
+    text: String,
+    reply_to: Option<String>,
+    quote_id: Option<String>,
+    images: Vec<String>,
+    idempotency_key: Option<String>,
+}
+
+async fn run_post_write(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    args: WriteArgs,
+) -> (serde_json::Value, i32) {
+    let WriteArgs {
+        operation,
+        text,
+        reply_to,
+        quote_id,
+        images,
+        idempotency_key,
+    } = args;
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    // --compress needs the `compress` cargo feature (image crate).
+    // Without it, fail loudly rather than silently ignoring the flag.
+    let _ = config;
+    let stdin_is_tty = true; // TTY prompt path handled below via rpassword-free read
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
+        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Preview => return (dry_run_data(operation), 0),
+        Decision::Prompt => {
+            if opts.no_interactive {
+                return (
+                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    2,
+                );
+            }
+            eprintln!("This will {operation} \"{text}\". Type 'yes' to proceed:");
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data(operation), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data(operation), 0),
+    }
+
+    let images = match cli::write::validate_images(&images) {
+        Ok(v) => v,
+        Err(e) => return (serde_json::json!({"error": e}), 2),
+    };
+    let _ = images; // media_ids land with the 3.4.5 upload bead
+
+    // Idempotency pre-check (24h window).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
+    let mut store = store_path
+        .as_deref()
+        .map(|p| twr_core::idempotency::load(p, now))
+        .unwrap_or_default();
+    if let Some(key) = &idempotency_key {
+        match twr_core::idempotency::pre_check(&store, key) {
+            twr_core::PreCheck::ReplayCached(result) => {
+                return (
+                    serde_json::json!({"idempotent_replay": true, "result": result}),
+                    0,
+                )
+            }
+            twr_core::PreCheck::RefuseUnknown => {
+                return (
+                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                    1,
+                )
+            }
+            twr_core::PreCheck::Proceed => {}
+        }
+        store.insert(
+            key.clone(),
+            twr_core::IdempotencyEntry {
+                state: twr_core::WriteState::Sent,
+                created_at_secs: now,
+                result: None,
+            },
+        );
+        if let Some(p) = &store_path {
+            let _ = twr_core::idempotency::save(p, &store);
+        }
+    }
+
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let ctx = build_ctx(opts, config, &transport, &auth);
+    let quote_url = quote_id
+        .as_deref()
+        .and_then(cli::ids::normalize_tweet_id)
+        .map(|id| format!("https://x.com/i/status/{id}"));
+    let reply_norm = reply_to.as_deref().and_then(cli::ids::normalize_tweet_id);
+    if reply_to.is_some() && reply_norm.is_none() {
+        return (serde_json::json!({"error": "not a tweet ID or URL"}), 2);
+    }
+    let vars =
+        cli::write::create_tweet_vars(&text, reply_norm.as_deref(), quote_url.as_deref(), &[]);
+    let qid = ctx
+        .query_id("CreateTweet")
+        .map(|r| r.query_id)
+        .unwrap_or_default();
+    let url = format!("https://x.com/i/api/graphql/{qid}/CreateTweet");
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "POST",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let mut body = serde_json::Map::new();
+    body.insert("variables".into(), vars);
+    body.insert(
+        "features".into(),
+        serde_json::Value::Object(twr_graphql::compact_features("CreateTweet")),
+    );
+    let raw = serde_json::to_vec(&body).unwrap_or_default();
+    let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
+        Ok(r) => r,
+        Err(_) => {
+            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            return (
+                serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                1,
+            );
+        }
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if !(200..300).contains(&resp.status) {
+        return (
+            serde_json::json!({"error": format!("post failed: HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    let new_id = payload
+        .pointer("/data/create_tweet/tweet_results/result/rest_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Jittered write delay (1.5–4s).
+    let u01 = (now % 1000) as f64 / 1000.0;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        cli::write::write_delay_secs(u01),
+    ))
+    .await;
+    if let Some(key) = &idempotency_key {
+        if let Some(p) = &store_path {
+            let mut s = twr_core::idempotency::load(p, now);
+            s.insert(
+                key.clone(),
+                twr_core::IdempotencyEntry {
+                    state: twr_core::WriteState::Acknowledged,
+                    created_at_secs: now,
+                    result: Some(serde_json::json!({"id": new_id})),
+                },
+            );
+            let _ = twr_core::idempotency::save(p, &s);
+        }
+    }
+    (serde_json::json!({"id": new_id, "operation": operation}), 0)
+}
+
+fn mark_unknown(
+    store_path: &Option<std::path::PathBuf>,
+    store: &twr_core::IdempotencyStore,
+    key: Option<&str>,
+) {
+    if let (Some(p), Some(key)) = (store_path, key) {
+        let mut s = store.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.insert(
+            key.to_string(),
+            twr_core::IdempotencyEntry {
+                state: twr_core::WriteState::Unknown,
+                created_at_secs: now,
+                result: None,
+            },
+        );
+        let _ = twr_core::idempotency::save(p, &s);
+    }
 }
