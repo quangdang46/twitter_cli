@@ -11,6 +11,7 @@
 pub mod headers;
 pub mod throttle;
 pub mod timeline;
+pub mod upload;
 mod wreq_transport;
 pub use wreq_transport::WreqTransport;
 

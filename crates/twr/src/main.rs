@@ -1513,9 +1513,11 @@ async fn run_post_write(
         idempotency_key,
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
-    // --compress needs the `compress` cargo feature (image crate).
-    // Without it, fail loudly rather than silently ignoring the flag.
     let _ = config;
+    // Validate -i up front so even --dry-run fails fast on bad images.
+    if let Err(e) = cli::write::validate_images(&images) {
+        return (serde_json::json!({"error": e}), 2);
+    }
     let stdin_is_tty = true; // TTY prompt path handled below via rpassword-free read
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
@@ -1537,12 +1539,6 @@ async fn run_post_write(
         Decision::Execute => {}
         Decision::Cancelled => return (cancelled_data(operation), 0),
     }
-
-    let images = match cli::write::validate_images(&images) {
-        Ok(v) => v,
-        Err(e) => return (serde_json::json!({"error": e}), 2),
-    };
-    let _ = images; // media_ids land with the 3.4.5 upload bead
 
     // Idempotency pre-check (24h window).
     let now = std::time::SystemTime::now()
@@ -1592,6 +1588,55 @@ async fn run_post_write(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let ctx = build_ctx(opts, config, &transport, &auth);
+    // Upload -i images first (INIT→APPEND→FINALIZE each).
+    let mut media_ids: Vec<String> = Vec::new();
+    for path in &images {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(_) => {
+                return (
+                    serde_json::json!({"error": format!("cannot read image: {path}")}),
+                    7,
+                )
+            }
+        };
+        let mime = match twr_client::upload::mime_for(std::path::Path::new(path)) {
+            Some(m) => m,
+            None => {
+                return (
+                    serde_json::json!({"error": format!("unsupported image: {path}")}),
+                    2,
+                )
+            }
+        };
+        if data.len() as u64 > twr_client::upload::max_bytes_for(mime) {
+            return (
+                serde_json::json!({"error": format!("image too large: {path}")}),
+                2,
+            );
+        }
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: None,
+        });
+        let refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match twr_client::upload::upload_media(&transport, &refs, data, mime).await {
+            Ok(id) => media_ids.push(id),
+            Err(e) => {
+                return (
+                    serde_json::json!({"error": format!("upload failed: {e}")}),
+                    7,
+                )
+            }
+        }
+    }
     let quote_url = quote_id
         .as_deref()
         .and_then(cli::ids::normalize_tweet_id)
@@ -1600,8 +1645,12 @@ async fn run_post_write(
     if reply_to.is_some() && reply_norm.is_none() {
         return (serde_json::json!({"error": "not a tweet ID or URL"}), 2);
     }
-    let vars =
-        cli::write::create_tweet_vars(&text, reply_norm.as_deref(), quote_url.as_deref(), &[]);
+    let vars = cli::write::create_tweet_vars(
+        &text,
+        reply_norm.as_deref(),
+        quote_url.as_deref(),
+        &media_ids,
+    );
     let qid = ctx
         .query_id("CreateTweet")
         .map(|r| r.query_id)
