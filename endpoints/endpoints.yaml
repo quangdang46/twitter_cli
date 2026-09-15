@@ -1,0 +1,42 @@
+# twr per-operation endpoints (plan §7) — read at RUNTIME so operators can
+# hand-patch a stale queryId without a rebuild.
+#
+# Fields per op: queryId (override; empty/absent = use resolver layers),
+# features/toggles (extra flags merged over the consts.rs defaults),
+# rps/burst (per-endpoint token bucket for twr-client's throttle).
+#
+# The queryId values below mirror the shipped baseline (consts.rs). When an ID
+# rots, patch it here first; `twr doctor --refresh` rewrites this file from a
+# live rescrape.
+SearchTimeline:
+  queryId: VhUd6vHVmLBcw0uX-6jMLA
+  rps: 0.5
+  burst: 2
+UserTweets:
+  queryId: q6xj5bs0hapm9309hexA_g
+  rps: 0.5
+  burst: 2
+Followers:
+  queryId: IOh4aS6UdGWGJUYTqliQ7Q
+  rps: 0.3
+  burst: 1
+Following:
+  queryId: zx6e-TLzRkeDO_a7p4b3JQ
+  rps: 0.3
+  burst: 1
+UserByScreenName:
+  queryId: 1VOOyvKkiI3FMmkeDNxM9A
+  rps: 1.0
+  burst: 4
+TweetDetail:
+  queryId: xd_EMdYvB9hfZsZ6Idri0w
+  rps: 1.0
+  burst: 4
+HomeTimeline:
+  queryId: c-CzHF1LboFilMpsx4ZCrQ
+  rps: 0.5
+  burst: 2
+HomeLatestTimeline:
+  queryId: BKB7oi212Fi7kQtCBGE4zA
+  rps: 0.5
+  burst: 2
