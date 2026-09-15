@@ -42,7 +42,9 @@ fn parses_minimal_user_object() {
 fn unavailable_user_maps_to_not_found() {
     let result = serde_json::json!({"__typename": "UserUnavailable"});
     assert!(twr_model::parse_user_result(&result).is_none());
-    assert!(twr_core::is_not_found_payload(&serde_json::json!({"result": result})));
+    assert!(twr_core::is_not_found_payload(
+        &serde_json::json!({"result": result})
+    ));
 }
 
 #[test]
@@ -50,8 +52,7 @@ fn request_shape_is_correct() {
     // qid resolution: baseline layer yields the known UserByScreenName ID.
     let disk = twr_graphql::cache::QueryIdCache::new();
     let extra = twr_graphql::ExtraRotation::new();
-    let resolved =
-        twr_graphql::resolve("UserByScreenName", |_| None, &disk, &extra, 0).unwrap();
+    let resolved = twr_graphql::resolve("UserByScreenName", |_| None, &disk, &extra, 0).unwrap();
     assert_eq!(resolved.query_id, "1VOOyvKkiI3FMmkeDNxM9A");
 
     // Headers carry Bearer + Cookie + Csrf (synthetic creds only).
@@ -75,6 +76,9 @@ fn request_shape_is_correct() {
 
     // GET URL shape: /i/api/graphql/<qid>/<op>?variables=..&features=..
     // (Same one-liner cli::exec::graphql_get_url uses; asserted on shape.)
-    let url = format!("https://x.com/i/api/graphql/{}/UserByScreenName", resolved.query_id);
+    let url = format!(
+        "https://x.com/i/api/graphql/{}/UserByScreenName",
+        resolved.query_id
+    );
     assert!(url.contains("/1VOOyvKkiI3FMmkeDNxM9A/UserByScreenName"));
 }
