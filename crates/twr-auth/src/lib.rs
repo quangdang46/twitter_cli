@@ -124,7 +124,7 @@ impl SessionCookies {
         }
     }
 
-    fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.auth_token.is_some() && self.ct0.is_some()
     }
 }
