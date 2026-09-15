@@ -19,6 +19,7 @@
 //! be minted per request, and it is attached ONLY to [`GATED_OPS`] — every
 //! other GraphQL operation must NOT send it.
 
+pub mod cache;
 mod frames;
 mod math;
 
