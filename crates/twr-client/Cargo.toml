@@ -16,3 +16,7 @@ wreq-util = { version = "0.1", features = ["emulation"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+anyhow = { workspace = true }
+twr-auth = { path = "../twr-auth" }
+twr-graphql = { path = "../twr-graphql" }
+twr-model = { path = "../twr-model" }
