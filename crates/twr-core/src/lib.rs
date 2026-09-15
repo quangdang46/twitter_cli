@@ -7,4 +7,7 @@ pub mod envelope;
 pub mod error;
 
 pub use envelope::Envelope;
-pub use error::{ErrorKind, TwrError};
+pub use error::{
+    classify_api_code, is_not_found_payload, is_secret_flag, ErrorKind, FailingInput, TwrError,
+    RATE_LIMIT_API_CODES, REDACTED, SECRET_FLAGS,
+};
