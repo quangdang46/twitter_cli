@@ -1,0 +1,104 @@
+name: Release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: twr
+
+jobs:
+  build:
+    name: Build (${{ matrix.suffix }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            suffix: linux-x86_64
+            use_cross: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            suffix: linux-aarch64
+            use_cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            suffix: macos-x86_64
+            use_cross: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            suffix: macos-aarch64
+            use_cross: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            suffix: windows-x86_64
+            use_cross: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release -p twr --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release -p twr --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bin_path="target/${{ matrix.target }}/release/${BIN_NAME}"
+          archive="dist/${BIN_NAME}-${{ matrix.suffix }}.tar.gz"
+          tar -czf "$archive" -C "$(dirname "$bin_path")" "$(basename "$bin_path")"
+          ( cd dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256" ) 2>/dev/null \
+            || ( cd dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256" )
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $binPath = "target/${{ matrix.target }}/release/$env:BIN_NAME.exe"
+          $archive = "dist/$env:BIN_NAME-${{ matrix.suffix }}.zip"
+          Compress-Archive -Path $binPath -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          "$hash  $(Split-Path -Leaf $archive)" | Out-File -Encoding ascii "$archive.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.suffix }}
+          path: dist/*
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

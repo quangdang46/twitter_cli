@@ -125,16 +125,24 @@ twr search "x" --policy read_only --json     # read_only scope: writes are impos
 
 ## Installation
 
-> No releases yet — Phase 0/1 in progress. Once binaries ship:
+> No tagged release exists yet — Phase 0/1 is still in progress, so the installer below will fall back to building from source (needs `cargo`) until the first `vX.Y.Z` tag ships prebuilt binaries via CI.
 
 ```bash
-# Planned: curl installer (mirrors our discord-cli's install.sh/install.ps1)
-curl -fsSL "https://raw.githubusercontent.com/<owner>/twitter_cli/main/install.sh" | bash
+# macOS / Linux
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.sh?$(date +%s)" | bash
 
-# Available today: build from source
-git clone https://github.com/<owner>/twitter_cli
+# With PATH auto-update + a post-install self-test
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
+
+# Windows PowerShell
+irm "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.ps1" | iex
+```
+
+```bash
+# From source, manually
+git clone https://github.com/quangdang46/twitter_cli
 cd twitter_cli
-cargo build --release
+cargo build --release -p twr
 ./target/release/twr status --json
 ```
 
