@@ -7,6 +7,9 @@
 //! Everything here is a stub — the P0 spike (PLAN.md §9) decides whether this
 //! crate proceeds past a single `UserByScreenName` proof of concept.
 
+mod wreq_transport;
+pub use wreq_transport::WreqTransport;
+
 use async_trait::async_trait;
 
 #[async_trait]
