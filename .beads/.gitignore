@@ -46,3 +46,14 @@ redirect
 
 # bv (beads viewer) lock file
 .bv.lock
+
+# fsqlite lock/namespace artifacts (newer br versions) not covered by the
+# *.db-* globs above
+beads.db-fsqlite-ns-gate
+beads.db-fsqlite-ns-use
+beads.db-lock-pending
+beads.db-lock-reserved
+beads.db-lock-shared
+beads.db-wal-lock-pending
+beads.db-wal-lock-reserved
+beads.db-wal-lock-shared
