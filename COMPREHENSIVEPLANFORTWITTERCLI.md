@@ -28,9 +28,9 @@ twr status --json                      # first gate: {ok, authenticated, user?};
 twr search "query" --json --max 20     # list -> data[] + pagination.nextCursor
 twr search "query" --json --cursor "<nextCursor>"   # next page
 twr tweet 123 --json                   # detail + replies
-twr post "text" --dry-run --json       # always preview first
-twr post "text" --json --idempotency-key <uuid>     # safe-to-retry write
-twr post "text" --policy read_only     # -> exit 2 POLICY_DENIED, no post sent
+twr post "text" --json                              # no --apply -> automatic preview, network untouched (§5.3)
+twr post "text" --apply --json --idempotency-key <uuid>   # confirmed + safe-to-retry write
+twr post "text" --apply --policy read_only          # -> exit 2, no post sent (policy blocks it regardless of --apply)
 twr schema --json / twr doctor --json  # discovery + diagnostics
 ```
 
@@ -57,7 +57,9 @@ twr schema --json / twr doctor --json  # discovery + diagnostics
 | `constants.py` | 121 | `twr-graphql/src/consts.rs` + `twr-client/src/headers.rs` |
 | `exceptions.py` | 78 | `twr-error` (thiserror + exit codes) |
 
-### 1.1 Command parity matrix (must reach 100% by Phase 1–3)
+### 1.1 Command parity matrix (100% *source command coverage* by Phase 1–3 — see note below)
+
+> "Parity" here means every command below exists with equivalent read/write capability — it does NOT mean identical behavior in every edge case. `twr` intentionally diverges from the Python original wherever the agent contract demands it: the `--apply`/`--dry-run` write-safety model (§5.3), `--policy` gating, exit codes, idempotency semantics, and configurable (not hardcoded) limits are deliberate, documented behavioral changes, not parity gaps to close.
 
 Read: `feed [-t for-you|following]`, `bookmarks [folders [folder_id] [--since]]`, `search [QUERY]`, `tweet ID|URL`, `show INDEX`, `article ID|URL [--markdown]`, `list LIST_ID`, `user H`, `user-posts H`, `likes H`, `followers H`, `following H`, `status`, `whoami`.
 Write: `post TEXT [--reply-to] [-i ×4]`, `reply ID TEXT [-i]`, `quote ID TEXT [-i]`, `delete ID` (confirm), `like/unlike`, `retweet/unretweet`, `favorite/bookmark/unfavorite/unbookmark` (aliases preserved), `follow/unfollow`.
@@ -190,12 +192,14 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 | 0 | success (including dry-run) | parse `data` |
 | 1 | general/auth-resolution failure (config error) | run `twr status`, fix per `suggestion`; do not blind-retry |
 | 2 | usage/policy-denied (missing `--confirm`/`--apply`, bad flags, policy blocked) | fix args or change policy; message format `This will <action> "<target>". Add --confirm to proceed.` (from our discord-cli's `check_confirm()`) |
-| 3 | not-found (user/tweet/list doesn't exist) | verify the ID/handle |
+| 3 | not-found (the *target* genuinely doesn't exist: user/tweet/list ID is real X data that's missing/deleted/suspended) | verify the ID/handle, do not retry |
 | 4 | forbidden/rate-limited (429/88/348/349, 226 automated-behavior) | back off `retryAfterMs` then resume with `--cursor`; partial data ships with `meta.truncated=true` |
 | 5 | network/timeout | exponential-backoff retry |
-| 6 | contract drift (query-ID/transaction/feature/response-shape rot, envelope parse failure) | `twr doctor --refresh` once, then retry once (doctor classifies the drift, §5.4) |
+| 6 | contract drift (a GraphQL 404 caused by a *stale query ID*, not a missing target; feature/toggle rejection; response-shape/parser mismatch; envelope-parse failure) | `twr doctor --refresh` once, then retry once (doctor classifies which layer drifted, §5.4) |
 | 7 | attachment/file-IO (`--input`/`--output`/`-i` media errors) | fix the path/permissions/size |
 | 77 | auth required (401/403, no cookies) | `twr status` → guide login, do not blind-retry |
+
+**Disambiguating the two "404"s (exit 3 vs. exit 6):** GraphQL surfaces two unrelated failures under similar transport codes — an HTTP 404 on the endpoint itself (the query ID is stale/invalid → exit 6, contract drift) vs. a successful HTTP 200 whose payload says the *target* doesn't exist (a `TweetUnavailable`/`UserUnavailable`/tombstone result → exit 3, not-found). `twr-error`'s mapping (§7) must classify on payload shape, never on HTTP status alone — see the `twr-error` unit tests.
 
 ### 5.3 Root flags (every command)
 
@@ -204,13 +208,25 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 --compact/-c             # minimal fields
 --fields <csv>           # projection
 --policy <read_only|engagement|write>   # default write; read_only blocks all writes; engagement allows like/rt/follow/bookmark but blocks post/delete
---dry-run                # write commands: return a DryRun envelope {dry_run:true, operation, validation:"passed"} — never "would_succeed" (no guarantee a later real call succeeds)
---force/--apply          # delete/follow/unfollow: skip confirmation
---no-interactive         # never prompt (CI/agent context); an unresolved decision exits 1
+--dry-run                # explicit preview: return a DryRun envelope {dry_run:true, operation, validation:"passed"} — never "would_succeed" (no guarantee a later real call succeeds)
+--force/--apply          # REQUIRED to actually execute any write (post/reply/quote/delete/like/retweet/bookmark/follow/…) — this is the "safe by default" mechanism (§0.1 #4), not just a convention for delete/follow
+--no-interactive         # never prompt. See the write-command decision table right below — a write with neither --apply nor --dry-run under --no-interactive is a usage error, not a silent action
 --trace-id <id>          # threaded through the whole call (auto-generated uuid if omitted)
 --timeout <s> --max-retries <n>         # override config
 -v/--verbose             # diagnostics to STDERR (never pollutes stdout)
 ```
+
+**Write-command decision table** — resolves what happens when a write is invoked with various combinations of `--apply`/`--dry-run`/`--no-interactive`:
+
+| `--apply` | `--dry-run` | `--no-interactive` | Behavior |
+|---|---|---|---|
+| no | no | no (TTY) | prompt for confirmation; on yes → execute, on no/EOF → exit 0 with a `dry_run`-shaped cancellation note |
+| no | no | yes | **exit 2** (usage/policy-denied) — the call is ambiguous by design; an agent must say which it wants |
+| no | yes | either | run the DryRun preview, exit 0, never touch the network |
+| yes | no | either | execute for real |
+| yes | yes | either | **exit 2** — `--apply` and `--dry-run` are mutually exclusive, this is a usage error |
+
+`failingInput` in error envelopes MUST be redacted before serialization: flags whose values are secrets (`--cookie`, `--auth-token`, `--ct0`, `--proxy` when it embeds credentials) are reported as `{"flag": "--cookie", "value": "[REDACTED]"}`, never the raw value. This is a core contract (§0.1 #8), enforced in `twr-error` construction, not left to call sites.
 
 ### 5.4 Introspection (offline, no auth required)
 
@@ -227,11 +243,11 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 - `post/reply/quote` accept `--idempotency-key` (stored in `~/.twr/idempotency.json` for 24h): this is **client-side, best-effort retry deduplication — NOT server-side exactly-once**. X's unofficial GraphQL has no native idempotency contract like Stripe's. States: `prepared|sent|acknowledged|unknown`. If `unknown` (a timeout after sending, with no way to know whether the server actually posted): **never auto-retry** — return an envelope reporting `unknown` with a suggestion to check manually. The same key in the `acknowledged` state returns the cached result instead of resubmitting — this dedups only within this local state, it does not prove the server saw exactly one request.
 - Write delay of 1.5–4s with jitter between pages (preserving the Python behavior) — an agent cannot tune this below the floor, only raise it.
 - A daily mutation budget, default 200 (following x-cli-vibe) — this is a **local safety policy**, independent of and not implying anything about X's actual server-side rate limit; exceeding it exits 2 with a suggestion. Configurable upward, never disabled entirely.
-- `delete` always prints a preview (text prefix + ID) before running, even with `--apply`.
+- `delete` always prints a preview (text prefix + ID) before running, even with `--apply` — see the write-command decision table in §5.3 for the general `--apply`/`--dry-run`/`--no-interactive` rules that now apply uniformly to every write, not just `delete`/`follow`.
 
 ### 5.6 Pagination contract for agents
 
-- Every list returns `pagination.{nextCursor,hasMore}`. `--cursor ""` means the first page. `--max N` is the total item count desired — the client loops pages internally, dedups, and respects the configured max/safety limit (see §7's amendment on issue #50: no unbounded cap removal).
+- Every list returns `pagination.{nextCursor,hasMore}`. `--cursor ""` means the first page. `--max N` is the total item count desired — the client loops pages internally, dedups, and respects a *configurable safety limit* (default 200, raisable via config/flag up to a bounded ceiling; see §10's note on issue #50 — there is no `maxCount` literal of 200/500 baked into the contract, only "the currently configured limit").
 - If rate-limited mid-fetch: return partial `data` + `pagination.nextCursor` + `meta.truncated=true` + exit 4 → the agent resumes from the cursor without losing data already fetched.
 - `--all` always requires one of `--max-pages K` / `--max N` / an explicit `--unbounded` — no infinite agent loops are allowed by default.
 
@@ -245,19 +261,19 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 | `bookmarks [folders [id] [--since]]` | `tweet_list` / `bookmark_folder_list` | folder timeline filters client-side by `--since` |
 | `search` | `tweet_list` | query builder: `--from/--to/--lang/--since/--until/--has/--exclude/--min-likes/--min-retweets`; `-t Latest` requires a transaction ID (a GATED op) |
 | `tweet ID\|URL` | `tweet_detail` {tweet, replies[], nextCursor} | accepts a URL directly |
-| `show N` | `tweet_detail` | indexes into `last.json`; out-of-range → exit 1 + `failingInput` |
+| `show N` | `tweet_detail` | indexes into `last.json`; out-of-range → exit 3 (not-found, the index doesn't resolve to anything) + `failingInput` |
 | `article` | `article` {articleTitle, articleText(md)} | `--markdown` prints raw markdown; `--output file` |
 | `list ID` | `tweet_list` | cursor support |
 | `user/user-posts/likes/followers/following` | `user` / `tweet_list` / `user_list` | likes are own-account-only (noted in the schema) |
 | `status/whoami` | `status` / `user` | the gate for every agent workflow |
-| `post/reply/quote` | `write_result` {id, url} | `--dry-run` first; up to 4 media (`-i` repeated), `--compress` |
-| `delete/like/unlike/retweet/unretweet/bookmark/follow…` | `write_result` | policy-gated; `delete`/`follow` require `--apply` |
+| `post/reply/quote` | `write_result` {id, url} / `dry_run` without `--apply` | policy-gated; up to 4 media (`-i` repeated), `--compress`; needs `--apply` to actually post (§5.3 decision table) |
+| `delete/like/unlike/retweet/unretweet/bookmark/follow/unfollow` | `write_result` / `dry_run` without `--apply` | policy-gated; every one of these now needs `--apply` uniformly (§5.3), not just `delete`/`follow` |
 
 ---
 
 ## 7. Module implementation spec (what each crate does)
 
-- **twr-error**: `TwrError{kind: ErrorKind(kebab-case), message, suggestion, retryable, retry_after, failing_input}`; `exit_code()` per §5.2; `is_retryable()` (rate/network/5xx); unit tests mapping HTTP status → kind (401→auth, 429/88/348/349→rate, a GraphQL 404→contract-drift, 226→automated + fallback to the legacy `statuses/update.json` endpoint, following bird).
+- **twr-error**: `TwrError{kind: ErrorKind(kebab-case), message, suggestion, retryable, retry_after, failing_input}`; `failing_input` is constructed pre-redacted (§5.3) — never built from raw argv; `exit_code()` per §5.2; `is_retryable()` (rate/network/5xx); unit tests mapping status → kind: 401/403→auth-required, 429/inner 88/348/349→forbidden/rate-limited, an HTTP 404 on the GraphQL endpoint itself→contract-drift, a 200 response whose payload is a tombstone/`*Unavailable` result→not-found (see §5.2's disambiguation note — classify on payload, not transport status), 226→automated-behavior + fallback to the legacy `statuses/update.json` endpoint (following bird).
 - **twr-graphql**: four-layer resolution `shipped baseline → 24h disk cache (~/.twr/query-ids.json) → EXTRA rotation list → live rescrape`; `scrape.rs` walks bundles two levels deep (`main.js` → up to 800 lazy chunks, 16 workers, a strict `queryId/operationName/operationType` regex, following agentic-x); a 404 invalidates that op, triggers one refresh, then one retry; `TWR_QID_<OP>` env vars pin an operation manually; `endpoints.yaml` holds per-op `{queryId, features, toggles, rps, burst}`, read at runtime with no rebuild needed.
 - **twr-tx** (interface `trait RequestProof { fn prepare(&self, op: Operation) -> Option<Proof> }`, current impl `ClientTransactionV1` porting `agentic-x/transaction.py`): fetch the home page → verification metadata + the four loading-animation SVG frames + on-demand indices → key derivation; cached for 1h (`transaction_cache.json`); a fresh ID on EVERY request; attached ONLY to GATED_OPS; unit tests check parity against the Python vectors. If X changes or drops the requirement, swap the implementation — call sites never change.
 - **twr-client**: `wreq` + `Emulation::Chrome13x` + dynamic UA/sec-ch-ua matching; a timeline loop (id dedup, `count=min(remaining+5,40)`, jitter, partial-resume); search/followers/following use POST; a `fetch_me` fallback chain; exponential backoff on 429 (5s base × 3 retries); `TWITTER_PROXY` support; a per-endpoint token bucket driven by `endpoints.yaml`.
@@ -271,15 +287,15 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 
 1. Gate: `twr status --json` before anything else; exit 77 → guide login (browser extraction / env / cookie paste), never echo secrets.
 2. Reading: search/feed/tweet/show/article/list/user*, always start with `--json --max 20`, use the cursor to page further, `--compact` when context is tight.
-3. Writing: ALWAYS `--dry-run` first → user confirms → run for real with `--idempotency-key`; writes need full browser cookies (env-only auth risks a 226).
+3. Writing: without `--apply` every write is already a safe preview (§5.3) — an agent should call it plain first, show the user the preview, then re-run with `--apply --idempotency-key <uuid>` once confirmed; writes need full browser cookies (env-only auth risks a 226).
 4. Errors: the exit→action table (§5.2); wait `retryAfterMs` on a 4; on a 6, run `doctor --refresh` once.
 5. Safety: `--policy read_only` for read-only tasks; no bulk operations; note on proxy usage.
 
 ## 9. Phases + acceptance criteria
 
 - **P0 — Viability spike (1–2 days)**: wreq's request success rate against x.com; `rookie` extraction on Windows/Linux/macOS; a full port of the transaction-derivation logic plus one end-to-end `UserByScreenName` call. This is a go/no-go gate — if it fails, the 15-module port does not start.
-- **P1 — Read MVP + agent contract**: auth resolution + verification, the four-layer query-ID resolver, the parser plus 20+ fixture parity tests, the full agent contract (envelope/exit codes/root flags/introspection), all read commands. Acceptance: `cargo test` green; `--json` output diffs cleanly against the Python original; `doctor`/`schema`/`commands` all pass offline.
-- **P2 — Writes + media + safety hardening**: all write commands plus delays, media upload (raw-binary + chunked GIF + `--compress`), idempotency, policy gating, dry-run. Acceptance: end-to-end tested on a throwaway account; retrying the same idempotency key never double-posts; `read_only` policy blocks every write with exit 2.
+- **P1 — Read MVP + agent contract**: auth resolution + verification, the four-layer query-ID resolver, the parser plus 20+ fixture parity tests, the full agent contract (envelope/exit codes/root flags/introspection), all read commands. Acceptance: `cargo test` green; `--json` output matches the Python original both byte-for-byte on fixtures (`id`/`text`/`author`/`metrics`/`media`/pagination fields — deep-equal) *and* semantically (representative multi-page cursor walks resume to the same set of tweets as Python does, not just single-page snapshot equality); `doctor`/`schema`/`commands` all pass offline.
+- **P2 — Writes + media + safety hardening**: all write commands plus delays, media upload (raw-binary + chunked GIF + `--compress`), idempotency, policy gating, the `--apply`/`--dry-run`/`--no-interactive` decision table (§5.3). Acceptance, stated as the state machine actually guarantees (§5.5) rather than an exactly-once claim: an `acknowledged` idempotency key returns the cached result instead of resubmitting (no duplicate client-initiated POST is made); an `unknown`-state key never auto-retries; `read_only` policy blocks every write with exit 2; every write without `--apply` produces a `dry_run` envelope and touches the network zero times.
 - **P3 — Human polish + SKILL**: tables, article-to-Markdown, filter scoring, shell completions, `SKILL.md`/`SCHEMA.md`, 3-OS CI, curl-installable release (install.sh/ps1).
 - **P4 — Official API v2** (per PR #31, feature-gated) **+ later extras**: SQLite cache/watchlist/expanded `doctor`, a `future`/schedule command, guest-tier reads, `twr mcp`.
 

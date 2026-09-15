@@ -25,9 +25,9 @@ twr status --json                       # gate: are we authenticated? exit 77 if
 twr search "rust lang" --json --max 20  # data[] + pagination.nextCursor
 twr search "rust lang" --json --cursor "<nextCursor>"   # resume
 twr tweet 1234567890 --json             # tweet + replies
-twr post "hello" --dry-run --json       # ALWAYS preview before a real write
-twr post "hello" --json --idempotency-key <uuid>        # safe-to-retry write
-twr post "hello" --policy read_only     # -> exit 2, nothing sent
+twr post "hello" --json                                 # no --apply -> automatic preview, nothing sent
+twr post "hello" --apply --json --idempotency-key <uuid> # confirmed + safe-to-retry write
+twr post "hello" --apply --policy read_only              # -> exit 2, nothing sent (policy wins)
 twr schema --json                       # discover every output shape, offline
 twr doctor --json                       # diagnose auth / query-ID / transport drift
 ```
@@ -92,11 +92,11 @@ twr search "from:nasa" --json --full-text    # advanced search
 twr tweet https://x.com/nasa/status/123 --json
 twr user nasa --json && twr user-posts nasa --json --max 10
 
-# Write (always preview first)
-twr post "shipped v0.1" --dry-run --json
-twr post "shipped v0.1" --json --idempotency-key "$(uuidgen)"
-twr like 1234567890 --json
-twr delete 1234567890 --apply --json         # --apply required, always previews first
+# Write — no --apply means "preview only", for EVERY write command (not just delete)
+twr post "shipped v0.1" --json                                    # preview, network untouched
+twr post "shipped v0.1" --apply --json --idempotency-key "$(uuidgen)"
+twr like 1234567890 --apply --json
+twr delete 1234567890 --apply --json         # --apply required, still always previews first
 
 # Safety
 twr status --json                            # confirm auth before anything else
