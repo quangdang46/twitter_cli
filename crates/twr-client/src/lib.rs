@@ -11,7 +11,11 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait HttpTransport: Send + Sync {
-    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<TransportResponse, TransportError>;
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<TransportResponse, TransportError>;
     async fn post_json(
         &self,
         url: &str,

@@ -1,0 +1,13 @@
+[package]
+name = "twr-tx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "x-client-transaction-id derivation (RequestProof trait + ClientTransactionV1), see COMPREHENSIVEPLANFORTWITTERCLI.md §7"
+
+[dependencies]
+regex = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
