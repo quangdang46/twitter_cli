@@ -7,6 +7,7 @@ members = [
     "crates/twr-tx",
     "crates/twr-auth",
     "crates/twr-model",
+    "crates/twr-config",
 ]
 exclude = ["tmp"]
 
@@ -24,6 +25,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"
 anyhow = "1"
+figment = { version = "0.10", features = ["env", "yaml"] }
 async-trait = "0.1"
 regex = "1"
 sha2 = "0.10"
