@@ -188,7 +188,7 @@ See [`COMPREHENSIVEPLANFORTWITTERCLI.md` §9](COMPREHENSIVEPLANFORTWITTERCLI.md#
 ## Limitations (honest, today)
 
 - **Nothing talks to X yet.** This is a design + scaffold repository; `twr status`/`twr schema` are stubs proving the envelope contract, not real auth checks.
-- **Unofficial surface.** Cookie-based GraphQL access carries the same account-risk profile as any scraper — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §11 for mitigations, but there is no zero-risk mode until the Phase 4 official-API backend lands.
+- **Unofficial surface.** Cookie-based GraphQL access carries the same account-risk profile as any scraper — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §12 for mitigations, but there is no zero-risk mode until the Phase 4 official-API backend lands.
 - **Windows cookie extraction is the highest-risk unknown.** The upstream Python tool has an open, well-documented failure mode here ([issue #28](https://github.com/public-clis/twitter-cli/issues/28)); the P0 spike exists specifically to validate a fix before committing to the full port.
 
 ## FAQ
@@ -200,7 +200,10 @@ Free-tier limits exclude the algorithmic home feed and bookmarks, and paid tiers
 No. It talks to the same internal GraphQL endpoints a browser uses, authenticated with your own session cookies.
 
 **Will my account get banned?**
-Any cookie-based automation carries some risk. `twr` mitigates it with browser-matched TLS fingerprinting, request jitter, and conservative default rate limits — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §11 — but cannot eliminate the risk entirely.
+Any cookie-based automation carries some risk. `twr` mitigates it with browser-matched TLS fingerprinting, request jitter, and conservative default rate limits — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §12 — but cannot eliminate the risk entirely.
+
+**Can I use this to run a daily "fetch news, summarize, post a digest" bot?**
+Yes — that's the intended end-to-end use case, but `twr` is deliberately only the bottom layer of it. It gives you structured reads (`search`/`feed`) and safe writes (`post --apply`); it does not summarize, rank newsworthiness beyond `--filter`'s engagement score, schedule itself, or hold an approval step — that orchestration (an LLM call, a cron job, a Slack approval gate) lives in your own script or agent that calls `twr` as a subprocess/MCP tool. See `COMPREHENSIVEPLANFORTWITTERCLI.md` §11 (Non-goals) for exactly where the line is and why it's drawn there.
 
 **Why Rust instead of forking the Python original?**
 Single static binary, no interpreter/dependency footprint, and a chance to fix the agent-contract gaps (stdout/stderr discipline, exit codes, idempotency) that are hard to retrofit into the existing Python codebase without a breaking rewrite.

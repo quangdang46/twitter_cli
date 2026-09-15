@@ -315,7 +315,35 @@ Error (always on stdout — one stream for the agent to read; debug logs go to s
 | #13 | Video upload (MP4, INIT/APPEND/FINALIZE + STATUS polling) | open | `upload.rs` implements `media_category=tweet_video`, chunked APPEND, and async STATUS polling until `succeeded`, plus `--video/--file/--alt-text` flags; cookie-backend video ships in P2 (following the PR #41 pattern), official-API video in Phase 4 (per PR #31). Processing failures map to `media_upload_error` with a clear suggestion. |
 | #9 | Expose the tool as a library, not just a CLI | open | The Rust equivalent: every workspace crate is a real library (`twr-client`, `twr-model`, `twr-auth` export a stable public API with docs.rs coverage); a PyO3/FFI binding is explicitly out of scope. CLI commands are thin wrappers over a stable library API (e.g. `TwClient::fetch_home_timeline(…)`, mirroring the Python `TwitterClient`), with `examples/` and a `LIB.md`. |
 
-## 11. Risks
+## 11. Non-goals — what `twr` deliberately does NOT do
+
+`twr`'s end-user value is real-world automation like a daily news-digest bot: fetch → filter → summarize → compose → post, running unattended on a schedule. **That workflow is achievable on top of `twr`, but none of its non-transport steps belong inside `twr` itself.** This is a scope boundary, not an oversight — write it down so nobody (including a future implementation pass) quietly grows `twr` into a bot framework and breaks the "clean primitive" property that makes it composable with *any* orchestrator, not just one opinionated pipeline.
+
+```
+   X/Twitter
+       │
+   twr (this repo) ── read: feed/search/bookmarks/user/list → structured JSON/YAML/TOON
+       │             ── write: post/reply/like/... → --dry-run preview, --apply to execute
+       │             ── twr knows nothing about "what's newsworthy" or "how to write a caption"
+       ▼
+   an external orchestrator (a separate project/script/skill, NOT a twr crate)
+       │  - decides which tweets matter (dedup, ranking beyond §7's engagement-score filter)
+       │  - calls an LLM to summarize/compose
+       │  - decides *when* to post (cron/scheduler)
+       │  - holds the human-approval step, if any, before --apply
+       ▼
+   twr post "..." --apply --idempotency-key <uuid>
+```
+
+Concretely, out of scope for `twr` itself:
+- **Summarization / composition** — no LLM calls inside `twr`. It hands back structured tweet data; turning that into "here are today's 5 AI stories" prose is the orchestrator's job.
+- **Newsworthiness ranking beyond `--filter`'s engagement score** (§7 `twr-filter`) — dedup-across-sources, topic clustering, editorial judgment are orchestrator concerns.
+- **Scheduling / cron** — `twr` has no daemon mode. The P5 `future`/schedule idea (§9) is a thin one-shot delay, not a cron replacement; a real daily job belongs in the user's own scheduler (cron, systemd timer, GitHub Actions, a `/loop`-style agent skill) invoking `twr` as a subprocess or MCP tool.
+- **Approval workflows beyond the `--apply`/`--dry-run`/prompt mechanics already in §5.3** — if an orchestrator wants Slack-approval-before-posting, that's orchestrator plumbing, not a `twr` flag.
+
+Why this boundary matters: it's the same reason `--policy`/`--dry-run`/idempotency exist — `twr` is meant to be the safe, boring, well-tested layer that *any* automation (a daily-digest bot today, a completely different workflow tomorrow) can build on without `twr` ever needing to change. The moment `twr` starts making editorial decisions, it stops being a reusable primitive and becomes a single-purpose bot that happens to be written in Rust.
+
+## 12. Risks
 
 1. Cross-platform cookie decryption — validated in the P0 spike, with the cookie-paste fallback (Method C) as a permanent safety net.
 2. Transaction-ID / query-ID rot — `doctor --refresh`, an unambiguous exit code 6, `TWR_QID_*` manual pins.
