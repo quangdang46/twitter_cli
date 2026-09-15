@@ -320,6 +320,16 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
+    /// Today's headlines (trending-search fallback until the Search
+    /// Navigation surface is reverse-engineered; issue #47).
+    Headlines {
+        /// Optional query (default: trending approximation).
+        query: Option<String>,
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
+    },
     /// Run a read command once after a delay (one-shot, NOT cron).
     Future {
         /// Delay in seconds before running.
@@ -728,6 +738,12 @@ async fn main() -> anyhow::Result<()> {
         } => {
             kind = "user_list";
             let (d, code) = run_followers(&opts, &config, id, max).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Headlines { query, max, filter } => {
+            kind = "headline_list";
+            let (d, code) = run_headlines(&opts, &config, query, max, filter).await;
             data = d;
             exit_code = code;
         }
@@ -2425,6 +2441,38 @@ async fn run_future(
     let _ = (opts, args);
     (
         serde_json::json!({"scheduled": true, "command": command, "delay_secs": delay_secs, "note": "one-shot only — not cron"}),
+        0,
+    )
+}
+
+/// Headlines (issue #47): trending-search approximation until the Search
+/// Navigation surface is reverse-engineered. Documented as fallback, not
+/// the real feature. Output type `headline_list`.
+async fn run_headlines(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    query: Option<String>,
+    max: Option<usize>,
+    filter: bool,
+) -> (serde_json::Value, i32) {
+    let q = query.unwrap_or_else(|| "min_faves:1000".into());
+    let sq = cli::search::SearchQuery {
+        query: q.clone(),
+        product: cli::search::SearchProduct::Top,
+        ..Default::default()
+    };
+    let (data, code) = run_search(opts, config, sq, max, None, filter).await;
+    if code != 0 {
+        return (data, code);
+    }
+    // Reshape tweet_list data into headline_list (ranked titles).
+    let tweets = data.get("tweets").cloned().unwrap_or_default();
+    (
+        serde_json::json!({
+            "headlines": tweets,
+            "query": q,
+            "fallback": "trending-search approximation; native Search Navigation surface not yet reverse-engineered",
+        }),
         0,
     )
 }
