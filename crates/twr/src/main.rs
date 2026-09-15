@@ -421,6 +421,18 @@ fn schema_data() -> serde_json::Value {
             {"name": "doctor", "type": "doctor"},
             {"name": "login", "type": "auth"},
             {"name": "logout", "type": "auth"},
+            {"name": "feed", "type": "tweet_list"},
+            {"name": "bookmarks", "type": "tweet_list"},
+            {"name": "search", "type": "tweet_list"},
+            {"name": "tweet", "type": "tweet_detail"},
+            {"name": "show", "type": "tweet_detail"},
+            {"name": "article", "type": "article"},
+            {"name": "list", "type": "tweet_list"},
+            {"name": "user", "type": "user"},
+            {"name": "user-posts", "type": "tweet_list"},
+            {"name": "likes", "type": "tweet_list"},
+            {"name": "followers", "type": "user_list"},
+            {"name": "following", "type": "user_list"},
         ]
     })
 }
@@ -435,6 +447,18 @@ fn commands_data() -> serde_json::Value {
         {"name": "doctor", "type": "doctor", "desc": "Health checks (--refresh re-anchors)"},
         {"name": "login", "type": "auth", "desc": "Login (--cookie/--guide)"},
         {"name": "logout", "type": "auth", "desc": "Clear saved session"},
+        {"name": "feed", "type": "tweet_list", "desc": "Home/feed timeline"},
+        {"name": "bookmarks", "type": "tweet_list", "desc": "Own bookmarks"},
+        {"name": "search", "type": "tweet_list", "desc": "Search with operator flags"},
+        {"name": "tweet", "type": "tweet_detail", "desc": "Single tweet by ID/URL"},
+        {"name": "show", "type": "tweet_detail", "desc": "Nth item of last list"},
+        {"name": "article", "type": "article", "desc": "Long-form article"},
+        {"name": "list", "type": "tweet_list", "desc": "List timeline"},
+        {"name": "user", "type": "user", "desc": "Profile by handle"},
+        {"name": "user-posts", "type": "tweet_list", "desc": "Posts by handle"},
+        {"name": "likes", "type": "tweet_list", "desc": "Own-account likes"},
+        {"name": "followers", "type": "user_list", "desc": "Followers of user id"},
+        {"name": "following", "type": "user_list", "desc": "Following of user id"},
     ])
 }
 
