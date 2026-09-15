@@ -947,6 +947,27 @@ fn doctor_data(refresh: bool, opts: &OutputOptions) -> (serde_json::Value, i32) 
         "detail": "wreq Chrome-impersonation client constructs (live fingerprint probe is manual: cargo test -p twr-client -- --ignored)",
     }));
 
+    // CACHE: sqlite reachable + counts (independent check, never conflated).
+    match twr_cache::default_db_path() {
+        None => checks.push(serde_json::json!({
+            "check": "CACHE",
+            "status": "warn",
+            "suggestion": "no home dir — cache unavailable",
+        })),
+        Some(path) => match twr_cache::open(&path).and_then(|c| twr_cache::health(&c).map_err(|e| e)) {
+            Ok(h) => checks.push(serde_json::json!({
+                "check": "CACHE",
+                "status": "pass",
+                "detail": format!("tweets={} media={} watch={} wal={}", h.tweet_count, h.media_count, h.watch_count, h.wal_mode),
+            })),
+            Err(e) => checks.push(serde_json::json!({
+                "check": "CACHE",
+                "status": "fail",
+                "suggestion": format!("cache db failed: {e}"),
+            })),
+        },
+    }
+
     let _ = opts;
     (
         serde_json::json!({"checks": checks, "refresh_requested": refresh}),
