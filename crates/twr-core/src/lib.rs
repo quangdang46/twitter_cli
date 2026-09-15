@@ -3,6 +3,7 @@
 //! Envelope + error + output-flag contract from `PLAN.md` §5 (Agent Contract).
 
 pub mod apply;
+pub mod budget;
 pub mod envelope;
 pub mod error;
 pub mod idempotency;
@@ -10,6 +11,9 @@ pub mod output;
 pub mod policy;
 
 pub use apply::{ambiguous_message, cancelled_data, decide, dry_run_data, ApplyInput, Decision};
+pub use budget::{
+    BudgetCheck, MutationLog, BUDGET_ENV_VAR, DEFAULT_DAILY_BUDGET, MIN_DAILY_BUDGET,
+};
 pub use envelope::{
     apply_compact, apply_fields, emit, parse_fields, render_json, Envelope, Meta, Pagination,
 };

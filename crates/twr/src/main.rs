@@ -1519,6 +1519,19 @@ async fn run_post_write(
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
+    // Budget BEFORE the gate: exhausted budget exits 2 without side effects.
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
     // Policy BEFORE the decision table: read_only-scoped agents cannot post even with --apply.
     if !opts.policy.allows(operation) {
         return (
@@ -1732,6 +1745,9 @@ async fn run_post_write(
             let _ = twr_core::idempotency::save(p, &s);
         }
     }
+    if let Some(path) = twr_core::budget::default_log_path() {
+        twr_core::budget::record(&path, &twr_core::budget::today_utc());
+    }
     (serde_json::json!({"id": new_id, "operation": operation}), 0)
 }
 
@@ -1817,6 +1833,18 @@ async fn run_engage(
     preview: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
     if !opts.policy.allows(cmd) {
         return (serde_json::json!({"error": opts.policy.denial(cmd)}), 2);
     }
@@ -1946,6 +1974,9 @@ async fn run_engage(
     .await;
     if !ok {
         return (serde_json::json!({"error": format!("{cmd} failed")}), 6);
+    }
+    if let Some(path) = twr_core::budget::default_log_path() {
+        twr_core::budget::record(&path, &twr_core::budget::today_utc());
     }
     if let (Some(key), Some(p)) = (&idempotency_key, &store_path) {
         let mut s = twr_core::idempotency::load(p, now);
