@@ -6,6 +6,8 @@ license.workspace = true
 description = "Credential resolution for twr: browser cookie extraction (rookie) + manual cookie-string fallback"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]

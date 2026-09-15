@@ -9,6 +9,23 @@
 //! cookie value. Extraction results are reported only as redacted booleans
 //! (`found` / `*_present`). No network requests are made here.
 
+pub mod guide;
+pub mod resolve;
+pub mod session;
+pub mod verify;
+
+pub use guide::{needs_first_run_wizard, FIRST_RUN_HINT, LOGIN_GUIDE};
+pub use resolve::{
+    browser_order, read_env, resolve, AuthSource, EnvInput, FlagInput, ResolvedAuth,
+};
+pub use session::{
+    clear as clear_session, default_session_path, load as load_session, save as save_session,
+    SaveError, SaveOutcome, SessionStatus,
+};
+pub use verify::{
+    classify_verify_status, should_reattempt_once, VerifyOutcome, VERIFY_FAILURE_EXIT_CODE,
+};
+
 use std::collections::HashMap;
 
 /// The two cookie names twr cares about for X/Twitter session auth.
