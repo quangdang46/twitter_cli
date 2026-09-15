@@ -1,0 +1,12 @@
+[package]
+name = "twr-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Credential resolution for twr: browser cookie extraction (rookie) + manual cookie-string fallback"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+rookie = "0.5"

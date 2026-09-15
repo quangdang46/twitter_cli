@@ -5,6 +5,7 @@ members = [
     "crates/twr-core",
     "crates/twr-client",
     "crates/twr-tx",
+    "crates/twr-auth",
 ]
 exclude = ["tmp"]
 
