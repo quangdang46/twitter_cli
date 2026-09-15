@@ -954,7 +954,7 @@ fn doctor_data(refresh: bool, opts: &OutputOptions) -> (serde_json::Value, i32) 
             "status": "warn",
             "suggestion": "no home dir — cache unavailable",
         })),
-        Some(path) => match twr_cache::open(&path).and_then(|c| twr_cache::health(&c).map_err(|e| e)) {
+        Some(path) => match twr_cache::open(&path).and_then(|c| twr_cache::health(&c)) {
             Ok(h) => checks.push(serde_json::json!({
                 "check": "CACHE",
                 "status": "pass",
