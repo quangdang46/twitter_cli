@@ -83,3 +83,22 @@ fixing the admin/rookie path), P0-4 can proceed.
   limitation, not something introduced here, but worth fixing properly (UTF-16
   offset translation) if article rendering on emoji-heavy content ever comes
   up as a real bug report.
+
+## P4 (official API v2 backend) — deferred, needs human decisions first
+
+Beads `twitter_cli-5o3.6.1` (OAuth2), `6.2` (dual-backend routing), `6.3`
+(video upload) were NOT implemented in the autonomous pass because each
+needs an input only a human can provide:
+
+1. **X developer account + app credentials.** OAuth2 user-context requires a
+   real X developer app (client ID/secret, callback URL, approved access
+   tier). No agent can or should create that.
+2. **Backend-choice confirmation.** PR #31's dual-backend shape (which
+   commands route where, `--backend` default) is a product decision with
+   ban-risk trade-off implications (cookie vs. official API) that SKILL.md
+   must then document honestly.
+3. **Video fixtures.** Cookie-backend video (PR #41 pattern) also needs a
+   throwaway account to verify INIT/APPEND/FINALIZE + STATUS polling.
+
+When those exist, 6.1→6.2→6.3 implement in order behind
+`--backend api-v2` (feature-gated, cookie backend stays default).
