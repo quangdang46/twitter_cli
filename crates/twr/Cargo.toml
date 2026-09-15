@@ -13,6 +13,10 @@ path = "src/main.rs"
 [dependencies]
 twr-core = { path = "../twr-core" }
 twr-client = { path = "../twr-client" }
+twr-auth = { path = "../twr-auth" }
+twr-config = { path = "../twr-config" }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 anyhow = { workspace = true }
