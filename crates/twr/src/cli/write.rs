@@ -466,6 +466,79 @@ mod tests {
         assert!(classify_edit_rejection("something entirely different").is_none());
     }
 
+    /// Bead o1l.4.4 §1 — request-body inspection (not just response
+    /// parsing): `disallowed_reply_options` must be present AND null
+    /// (omitting it is the silent-empty-tweet_results failure mode), and
+    /// over-length text must route for post AND quote alike (upstream
+    /// PR #64's lesson — #60 routed only create_tweet).
+    #[test]
+    fn p44_note_body_inspection_and_routing() {
+        let v = note_tweet_vars("long text", &[], None, None).unwrap();
+        assert!(
+            v.get("disallowed_reply_options")
+                .is_some_and(|x| x.is_null()),
+            "key present with null value, not omitted, not non-null"
+        );
+        // Over-threshold routes for any plain-post body…
+        assert!(needs_note_tweet(&"x".repeat(281)));
+        assert!(!needs_note_tweet(&"x".repeat(280)));
+        // …while long reply/quote FAIL CLOSED (UNCONFIRMED vars shape —
+        // Rettiwt postNote has no reply/quote path, so no guessing).
+        assert!(note_tweet_vars(&"x".repeat(281), &[], Some("123"), None).is_err());
+        assert!(note_tweet_vars(&"x".repeat(281), &[], None, Some("456")).is_err());
+        // All three known response envelopes parse (fail-closed otherwise).
+        for (payload, want) in [
+            (
+                serde_json::json!({"data": {"create_tweet": {"tweet_results": {"result": {"rest_id": "1"}}}}}),
+                "1",
+            ),
+            (
+                serde_json::json!({"data": {"notetweet_create": {"notetweet_results": {"result": {"rest_id": "2"}}}}}),
+                "2",
+            ),
+            (
+                serde_json::json!({"data": {"create_note_tweet": {"tweet_results": {"result": {"rest_id": "3"}}}}}),
+                "3",
+            ),
+        ] {
+            assert_eq!(parse_note_tweet_id(&payload).as_deref(), Some(want));
+        }
+        assert!(parse_note_tweet_id(&serde_json::json!({"data": {}})).is_none());
+    }
+
+    /// Bead o1l.4.4 §2 — edit taxonomy: three rejection classes produce
+    /// three DISTINCT codes with non-empty suggestions (not one generic
+    /// edit_failed catch-all); unknown messages fall through to None so
+    /// the caller uses the generic from_api_code path.
+    #[test]
+    fn p44_edit_taxonomy_codes_and_suggestions_distinct() {
+        let (c1, s1) = classify_edit_rejection("Tweet not eligible for editing").unwrap();
+        let (c2, s2) = classify_edit_rejection("edit window expired").unwrap();
+        let (c3, s3) = classify_edit_rejection("edit count exhausted").unwrap();
+        assert_ne!(c1, c2);
+        assert_ne!(c2, c3);
+        assert_ne!(c1, c3);
+        for s in [s1, s2, s3] {
+            assert!(!s.is_empty(), "every taxonomy case carries a suggestion");
+        }
+        assert!(classify_edit_rejection("something entirely different").is_none());
+    }
+
+    /// Bead o1l.4.4 §3 — poll attach-shape (NOT an options-validation
+    /// matrix: bead o1l.4.3 shipped `--card-uri` passthrough because v11
+    /// create_card is UNCONFIRMED, so there are no client-side options to
+    /// validate — the 2-4 options / 25-char / 5-10080-min matrix belongs
+    /// to the future native-create bead). What IS covered: a provisioned
+    /// URI attaches verbatim on the CreateTweet vars, and absent means
+    /// absent (no empty-string key).
+    #[test]
+    fn p44_poll_card_uri_attach_shape() {
+        let v = create_tweet_vars_full("hi", None, None, &[], Some("card://123"), None);
+        assert_eq!(v["card_uri"], "card://123");
+        let bare = create_tweet_vars_full("hi", None, None, &[], None, None);
+        assert!(bare.get("card_uri").is_none());
+    }
+
     #[test]
     fn parse_note_tweet_id_covers_all_three_envelope_shapes() {
         let a = serde_json::json!({"data": {"create_tweet": {"tweet_results": {"result": {"rest_id": "1"}}}}});

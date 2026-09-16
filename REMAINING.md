@@ -120,5 +120,6 @@ for this mutation) and fail closed with a usage error rather than guess.
 Explicitly excluded: monetization/Ads/Jobs/Grok/Spaces-live/
 Communities-create (§13.6) — no "daily digest bot" use case, or
 fundamentally stateful/real-time in a way `twr`'s one-shot command model
-doesn't fit. `EditTweet`, poll creation, and DM (read + send) remain
-not-yet-started.
+doesn't fit. `EditTweet` (CreateTweet+edit_options), poll `--card-uri`
+passthrough, and DM (read + send) are code-shipped — live `--apply`
+for all three is Premium/account-gated (beads o1l.4.2/.4.3/.5.3).
