@@ -4179,6 +4179,16 @@ async fn run_list_write(
         locale: &ctx.locale,
         transaction_id: None,
     });
+    let mut headers = headers;
+    // Rettiwt sends a list-context Referer per mutation (create:
+    // `https://x.com/i/lists/create`; update/delete:
+    // `https://x.com/i/lists/<id>/info`). 214 root cause still UNRESOLVED —
+    // this is variable #2 after the in-body queryId below; DevTools capture
+    // of x.com/i/lists/create is the ground truth if this also fails.
+    headers.insert(
+        "Referer".into(),
+        "https://x.com/i/lists/create".into(),
+    );
     let refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -4189,6 +4199,14 @@ async fn run_list_write(
         "features".into(),
         serde_json::Value::Object(twr_graphql::compact_features(op)),
     );
+    // Rettiwt-shaped body: list mutations send `queryId` INSIDE the POST
+    // body alongside variables+features (all other twr mutations send only
+    // variables+features — the queryId lives in the URL path alone).
+    // Rettiwt `List.create/delete/update/addMember` verbatim; whether the
+    // persisted-query validation REQUIRES it is unconfirmed, but sending it
+    // matches the one working caller verbatim and costs nothing.
+    // 214 root cause still UNRESOLVED — DevTools capture ground truth.
+    body.insert("queryId".into(), serde_json::json!(qid));
     let raw = serde_json::to_vec(&body).unwrap_or_default();
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,

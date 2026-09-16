@@ -188,29 +188,23 @@ pub const DEFAULT_FEATURES: &[(&str, bool)] = &[
     ("responsive_web_enhance_cards_enabled", false),
 ];
 
-/// Per-op feature OVERRIDES for ops whose persisted query declares a
-/// narrower feature schema than the repo defaults. X validates `features`
-/// strictly per persisted query: sending the full 16-flag default bundle to
-/// an op that declares fewer flags is a 214 DecodeException (LIVE-PROVEN
-/// 2026-09-16: CreateList + ListSubscribe rejected with code 214 while the
-/// same session's mute/unmute 1.1 REST calls succeeded — auth was fine,
-/// the feature bundle was not).
+/// Per-op feature OVERRIDES: narrower schema than the repo defaults, taken
+/// VERBATIM from Rettiwt-API `ListRequests` (a live-shaped working caller:
+/// e.g. its `create()` sends profile_label=true, redirect=FALSE,
+/// tipjar=false, verified=false, skip_user_profile_image=false,
+/// timeline_nav=true).
 ///
-/// Deck source: twitter-internal-api-doc `GraphQL.json` per-op
-/// `metadata.featureSwitches` + `featureSwitch` values (the deck records
-/// exactly which flags each persisted query declares, and each flag's
-/// value). An op listed here sends ONLY its deck-declared true-valued
-/// flags — `compact_features` consults this FIRST and skips the defaults.
-/// Ops NOT listed here keep the old behavior (defaults + extras).
-///
-/// Covered: CreateList, UpdateList, ListAddMember, ListRemoveMember,
-/// ListSubscribe, ListUnsubscribe, UpdatePinnedTimelines (all declare the
-/// same 5-flag schema: profile_label...=true,
-/// responsive_web_profile_redirect_enabled=true,
-/// rweb_tipjar...=false→stripped, verified_phone...=false→stripped,
-/// responsive_web_graphql_timeline_navigation_enabled=true — i.e. exactly
-/// 3 true flags on the wire). DeleteList declares NO features at all
-/// (empty schema — sends `{}`).
+/// NOT a proven 214 fix — schema hygiene only. Evidence against the
+/// strict-features theory: PinTweet sends the full 16-flag defaults and
+/// succeeds live on the same session that 214s CreateList. The deck
+/// `GraphQL.json` even disagrees with Rettiwt on one flag here
+/// (deck says redirect=true, Rettiwt sends false); Rettiwt wins because it
+/// is a working caller and the deck is a static capture. The 214 root
+/// cause is still UNRESOLVED — DevTools capture of x.com/i/lists/create
+/// (URL + Request Payload variables + features) is ground truth.
+/// `compact_features` consults this FIRST and skips defaults/extras for
+/// listed ops. DeleteList sends `{}` (deck declares zero features;
+/// Rettiwt's delete sends no features key at all).
 pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, bool)]> {
     match operation {
         "CreateList"
@@ -221,9 +215,13 @@ pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, boo
         | "ListUnsubscribe"
         | "UpdatePinnedTimelines" => Some(&[
             ("profile_label_improvements_pcf_label_in_post_enabled", true),
-            ("responsive_web_profile_redirect_enabled", true),
+            ("responsive_web_profile_redirect_enabled", false),
             ("rweb_tipjar_consumption_enabled", false),
             ("verified_phone_label_enabled", false),
+            (
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled",
+                false,
+            ),
             ("responsive_web_graphql_timeline_navigation_enabled", true),
         ]),
         "DeleteList" => Some(&[]),
@@ -373,9 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn list_mutations_use_deck_schema_not_defaults() {
-        // The 214 fix: deck-declared 3-true-flag schema, none of the 16
-        // repo defaults (e.g. view_counts_everywhere must be ABSENT).
+    fn list_mutations_use_rettiwt_schema_not_defaults() {
+        // Schema hygiene (NOT a proven 214 fix): Rettiwt-verbatim
+        // 2-true-flag schema, none of the 16 repo defaults (e.g.
+        // view_counts_everywhere must be ABSENT).
         for op in [
             "CreateList",
             "UpdateList",
@@ -386,10 +385,13 @@ mod tests {
             "UpdatePinnedTimelines",
         ] {
             let f = compact_features(op);
-            assert_eq!(f.len(), 3, "{op}: {f:?}");
+            assert_eq!(f.len(), 2, "{op}: {f:?}");
             assert!(f.contains_key("profile_label_improvements_pcf_label_in_post_enabled"));
-            assert!(f.contains_key("responsive_web_profile_redirect_enabled"));
             assert!(f.contains_key("responsive_web_graphql_timeline_navigation_enabled"));
+            assert!(
+                !f.contains_key("responsive_web_profile_redirect_enabled"),
+                "{op}"
+            );
             assert!(
                 !f.contains_key("view_counts_everywhere_api_enabled"),
                 "{op}"
