@@ -1971,13 +1971,72 @@ async fn run_user_list(
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
-    // Best-effort user extraction: walk timeline instructions for user results.
     let _ = config;
     let _ = opts;
-    (
-        serde_json::json!({"users": [], "note": "user-list parsing lands with fixture parity (3.3.11)", "raw_keys": payload.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()}),
-        0,
-    )
+    (extract_user_list(&payload, max), 0)
+}
+
+/// Pure extraction from a Followers/Following GraphQL payload -- split out
+/// from `run_user_list` so it's unit-testable without a live transport.
+///
+/// Real shape (confirmed live against x.com, NASA's followers, 2026-09-16):
+/// `data.user.result.timeline.timeline.instructions[type=TimelineAddEntries]
+/// .entries[].content.itemContent.user_results.result` -- the same object
+/// shape `twr_model::parse_user_result` already handles (`rest_id` + legacy
+/// fallback, no `core{}` needed). The Bottom cursor lives on a sibling entry
+/// whose `content.cursorType == "Bottom"`, exactly like the tweet timeline.
+fn extract_user_list(payload: &serde_json::Value, max: Option<usize>) -> serde_json::Value {
+    let instructions = payload
+        .get("data")
+        .and_then(|d| d.get("user"))
+        .and_then(|u| u.get("result"))
+        .and_then(|r| r.get("timeline"))
+        .and_then(|t| t.get("timeline"))
+        .and_then(|t| t.get("instructions"))
+        .and_then(|i| i.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut users: Vec<twr_model::UserProfile> = Vec::new();
+    let mut next_cursor: Option<String> = None;
+    for instruction in &instructions {
+        if instruction.get("type").and_then(|t| t.as_str()) != Some("TimelineAddEntries") {
+            continue;
+        }
+        let Some(entries) = instruction.get("entries").and_then(|e| e.as_array()) else {
+            continue;
+        };
+        for entry in entries {
+            let content = entry.get("content").unwrap_or(&serde_json::Value::Null);
+            if content.get("cursorType").and_then(|c| c.as_str()) == Some("Bottom") {
+                next_cursor = content
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                continue;
+            }
+            let Some(result) = content
+                .get("itemContent")
+                .and_then(|ic| ic.get("user_results"))
+                .and_then(|ur| ur.get("result"))
+            else {
+                continue;
+            };
+            if let Some(profile) = twr_model::parse_user_result(result) {
+                users.push(profile);
+            }
+        }
+    }
+
+    let returned = users.len();
+    let mut data = serde_json::json!({
+        "users": users,
+        "page": {"returned": returned, "maxRequested": max, "truncated": false},
+    });
+    if let Some(cursor) = next_cursor {
+        data["page"]["nextCursor"] = serde_json::Value::String(cursor);
+    }
+    data
 }
 
 struct WriteArgs {
@@ -2643,10 +2702,19 @@ async fn run_headlines(
     max: Option<usize>,
     filter: bool,
 ) -> (serde_json::Value, i32) {
-    let q = query.unwrap_or_else(|| "min_faves:1000".into());
+    // Default query: X's server-side Top ranking does not reliably honor a
+    // bare "min_faves:N" operator-only query for the internal API's
+    // top-tweets/suggested surface (live-verified 2026-09-16: bare
+    // "min_faves:1000" on Top returns [] while keyword queries and the same
+    // operator query on Latest return data) -- likely a server-side
+    // suggestion-pool behavior, not a transport/parse bug. Use a common-word
+    // base query so the Top product always has a real pool, then apply the
+    // engagement bar client-side via min_likes (same operator, same intent).
+    let q = query.unwrap_or_else(|| "news lang:en".into());
     let sq = cli::search::SearchQuery {
         query: q.clone(),
         product: cli::search::SearchProduct::Top,
+        min_likes: Some(1000),
         ..Default::default()
     };
     let (data, code) = run_search(opts, config, sq, max, None, filter).await;
@@ -3162,5 +3230,83 @@ mod future_tests {
         assert!(future_allowed("feed"));
         assert!(!future_allowed("post"));
         const { assert!(MAX_FUTURE_DELAY_SECS <= 3600) }
+    }
+}
+
+#[cfg(test)]
+mod user_list_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Mirrors the real Followers/Following GraphQL shape captured live
+    /// against x.com on 2026-09-16 (NASA's followers): a `TimelineAddEntries`
+    /// instruction with `TimelineUser` items plus a Bottom-cursor sibling.
+    fn payload_with(users: Vec<serde_json::Value>, cursor: &str) -> serde_json::Value {
+        let mut entries: Vec<serde_json::Value> = users
+            .into_iter()
+            .map(|u| {
+                json!({
+                    "content": {
+                        "__typename": "TimelineTimelineItem",
+                        "itemContent": {
+                            "__typename": "TimelineUser",
+                            "user_results": { "result": u }
+                        }
+                    }
+                })
+            })
+            .collect();
+        entries.push(json!({
+            "content": { "__typename": "TimelineTimelineCursor", "cursorType": "Bottom", "value": cursor }
+        }));
+        json!({
+            "data": { "user": { "result": { "timeline": { "timeline": {
+                "instructions": [
+                    { "type": "TimelineClearCache" },
+                    { "type": "TimelineAddEntries", "entries": entries }
+                ]
+            }}}}}
+        })
+    }
+
+    fn spacex() -> serde_json::Value {
+        json!({
+            "rest_id": "34743251",
+            "legacy": { "screen_name": "SpaceX", "name": "SpaceX", "followers_count": 41898624 }
+        })
+    }
+
+    #[test]
+    fn extracts_real_shaped_users_and_bottom_cursor() {
+        let payload = payload_with(vec![spacex()], "0|NEXT");
+        let data = extract_user_list(&payload, Some(3));
+        assert_eq!(data["users"][0]["screen_name"], "SpaceX");
+        assert_eq!(data["users"][0]["followers_count"], 41898624);
+        assert_eq!(data["page"]["returned"], 1);
+        assert_eq!(data["page"]["nextCursor"], "0|NEXT");
+    }
+
+    #[test]
+    fn empty_timeline_yields_empty_users_not_an_error() {
+        // A real 0-follower account: only cursor entries, no TimelineUser
+        // items -- this MUST still be `ok:true` with an empty list, not
+        // conflated with a fetch failure (regression guard for the bug this
+        // function replaced, which always returned `users:[]` even when the
+        // payload actually had real users to extract).
+        let payload = payload_with(vec![], "-1|NONE");
+        let data = extract_user_list(&payload, Some(3));
+        assert_eq!(data["users"].as_array().unwrap().len(), 0);
+        assert_eq!(data["page"]["returned"], 0);
+    }
+
+    #[test]
+    fn unavailable_users_are_skipped_not_pushed_as_empty_profiles() {
+        let unavailable = json!({ "__typename": "UserUnavailable" });
+        let payload = payload_with(vec![unavailable, spacex()], "0|NEXT");
+        let data = extract_user_list(&payload, Some(3));
+        // Only SpaceX should survive -- the UserUnavailable entry must be
+        // dropped, not turned into a garbage/empty UserProfile.
+        assert_eq!(data["users"].as_array().unwrap().len(), 1);
+        assert_eq!(data["users"][0]["screen_name"], "SpaceX");
     }
 }
