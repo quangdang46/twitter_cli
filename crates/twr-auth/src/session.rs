@@ -23,6 +23,13 @@ fn home_dir() -> Option<PathBuf> {
 struct SessionFile {
     auth_token: Option<String>,
     ct0: Option<String>,
+    /// Full Method C paste, so the richer browser context survives a save→
+    /// load round trip instead of collapsing to the bare pair (which X's
+    /// code-226 automated-behavior gate rejects on writes). Old session
+    /// files written before this field existed simply deserialize it as
+    /// `None` — backward compatible by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_string: Option<String>,
 }
 
 /// Load a session from disk. `None` = missing/unparseable/incomplete — never
@@ -34,6 +41,7 @@ pub fn load(path: &Path) -> Option<SessionCookies> {
     let session = SessionCookies {
         auth_token: file.auth_token.filter(|v| !v.is_empty()),
         ct0: file.ct0.filter(|v| !v.is_empty()),
+        full_string: file.full_string.filter(|v| !v.trim().is_empty()),
     };
     if session.is_complete() {
         Some(session)
@@ -75,6 +83,7 @@ pub fn save(path: &Path, session: &SessionCookies, force: bool) -> Result<SaveOu
     let file = SessionFile {
         auth_token: session.auth_token.clone(),
         ct0: session.ct0.clone(),
+        full_string: session.full_string.clone(),
     };
     let raw = serde_json::to_string(&file).map_err(|e| SaveError::Io(e.to_string()))?;
     std::fs::write(path, raw).map_err(|e| SaveError::Io(e.to_string()))?;
@@ -126,6 +135,7 @@ mod tests {
         SessionCookies {
             auth_token: Some("tok".into()),
             ct0: Some("ct".into()),
+            full_string: Some("auth_token=tok; ct0=ct".into()),
         }
     }
 

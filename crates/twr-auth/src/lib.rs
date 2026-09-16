@@ -108,10 +108,25 @@ impl ExtractionSummary {
 
 /// The (unredacted) extracted cookie values. Callers must never log/print
 /// this struct's contents; only `ExtractionSummary` is safe to surface.
+///
+/// `full_string` carries the COMPLETE pasted cookie string when the session
+/// came from a Method C paste (`--cookie` / `twr login --cookie`). It exists
+/// because X's automated-behavior gate (code 226, live-confirmed 2026-09-16)
+/// rejects write ops whose `Cookie:` header is only `auth_token;ct0` — a thin
+/// context that looks automated. Forwarding the FULL browser cookie string
+/// preserves the richer browser context and passes the same gate, exactly as
+/// the Python original's "full cookie forwarding" design (which keeps every
+/// cookie, not just the two it needs) documents. This is the single most
+/// important field in this struct for write reliability — never drop it, and
+/// never "normalize" a session down to just the pair.
 #[derive(Debug, Clone, Default)]
 pub struct SessionCookies {
     pub auth_token: Option<String>,
     pub ct0: Option<String>,
+    /// Full original cookie string when available (Method C paste). Wins
+    /// over the pair at header-build time (see
+    /// `twr_client::Credentials::cookie_header`).
+    pub full_string: Option<String>,
 }
 
 impl SessionCookies {
@@ -121,6 +136,11 @@ impl SessionCookies {
         }
         if self.ct0.is_none() {
             self.ct0 = other.ct0;
+        }
+        // A merged richer context is strictly better than a bare pair: the
+        // pair-only path (env/flags) can trigger X's 226 gate on writes.
+        if self.full_string.is_none() {
+            self.full_string = other.full_string;
         }
     }
 
@@ -153,9 +173,20 @@ pub fn parse_cookie_string(s: &str) -> HashMap<String, String> {
 /// Build `SessionCookies` from a parsed cookie map (Method C entry point).
 pub fn session_from_cookie_string(s: &str) -> SessionCookies {
     let map = parse_cookie_string(s);
-    SessionCookies {
+    let session = SessionCookies {
         auth_token: map.get(AUTH_TOKEN).cloned(),
         ct0: map.get(CT0).cloned(),
+        full_string: None,
+    };
+    if !session.is_complete() {
+        return session;
+    }
+    // Keep the whole paste (not just the pair) so writes forward a rich
+    // browser cookie context — see the `full_string` field docs for why
+    // this is load-bearing against X's code-226 automated-behavior gate.
+    SessionCookies {
+        full_string: Some(s.trim().to_string()),
+        ..session
     }
 }
 

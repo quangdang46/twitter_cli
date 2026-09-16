@@ -79,13 +79,16 @@ pub fn create_tweet_vars(
     vars
 }
 
-/// Simple `{"tweet_id": …}` / `{"tweet_id","dark_request"}` variables for the
-/// engagement ops (favorite/retweet/bookmark/delete + their reverses).
-/// Consumed by bead 3.4.4; kept alive here so the shape is reviewed once.
-#[allow(dead_code)]
+/// Per-op `variables` for the engagement ops, mirroring the Python
+/// `client.py` shapes exactly (live-fixed 2026-09-16): `DeleteRetweet`
+/// takes `{"source_tweet_id"}` NOT `{"tweet_id"}` (a real 400-class server
+/// rejection mis-surfaced as exit-6 otherwise); `CreateRetweet` and the
+/// *unlike* path take `{"tweet_id","dark_request":false}`; plain
+/// favorite/bookmark ops take a bare `{"tweet_id"}`.
 pub fn tweet_id_vars(op: &str, tweet_id: &str) -> serde_json::Value {
     match op {
-        "CreateRetweet" | "DeleteTweet" => {
+        "DeleteRetweet" => serde_json::json!({"source_tweet_id": tweet_id, "dark_request": false}),
+        "CreateRetweet" | "DeleteTweet" | "UnfavoriteTweet" => {
             serde_json::json!({"tweet_id": tweet_id, "dark_request": false})
         }
         _ => serde_json::json!({"tweet_id": tweet_id}),

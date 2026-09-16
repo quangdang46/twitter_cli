@@ -130,6 +130,7 @@ pub fn resolve(
             SessionCookies {
                 auth_token: flags.auth_token.clone(),
                 ct0: flags.ct0.clone(),
+                full_string: None,
             }
         };
         if session.is_complete() {
@@ -150,6 +151,7 @@ pub fn resolve(
             session: SessionCookies {
                 auth_token: Some(auth_token),
                 ct0: Some(ct0),
+                full_string: None,
             },
         });
     }
@@ -186,6 +188,7 @@ mod tests {
         SessionCookies {
             auth_token: Some(auth.to_string()),
             ct0: Some(ct0.to_string()),
+            full_string: None,
         }
     }
 

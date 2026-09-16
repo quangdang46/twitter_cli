@@ -1317,7 +1317,11 @@ fn build_ctx<'a>(
         creds: twr_client::Credentials {
             auth_token: auth.session.auth_token.clone().unwrap_or_default(),
             ct0: auth.session.ct0.clone().unwrap_or_default(),
-            cookie_string: None,
+            // Forward the FULL cookie string when we have it (Method C /
+            // session files that preserved it): a bare auth_token+ct0 pair
+            // is exactly what X's code-226 automated-behavior gate rejects
+            // on writes. `cookie_header()` prefers this when set.
+            cookie_string: auth.session.full_string.clone(),
         },
         throttle: configured_throttle(),
         extra_rotation: Default::default(),
@@ -1595,14 +1599,26 @@ async fn run_tweet(
     )
     .await
     {
-        Ok((mut tweets, _)) => {
+        Ok((tweets, _)) => {
             if tweets.is_empty() {
                 return (
                     serde_json::json!({"error": "tweet not found (tombstone/unavailable)"}),
                     3,
                 );
             }
-            let t = tweets.remove(0);
+            // Focal-first: for a reply tweet's detail page, X returns the
+            // ancestor/conversation context BEFORE the focal tweet itself --
+            // the focal tweet is the entry whose rest_id matches the
+            // requested focalTweetId, not necessarily entries[0] (live-found
+            // 2026-09-16: requesting a reply's detail returned its PARENT).
+            // Fall back to entries[0] only if no entry matches (preserves
+            // the old behavior for shapes where the focal id is absent).
+            let t = tweets
+                .iter()
+                .find(|t| t.id == tweet_id)
+                .or(tweets.first())
+                .expect("non-empty, checked above")
+                .clone();
             (serde_json::to_value(&t).unwrap_or_default(), 0)
         }
         Err(twr_client::PageError::RateLimited) => {
@@ -2256,6 +2272,13 @@ async fn run_post_write(
             );
         }
     };
+    if std::env::var("TWR_DEBUG_DUMP").is_ok() {
+        eprintln!(
+            "HTTP {} :: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
     if resp.status == 429 {
         return (serde_json::json!({"error": "rate limited"}), 4);
     }
@@ -2266,11 +2289,94 @@ async fn run_post_write(
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
-    let new_id = payload
-        .pointer("/data/create_tweet/tweet_results/result/rest_id")
+    // Inner data.errors on HTTP 200: X puts mutation rejections (rate
+    // limits 88/348/349, automated-behavior 226, duplicates 187, length 186)
+    // INSIDE the body rather than failing the transport (live-confirmed
+    // 2026-09-16: plain `twr post` got HTTP 200 + `{"data":{},"errors":
+    // [{"code":226,..."This request looks like it might be automated..."}]}`
+    // for env-only auth pastes, exactly matching upstream SKILL.md's
+    // documented Method-C write caveat). Classify BEFORE looking for
+    // rest_id, so the message/suggestion/exit code describe the actual
+    // server verdict instead of "unexpected response shape".
+    if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {
+        if let Some(first) = errors.first() {
+            let code = first.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            let message = first
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("mutation rejected");
+            let kind = twr_core::ErrorKind::from_api_code(code);
+            let err = if code == 226 {
+                twr_core::TwrError::new(
+                    kind,
+                    "write rejected as automated behavior (X code 226): this session's cookie context is too thin — re-login with full browser cookies (Method B) or a fresh full-cookie paste",
+                )
+            } else {
+                twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"))
+            };
+            return (serde_json::json!({"error": err.message}), kind.exit_code());
+        }
+    }
+    let result = payload.pointer("/data/create_tweet/tweet_results/result");
+    // rest_id location is NOT stable across sessions/contexts (live-proven
+    // 2026-09-16 across three different response shapes in one session):
+    //
+    // 1. Full result (flat, as the Python original documents):
+    //    data.create_tweet.tweet_results.result.rest_id
+    // 2. TweetWithVisibilityResults wrapper (unprivileged/edit-control path):
+    //    data.create_tweet.tweet_results.result.tweet.rest_id, alongside
+    //    sibling keys like edit_control:{edit_tweet_ids:[...]} whose
+    //    [0] is ALSO a valid new-tweet id when rest_id is missing.
+    // 3. Bare success (data.create_tweet.tweet_results == {}): X accepted
+    //    the tweet (it appears in user-posts seconds later) but returned NO
+    //    id in ANY field. There is genuinely nothing to extract — the only
+    //    honest options are (a) report success-without-id and let the caller
+    //    reconcile via user-posts, or (b) keep failing. This port chooses
+    //    (a): emit ok:true with "id":null plus id_status:"unresolved" so an
+    //    agent never misreads it as a failure to retry blindly (which WOULD
+    //    double-post), nor as a failure at all.
+    //
+    // Try, in order: flat rest_id, .tweet.rest_id, edit_tweet_ids[0].
+    let new_id_opt: Option<String> = result
+        .and_then(|r| r.get("rest_id"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            result
+                .and_then(|r| r.get("tweet"))
+                .and_then(|t| t.get("rest_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            payload
+                .pointer("/data/create_tweet/tweet_results/result/edit_control/edit_tweet_ids/0")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let Some(new_id) = new_id_opt else {
+        // Shape 3 (bare success): accepted but id-less. Emit an honest
+        // success-without-id rather than a fake failure (which an agent
+        // would retry into a double-post) or a fake `{"id":""}` success.
+        return (
+            serde_json::json!({"id": null, "id_status": "unresolved", "operation": operation, "note": "X accepted the tweet but returned no id; reconcile via user-posts before assuming it did not land"}),
+            0,
+        );
+    };
+    if new_id.is_empty() {
+        // HTTP 2xx, no data.errors, but still no usable rest_id — a drifting
+        // response schema or some other unexpected shape. Report honestly as
+        // an error (exit 6 contract drift) instead of the previous `{"id":""}`
+        // success-shaped lie that downstream automation would read as
+        // "posted, id unknown".
+        return (
+            serde_json::json!({"error": "post returned no tweet id (unexpected create_tweet response shape)"}),
+            6,
+        );
+    }
     // Jittered write delay (1.5–4s).
     let u01 = (now % 1000) as f64 / 1000.0;
     tokio::time::sleep(std::time::Duration::from_secs_f64(
