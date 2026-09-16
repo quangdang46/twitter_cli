@@ -118,21 +118,25 @@ impl ErrorKind {
         }
     }
 
-    /// Map an X API inner error code (the `code` field inside a 200/4xx error
-    /// payload) to a kind. Known rate-limit codes: 88, 348, 349.
+    /// Inner X mutation codes: 88/348/349 are rate limits; 344 is the
+    /// per-account DAILY send cap ("You have reached your daily limit for
+    /// sending Tweets", live-hit 2026-09-16 on a real throwaway while
+    /// release-verifying). Both map to exit 4 (forbidden/rate-limited) with
+    /// a `retry_after_ms` hint so agents back off instead of hammering.
     pub fn from_api_code(code: i64) -> Self {
         match code {
-            88 | 348 | 349 => ErrorKind::ForbiddenRateLimited,
+            88 | 344 | 348 | 349 => ErrorKind::ForbiddenRateLimited,
             _ => ErrorKind::GeneralAuth,
         }
     }
 }
 
-/// Inner X API error codes that mean rate-limited (exit 4), per plan §1.2.
-pub const RATE_LIMIT_API_CODES: &[i64] = &[88, 348, 349];
+/// Inner X API error codes that mean rate-limited (exit 4), per plan §1.2
+/// plus live-discovered 344 (daily send cap, 2026-09-16).
+pub const RATE_LIMIT_API_CODES: &[i64] = &[88, 344, 348, 349];
 
 /// Classify an error payload's inner `code` field. Returns
-/// `ForbiddenRateLimited` for 88/348/349, `GeneralAuth` otherwise.
+/// `ForbiddenRateLimited` for 88/344/348/349, `GeneralAuth` otherwise.
 pub fn classify_api_code(code: i64) -> ErrorKind {
     ErrorKind::from_api_code(code)
 }

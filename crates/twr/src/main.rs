@@ -2564,7 +2564,10 @@ async fn run_engage(
     };
     let ctx = build_ctx(opts, config, &transport, &auth);
     let desc = engage_op_of(cmd);
-    let ok = if desc.use_friendships {
+    // Returns Ok(()) on a confirmed mutation, or Err((message, exit_code))
+    // carrying the ALREADY-CLASSIFIED failure (inner data.errors paths
+    // return early from inside, direct 429/404 handled by callers' siblings).
+    let outcome: Result<(), (String, i32)> = if desc.use_friendships {
         // 1.1 friendships form-POST (follow/unfollow), mirrors Python.
         let url = format!("https://x.com/i/api/1.1/{}.json", desc.op);
         let headers = twr_client::build_headers(&twr_client::HeaderInput {
@@ -2582,8 +2585,14 @@ async fn run_engage(
         refs.push(("Content-Type", "application/x-www-form-urlencoded"));
         let body = format!("user_id={target_id}&include_profile_interstitial_type=1");
         match ctx.transport.post_json(&url, &refs, body.as_bytes()).await {
-            Ok(r) => (200..300).contains(&r.status),
-            Err(_) => false,
+            Ok(r) => {
+                if (200..300).contains(&r.status) {
+                    Ok(())
+                } else {
+                    Err((format!("{cmd} failed: HTTP {}", r.status), 6))
+                }
+            }
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
         }
     } else {
         let qid = ctx
@@ -2616,9 +2625,46 @@ async fn run_engage(
                 if r.status == 429 {
                     return (serde_json::json!({"error": "rate limited"}), 4);
                 }
-                (200..300).contains(&r.status)
+                if !(200..300).contains(&r.status) {
+                    return (
+                        serde_json::json!({"error": format!("{cmd} failed: HTTP {}", r.status)}),
+                        6,
+                    );
+                }
+                // Inner data.errors on HTTP 200: X puts mutation rejections
+                // (88/348/349/226/187/186) INSIDE the body (live-confirmed
+                // 2026-09-16 on the post path). A 200 whose body carries an
+                // error envelope is NOT a success — classify it here so undo
+                // ops (delete/unlike/unretweet/unbookmark/unfollow) can't
+                // report ok:true for a no-op (found live: delete on a
+                // nonexistent tweet id returned ok:true).
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&r.body).unwrap_or_default();
+                if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {
+                    if let Some(first) = errors.first() {
+                        let code = first.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+                        let message = first
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("mutation rejected");
+                        let kind = twr_core::ErrorKind::from_api_code(code);
+                        let err = if code == 226 {
+                            twr_core::TwrError::new(
+                                kind,
+                                "write rejected as automated behavior (X code 226): this session's cookie context is too thin — re-login with full browser cookies (Method B) or a fresh full-cookie paste",
+                            )
+                        } else {
+                            twr_core::TwrError::new(
+                                kind,
+                                format!("write rejected (X code {code}): {message}"),
+                            )
+                        };
+                        return (serde_json::json!({"error": err.message}), kind.exit_code());
+                    }
+                }
+                Ok(())
             }
-            Err(_) => false,
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
         }
     };
     let u01 = (now % 1000) as f64 / 1000.0;
@@ -2626,8 +2672,8 @@ async fn run_engage(
         cli::write::write_delay_secs(u01),
     ))
     .await;
-    if !ok {
-        return (serde_json::json!({"error": format!("{cmd} failed")}), 6);
+    if let Err((message, code)) = outcome {
+        return (serde_json::json!({"error": message}), code);
     }
     if let Some(path) = twr_core::budget::default_log_path() {
         twr_core::budget::record(&path, &twr_core::budget::today_utc());
