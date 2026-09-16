@@ -8,7 +8,7 @@
 use crate::article::parse_article;
 use crate::deep_get::parse_int;
 use crate::dget;
-use crate::model::{Author, Metrics, Tweet, TweetMedia, UserProfile};
+use crate::model::{Author, BookmarkFolder, Metrics, Tweet, TweetMedia, UserProfile};
 use serde_json::Value;
 
 fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
@@ -404,6 +404,50 @@ fn extract_cursor(content: &Value) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Parse a `BookmarkFoldersSlice` response into `(folders, next_cursor)`.
+/// Mirrors the Python `fetch_bookmark_folders` payload walk:
+/// `data.viewer.user_results.result.bookmark_collections_slice` with
+/// `items[]` (`{id, name}`) and `slice_info.next_cursor`. Skips items with
+/// no `id` (same as Python's `if folder_id:` guard). Paginated by the
+/// caller: pass the returned cursor back via `variables.cursor` until it
+/// stops changing or goes missing, mirroring the Python `max_pages=10` loop.
+pub fn parse_bookmark_folders_response(data: &Value) -> (Vec<BookmarkFolder>, Option<String>) {
+    let empty_items: Vec<Value> = Vec::new();
+    let slice = data
+        .get("data")
+        .and_then(|d| d.get("viewer"))
+        .and_then(|v| v.get("user_results"))
+        .and_then(|u| u.get("result"))
+        .and_then(|r| r.get("bookmark_collections_slice"));
+    let Some(slice) = slice else {
+        return (Vec::new(), None);
+    };
+    let items = slice
+        .get("items")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_items);
+    let mut folders = Vec::new();
+    for item in items {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        folders.push(BookmarkFolder {
+            id: id.to_string(),
+            name: item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    let next = slice
+        .get("slice_info")
+        .and_then(|s| s.get("next_cursor"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (folders, next)
 }
 
 /// Parse a timeline GraphQL response into `(tweets, next_cursor)`. Mirrors

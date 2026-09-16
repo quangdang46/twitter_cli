@@ -40,3 +40,11 @@ HomeLatestTimeline:
   queryId: BKB7oi212Fi7kQtCBGE4zA
   rps: 0.5
   burst: 2
+BookmarkFoldersSlice:
+  queryId: i78YDd0Tza-dV4SYs58kRg
+  rps: 0.5
+  burst: 2
+BookmarkFolderTimeline:
+  queryId: hNY7X2xE2N7HVF6Qb_mu6w
+  rps: 0.5
+  burst: 2

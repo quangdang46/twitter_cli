@@ -45,7 +45,8 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 
 ## Types
 
-- `tweet_list`: `{"tweets": Tweet[], "page": {...}}`
+- `tweet_list`: `{"tweets": Tweet[], "page": {...}}` (also used by `bookmarks --folder <id>`)
+- `bookmark_folder_list`: `{"folders": [{id, name}], "page": {"returned": n}}` (from `bookmarks --folders`)
 - `tweet_detail`: a single `Tweet`
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
 - `user` / `user_list`: `UserProfile` / `{"users": [...]}` (list parsing

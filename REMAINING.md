@@ -94,3 +94,18 @@ needs an input only a human can provide:
 
 When those exist, 6.1→6.2→6.3 implement in order behind
 `--backend api-v2` (feature-gated, cookie backend stays default).
+
+## P6 (feature-completeness batch) — planned, not started
+
+`COMPREHENSIVEPLANFORTWITTERCLI.md` §13 has the full spec: mentions/
+notifications/user-media/user-replies reads, bookmark-folder command wiring
+(query IDs already shipped in `consts.rs`, just never got a command),
+mute/block/pin, list management (create/edit/delete/add-member/follow/pin),
+long-form (`CreateNoteTweet`, supersedes the "not implemented" note in
+README's Limitations once it lands), `EditTweet`, poll creation, and DM
+(read + send, last and highest-scrutiny). Sequencing and per-op query-ID
+starting points (mined from `xeepy`/`Rettiwt-API`/`agentic-x`, **not**
+verified against this repo yet) are in §13.7. Explicitly excluded:
+monetization/Ads/Jobs/Grok/Spaces-live/Communities-create (§13.6) — no
+"daily digest bot" use case, or fundamentally stateful/real-time in a way
+`twr`'s one-shot command model doesn't fit.

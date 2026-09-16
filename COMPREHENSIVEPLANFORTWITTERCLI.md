@@ -362,3 +362,87 @@ Why this boundary matters: it's the same reason `--policy`/`--dry-run`/idempoten
 3. `wreq` gets fingerprinted and blocked → the `curl-impersonate` subprocess transport is a drop-in fallback via the `HttpTransport` trait.
 4. Ban/rate-limit exposure — small defaults, explicit proxy guidance; never ship bulk-friendly defaults.
 5. Binary naming: `twr` is primary, `twitter` is an opt-in alias.
+
+## 13. Phase P6 — feature-completeness batch (post-v0.1.0)
+
+v0.1.0 covers the "safe daily-digest bot" surface (§11). This phase closes the
+gap to "a real Twitter client, minus the parts that are structurally
+out-of-scope" (monetization/Ads/Jobs/Grok/Spaces-live — see §13.5). Query IDs
+below are **starting points mined from public reference implementations**
+(`xeepy`/XActions, `Rettiwt-API`, `agentic-x`, `TwitterInternalAPIDocument`),
+not verified against this repo's own `doctor --refresh` — they rot every 2–4
+weeks (§12 risk 2), so every bead here must re-resolve via the 4-layer
+resolver before landing, never hardcode-and-ship blind.
+
+Ordered by ban-risk (lowest first) and dependency, not by user-perceived
+value — read-only ops first, mutations behind existing `--policy`/`--apply`
+gates, the two DM ops last because they are the highest-scrutiny surface on
+the platform (unsolicited automated DMs are explicitly named as a suspension
+trigger — see the ban-risk research folded into the FAQ/README).
+
+### 13.1 Read-only additions (lowest risk — extend existing GET-timeline pattern)
+
+| Command | Operation(s) | Notes |
+|---|---|---|
+| `twr mentions` | `NotificationsTimeline` (or `UserTweetsAndReplies` on self scoped to mentions, whichever `doctor --refresh` resolves cleanly) | New timeline family; reuse `twr-graphql::resolve` + `twr-model` timeline parser, same pagination shape as `feed`. |
+| `twr notifications` | `NotificationsTimeline` | Separate from mentions (likes/RTs/follows notify too); needs its own model struct — notification events aren't `Tweet`s. |
+| `twr user-replies` | `UserTweetsAndReplies` (already gated by tx-id, same wall as `feed --latest`) or `UserRepliesTimeline` fallback (ungated per `agentic-x` research — prefer this one, cheaper) | Distinct from `user-posts`; some forks split "posts" vs "posts+replies" as two ops, verify both exist for our fallback chain. |
+| `twr user-media` | `UserMedia` | Photo/video-only tab; same User timeline parser, filtered server-side. |
+| `twr lists` | `List`/`Lists` (owned+followed) | Prerequisite for `list-create`/`list-add` below — needs to resolve list IDs the user owns before mutating them. |
+| `twr list-members <list_id>` | `ListMembers` | Read-only, pairs with `list-add-member`/`list-remove-member`. |
+| Bookmark folders (`twr bookmarks --folder <id>`) | `BookmarkFoldersSlice` / `BookmarkFolderTimeline` | Query IDs already in `consts.rs` (`FALLBACK_QUERY_IDS`) — command surface was never wired up. Cheapest item in this whole phase; do first. |
+
+### 13.2 Engagement-tier mutations (same risk class as existing like/retweet/follow — gate behind `--policy engagement`)
+
+| Command | Operation(s) | Notes |
+|---|---|---|
+| `twr mute <user_id>` / `twr unmute` | `MuteUser` / `UnmuteUser` | Same shape as existing `follow`/`unfollow` write commands; add to `twr-graphql/consts.rs` FALLBACK_QUERY_IDS. |
+| `twr block <user_id>` / `twr unblock` | `BlockUser` / `UnblockUser` | Higher visible-effect mutation than mute (target sees blocked state) — keep under `--policy engagement`, not `read_only`. |
+| `twr pin <tweet_id>` / `twr unpin` | (PinTweet mutation — resolve op name via `doctor --refresh`, not in current research corpus) | Low-volume, low-risk single-tweet mutation, same idempotency story as `like`. |
+
+### 13.3 List management (write) — needs list-ownership read (13.1) landed first
+
+| Command | Operation(s) | Notes |
+|---|---|---|
+| `twr list-create` | `CreateList` | Standard create-with-name/description/private mutation. |
+| `twr list-edit` | `UpdateList` | Rename/redescribe/toggle private. |
+| `twr list-delete` | `DeleteList` | Destructive — require `--apply`, always preview first like `delete` tweet does. |
+| `twr list-add-member` / `twr list-remove-member` | `AddListMember` / `RemoveListMember` | Bulk-add is a spam vector (mass-list-adds get reported); no batch flag, one user per invocation, let the orchestrator loop with its own delay. |
+| `twr list-follow` / `twr list-unfollow` | `FollowList` / `UnfollowList` | Subscribing to someone else's list — engagement-tier risk. |
+| `twr list-pin` / `twr list-unpin` | `PinList` / `UnpinList` | Cosmetic, lowest risk in this group. |
+
+### 13.4 Content-shape extensions (write, existing `post`/`quote` risk class)
+
+| Command | Operation(s) | Notes |
+|---|---|---|
+| `twr post --long` (auto-route when `text` exceeds the standard weighted-length threshold) | `CreateNoteTweet` | Upstream Python issue #54 (README lists this as out of scope for v0.1.0 — supersede that note once this lands). Mirror upstream PR #64/#65's fixes exactly: (a) route both `create_tweet` **and** `quote_tweet` through `CreateNoteTweet` when over-length, not just plain posts; (b) must send `disallowed_reply_options: null` explicitly — omitting it silently returns an empty `tweet_results` (documented failure mode in PR #64); (c) parse response tolerant of all three envelope shapes seen in the wild (`create_tweet` / `notetweet_create` / `create_note_tweet`); (d) fail closed (explicit error, not silent success) if the mutation returns no confirmation. |
+| `twr edit <tweet_id>` | `EditTweet` (`responsive_web_edit_tweet_api_enabled` — already `true` in our `DEFAULT_FEATURES`) | X gates this to Premium/Blue accounts server-side with a short edit window and edit-count limit; `twr` must surface X's own error cleanly (not retry) when the account isn't eligible — don't invent client-side eligibility checks that will drift from X's actual policy. |
+| `twr post --poll` | Poll is a `card_uri`/`poll` field on the existing `CreateTweet`/`CreateNoteTweet` mutation, not a separate op | Confirm exact variable shape against `doctor --refresh` capture before shipping — the official-API-v2 OpenAPI schema (`poll.options[2..4]`, `poll.duration_minutes[5..10080]`) is a decent cross-check for the field semantics even though the wire format differs from cookie-GraphQL. |
+
+### 13.5 Direct Messages — last, highest scrutiny, opt-in only
+
+| Command | Operation(s) | Notes |
+|---|---|---|
+| `twr dm-list` | `DmInbox` / `DMConversation` list | Read-only; still ship it after everything else in this phase because DM inbox structure (conversations, not tweets) needs its own model type and is the least code-reused item in the batch. |
+| `twr dm-send <user_id> <text>` | `useSendMessageMutation` | **Must** default to `--policy write`-only (never `engagement`), require `--apply`, and get its own line in SKILL.md's ban-risk section: unsolicited automated DMs are one of the clearest platform suspension triggers (see FAQ/README ban-risk research). Consider a hard per-day cap independent of the existing mutation budget. |
+
+### 13.6 Explicitly still out of scope (unchanged from §11, restated for this phase)
+
+Subscriptions/monetization, Ads, Jobs, Grok (assistant surface), Spaces
+create/host/live-audio, and Communities create/moderate are **not** part of
+P6. Rationale: each is either (a) a monetization/business surface with no
+"daily digest bot" use case `twr` targets, (b) requires account tiers/UI
+flows that don't map to a stable scriptable contract, or (c) — for
+Spaces/Communities specifically — is real-time/stateful in a way that doesn't
+fit `twr`'s one-shot-command model at all. If a real user need for one of
+these surfaces shows up, it gets its own proposal + risk writeup, not a quiet
+addition to this table.
+
+### 13.7 Sequencing
+
+1. Bookmark folders command wiring (13.1, query IDs already shipped — zero new resolver work).
+2. Read-only additions (13.1) — establishes `NotificationsTimeline`/list-read patterns the write commands in 13.3 depend on.
+3. Mute/block/pin (13.2) — smallest new-mutation surface, reuses the `follow`/`like` code path almost verbatim.
+4. List management (13.3) — depends on 13.1's list-read commands for ID resolution in tests/docs.
+5. Long-form + edit + poll (13.4) — highest implementation complexity (three response-envelope shapes for note-tweet alone), do after the team has re-proven the query-ID resolver process on simpler ops in 1–4.
+6. DM (13.5) — last, gated on its own SKILL.md ban-risk writeup being reviewed before `--apply` ships for `dm-send`.

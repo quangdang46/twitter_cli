@@ -254,6 +254,18 @@ enum Command {
         max: Option<usize>,
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
+        /// List bookmark folders instead of tweets (`bookmarks folders` in
+        /// the Python original). Mutually exclusive with --folder.
+        #[arg(long)]
+        folders: bool,
+        /// Fetch tweets from one bookmark folder by ID (mirrors Python
+        /// `bookmarks folders <id>`). Mutually exclusive with --folders.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Only show folder tweets created on/after this date (YYYY-MM-DD).
+        /// Client-side filter, mirroring Python's `_filter_tweets_since`.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Search with the full operator flags.
     Search {
@@ -716,11 +728,39 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::Bookmarks { max, filter } => {
-            kind = "tweet_list";
-            let (d, code) = run_bookmarks(&opts, &config, max, filter).await;
-            data = d;
-            exit_code = code;
+        Command::Bookmarks {
+            max,
+            filter,
+            folders,
+            folder,
+            since,
+        } => {
+            if folders && folder.is_some() {
+                kind = "error";
+                let (d, code) = (
+                    serde_json::json!({"error": "--folders and --folder are mutually exclusive"}),
+                    2,
+                );
+                data = d;
+                exit_code = code;
+            } else if folders {
+                kind = "bookmark_folder_list";
+                let (d, code) = run_bookmark_folders(&opts).await;
+                data = d;
+                exit_code = code;
+            } else if let Some(folder_id) = folder {
+                kind = "tweet_list";
+                let (d, code) =
+                    run_bookmark_folder_timeline(&opts, &config, folder_id, max, since, filter)
+                        .await;
+                data = d;
+                exit_code = code;
+            } else {
+                kind = "tweet_list";
+                let (d, code) = run_bookmarks(&opts, &config, max, filter).await;
+                data = d;
+                exit_code = code;
+            }
         }
         Command::Search {
             query,
@@ -995,6 +1035,8 @@ fn schema_data() -> serde_json::Value {
             {"name": "logout", "type": "auth"},
             {"name": "feed", "type": "tweet_list"},
             {"name": "bookmarks", "type": "tweet_list"},
+            {"name": "bookmarks --folders", "type": "bookmark_folder_list"},
+            {"name": "bookmarks --folder", "type": "tweet_list"},
             {"name": "search", "type": "tweet_list"},
             {"name": "tweet", "type": "tweet_detail"},
             {"name": "show", "type": "tweet_detail"},
@@ -1021,6 +1063,8 @@ fn commands_data() -> serde_json::Value {
         {"name": "logout", "type": "auth", "desc": "Clear saved session"},
         {"name": "feed", "type": "tweet_list", "desc": "Home/feed timeline"},
         {"name": "bookmarks", "type": "tweet_list", "desc": "Own bookmarks"},
+        {"name": "bookmarks --folders", "type": "bookmark_folder_list", "desc": "List bookmark folders"},
+        {"name": "bookmarks --folder <id> [--since YYYY-MM-DD]", "type": "tweet_list", "desc": "Tweets in one bookmark folder"},
         {"name": "search", "type": "tweet_list", "desc": "Search with operator flags"},
         {"name": "tweet", "type": "tweet_detail", "desc": "Single tweet by ID/URL"},
         {"name": "show", "type": "tweet_detail", "desc": "Nth item of last list"},
@@ -1500,6 +1544,196 @@ async fn run_bookmarks(
         }
         Err(_) => (serde_json::json!({"error": "bookmarks fetch failed"}), 6),
     }
+}
+
+/// `twr bookmarks --folders`: list the account's bookmark folders
+/// (`BookmarkFoldersSlice`). Read-only; walks `slice_info.next_cursor`
+/// up to 10 pages, mirroring the Python `fetch_bookmark_folders` loop.
+async fn run_bookmark_folders(opts: &OutputOptions) -> (serde_json::Value, i32) {
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let ctx = build_ctx(opts, &twr_config::TwrConfig::default(), &transport, &auth);
+    let qid = ctx
+        .query_id("BookmarkFoldersSlice")
+        .map(|r| r.query_id)
+        .unwrap_or_default();
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "GET",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let mut folders: Vec<twr_model::BookmarkFolder> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let mut vars = serde_json::json!({});
+        if let Some(c) = &cursor {
+            vars["cursor"] = serde_json::json!(c);
+        }
+        let url = cli::exec::graphql_get_url(&qid, "BookmarkFoldersSlice", &vars, None);
+        let resp = match ctx.transport.get(&url, &refs).await {
+            Ok(r) => r,
+            Err(_) => {
+                return (
+                    serde_json::json!({"error": "bookmark folders fetch failed"}),
+                    5,
+                )
+            }
+        };
+        if resp.status == 429 {
+            return (serde_json::json!({"error": "rate limited"}), 4);
+        }
+        if resp.status == 404 {
+            return (
+                serde_json::json!({"error": "contract drift (stale query ID)"}),
+                6,
+            );
+        }
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+        let (page, next) = twr_model::parse_bookmark_folders_response(&body);
+        folders.extend(page);
+        match next {
+            Some(n) if Some(&n) != cursor.as_ref() => cursor = Some(n),
+            _ => break,
+        }
+    }
+    let data = serde_json::to_value(&folders).unwrap_or_default();
+    (
+        serde_json::json!({"folders": data, "page": {"returned": folders.len()}}),
+        0,
+    )
+}
+
+/// `twr bookmarks --folder <id> [--since YYYY-MM-DD]`: tweets in one
+/// bookmark folder (`BookmarkFolderTimeline`). Same timeline parsing and
+/// pagination as the other read commands; `--since` filters client-side by
+/// `created_at`, mirroring Python's `_filter_tweets_since`.
+async fn run_bookmark_folder_timeline(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    folder_id: String,
+    max: Option<usize>,
+    since: Option<String>,
+    filter: bool,
+) -> (serde_json::Value, i32) {
+    if folder_id.trim().is_empty() {
+        return (
+            serde_json::json!({"error": "--folder needs a non-empty folder ID (see `twr bookmarks --folders`)"}),
+            2,
+        );
+    }
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let count = max.unwrap_or(50);
+    let vars = serde_json::json!({
+        "bookmark_collection_id": folder_id,
+        "includePromotedContent": false,
+    });
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        "BookmarkFolderTimeline",
+        count,
+        None,
+        vars,
+        cli::instructions::for_operation("BookmarkFolderTimeline"),
+    )
+    .await;
+    match out {
+        Ok((tweets, loop_out)) => {
+            let tweets = match since {
+                Some(ref cutoff) => filter_tweets_since(tweets, cutoff),
+                None => tweets,
+            };
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
+        Err(twr_client::PageError::RateLimited) => {
+            (serde_json::json!({"tweets": [], "truncated": true}), 4)
+        }
+        Err(_) => (
+            serde_json::json!({"error": format!("bookmark folder {folder_id} fetch failed")}),
+            6,
+        ),
+    }
+}
+
+/// Client-side `--since YYYY-MM-DD` filter over `created_at`, mirroring
+/// Python's `_filter_tweets_since` (invalid dates are a usage error, exit 2
+/// at the call site is the caller's job — here we treat strictly: a tweet
+/// that cannot be parsed as a date is dropped, same as the Python `except`).
+fn filter_tweets_since(tweets: Vec<twr_model::Tweet>, since: &str) -> Vec<twr_model::Tweet> {
+    let cutoff = naive_ymd(since);
+    let Some((cy, cm, cd)) = cutoff else {
+        return tweets;
+    };
+    tweets
+        .into_iter()
+        .filter(|t| match tweet_ymd(&t.created_at) {
+            Some((y, m, d)) => (y, m, d) >= (cy, cm, cd),
+            None => false,
+        })
+        .collect()
+}
+
+/// Parse `YYYY-MM-DD` strictly (no chrono dep in this crate).
+fn naive_ymd(s: &str) -> Option<(u32, u32, u32)> {
+    let mut it = s.split('-');
+    let (y, m, d) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    let (y, m, d) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
+    ((1..=12).contains(&m) && (1..=31).contains(&d)).then_some((y, m, d))
+}
+
+/// Parse X's `created_at` (`Mon Jan 01 00:00:00 +0000 2024`) down to a
+/// comparable `(y, m, d)`. Returns None when the shape is unexpected.
+fn tweet_ymd(created_at: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = created_at.split_whitespace().collect();
+    if parts.len() < 6 {
+        return None;
+    }
+    let month = match parts[1] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let day: u32 = parts[2].parse().ok()?;
+    let year: u32 = parts[5].parse().ok()?;
+    Some((year, month, day))
 }
 
 async fn run_search(
@@ -3371,6 +3605,99 @@ async fn doctor_data_probe(
         checks.push(entry);
     }
     (data, code)
+}
+
+#[cfg(test)]
+mod bookmark_folder_tests {
+    use super::*;
+
+    #[test]
+    fn since_filter_keeps_only_tweets_on_or_after_cutoff() {
+        let mk = |created_at: &str| twr_model::Tweet {
+            id: "1".into(),
+            text: "t".into(),
+            author: twr_model::Author {
+                id: "u".into(),
+                name: "N".into(),
+                screen_name: "s".into(),
+                profile_image_url: String::new(),
+                verified: false,
+            },
+            metrics: twr_model::Metrics {
+                likes: 0,
+                retweets: 0,
+                replies: 0,
+                quotes: 0,
+                views: 0,
+                bookmarks: 0,
+            },
+            created_at: created_at.into(),
+            lang: String::new(),
+            media: vec![],
+            urls: vec![],
+            is_retweet: false,
+            retweeted_by: None,
+            quoted_tweet: None,
+            score: None,
+            article_title: None,
+            article_text: None,
+            is_subscriber_only: false,
+            is_promoted: false,
+        };
+        let tweets = vec![
+            mk("Mon Jan 01 00:00:00 +0000 2024"),
+            mk("Wed Jan 15 12:00:00 +0000 2025"),
+            mk("not a date"),
+        ];
+        let kept = filter_tweets_since(tweets, "2025-01-01");
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].created_at.contains("2025"));
+    }
+
+    #[test]
+    fn since_filter_with_bad_cutoff_passes_everything_through() {
+        let mk = |created_at: &str| twr_model::Tweet {
+            id: "1".into(),
+            text: "t".into(),
+            author: twr_model::Author {
+                id: "u".into(),
+                name: "N".into(),
+                screen_name: "s".into(),
+                profile_image_url: String::new(),
+                verified: false,
+            },
+            metrics: twr_model::Metrics {
+                likes: 0,
+                retweets: 0,
+                replies: 0,
+                quotes: 0,
+                views: 0,
+                bookmarks: 0,
+            },
+            created_at: created_at.into(),
+            lang: String::new(),
+            media: vec![],
+            urls: vec![],
+            is_retweet: false,
+            retweeted_by: None,
+            quoted_tweet: None,
+            score: None,
+            article_title: None,
+            article_text: None,
+            is_subscriber_only: false,
+            is_promoted: false,
+        };
+        let tweets = vec![mk("Mon Jan 01 00:00:00 +0000 2024")];
+        assert_eq!(filter_tweets_since(tweets, "not-a-date").len(), 1);
+    }
+
+    #[test]
+    fn naive_ymd_parses_strictly() {
+        assert_eq!(naive_ymd("2025-01-15"), Some((2025, 1, 15)));
+        assert_eq!(naive_ymd("2025-13-01"), None);
+        assert_eq!(naive_ymd("2025-01"), None);
+        assert_eq!(naive_ymd("2025-01-01-extra"), None);
+    }
 }
 
 #[cfg(test)]

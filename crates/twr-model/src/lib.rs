@@ -11,7 +11,9 @@ pub mod model;
 pub mod parse;
 
 pub use model::{Author, BookmarkFolder, Metrics, Tweet, TweetMedia, UserProfile};
-pub use parse::{parse_timeline_response, parse_tweet_result, parse_user_result};
+pub use parse::{
+    parse_bookmark_folders_response, parse_timeline_response, parse_tweet_result, parse_user_result,
+};
 
 #[cfg(test)]
 mod tests {
@@ -190,6 +192,35 @@ mod tests {
     fn unavailable_users_return_none() {
         let user = json!({ "__typename": "UserUnavailable" });
         assert!(parse_user_result(&user).is_none());
+    }
+
+    #[test]
+    fn parses_bookmark_folders_slice_with_cursor() {
+        let data = json!({
+            "data": { "viewer": { "user_results": { "result": {
+                "bookmark_collections_slice": {
+                    "items": [
+                        { "id": "f1", "name": "Reading" },
+                        { "id": "f2", "name": "Research" },
+                        { "name": "no id — skipped" }
+                    ],
+                    "slice_info": { "next_cursor": "NEXT" }
+                }
+            }}}}
+        });
+        let (folders, cursor) = parse_bookmark_folders_response(&data);
+        assert_eq!(folders.len(), 2, "items without id must be skipped");
+        assert_eq!(folders[0].id, "f1");
+        assert_eq!(folders[0].name, "Reading");
+        assert_eq!(folders[1].id, "f2");
+        assert_eq!(cursor.as_deref(), Some("NEXT"));
+    }
+
+    #[test]
+    fn bookmark_folders_slice_missing_shape_is_empty_not_an_error() {
+        let (folders, cursor) = parse_bookmark_folders_response(&json!({"data": {}}));
+        assert!(folders.is_empty());
+        assert!(cursor.is_none());
     }
 
     #[test]
