@@ -6053,3 +6053,121 @@ mod user_list_tests {
         assert_eq!(data["users"][0]["screen_name"], "SpaceX");
     }
 }
+
+/// Bead o1l.1.8 §3 — catalog parity anchor: every P6.1 command/type the
+/// dispatch arms emit a `kind` for must appear in BOTH `schema_data` and
+/// `commands_data`, or `twr schema`/`twr commands` silently omit a live
+/// command. Add new P6.1-family entries here, not in a second test.
+#[cfg(test)]
+mod p61_catalog_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn schema_names() -> HashSet<String> {
+        schema_data()["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn commands_names() -> HashSet<String> {
+        commands_data()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn p61_commands_present_in_both_catalogs() {
+        // (dispatch kind, schema/commands names covering it). Kinds are
+        // asserted separately in dispatch (see arms); here we pin the
+        // CATALOG side: bookmarks --folders/--folder, user-replies,
+        // user-media, mentions, notifications, lists, list-members.
+        let schema = schema_names();
+        let commands = commands_names();
+        for name in [
+            "bookmarks --folders",
+            "bookmarks --folder",
+            "user-replies",
+            "user-media",
+            "mentions",
+            "notifications",
+            "lists",
+            "list-members",
+        ] {
+            assert!(schema.contains(name), "{name} missing from schema_data");
+            assert!(
+                commands.contains(name) || commands.iter().any(|c| c.starts_with(name)),
+                "{name} missing from commands_data"
+            );
+        }
+    }
+
+    #[test]
+    fn p61_dispatch_kinds_have_matching_schema_types() {
+        // The envelope `type` each P6.1 arm emits must be a documented
+        // SCHEMA.md type: tweet_list (folder/replies/media), notification_list
+        // (mentions/notifications), list_list (lists), user_list (members),
+        // bookmark_folder_list (folders).
+        let schema = schema_data();
+        let types: HashSet<&str> = schema["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        for t in [
+            "tweet_list",
+            "notification_list",
+            "list_list",
+            "user_list",
+            "bookmark_folder_list",
+        ] {
+            assert!(types.contains(t), "{t} missing from schema catalog");
+        }
+    }
+}
+
+#[cfg(test)]
+mod user_list_tests_tail {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unavailable_users_are_dropped_from_member_lists() {
+        // Duplicated-behavior anchor (canonical test lives in
+        // user_list_tests): UserUnavailable entries must not become
+        // garbage/empty profiles in members output.
+        let unavailable = json!({ "__typename": "UserUnavailable" });
+        let good = json!({
+            "rest_id": "34743251",
+            "legacy": { "screen_name": "SpaceX", "name": "SpaceX", "followers_count": 1 }
+        });
+        let entries = vec![unavailable, good]
+            .into_iter()
+            .map(|u| {
+                json!({
+                    "content": {
+                        "__typename": "TimelineTimelineItem",
+                        "itemContent": {
+                            "__typename": "TimelineUser",
+                            "user_results": { "result": u }
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = json!({
+            "data": { "user": { "result": { "timeline": { "timeline": {
+                "instructions": [{ "type": "TimelineAddEntries", "entries": entries }]
+            }}}}}
+        });
+        let data = extract_user_list(&payload, Some(3));
+        assert_eq!(data["users"].as_array().unwrap().len(), 1);
+        assert_eq!(data["users"][0]["screen_name"], "SpaceX");
+    }
+}

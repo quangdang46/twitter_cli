@@ -800,14 +800,20 @@ pub fn parse_notifications_response(
             .unwrap_or_default();
         for entry in &entries {
             let content = entry.get("content").unwrap_or(&empty_obj);
-            if let Some(cursor) = content
-                .get("operation")
-                .and_then(|o| o.get("cursor"))
-                .filter(|c| c.get("cursorType").and_then(Value::as_str) == Some("Bottom"))
-                .and_then(|c| c.get("value"))
-                .and_then(Value::as_str)
-            {
-                next_cursor = Some(cursor.to_string());
+            // ANY cursor row (Bottom AND Top — live `mentions` returns a bare
+            // Top-cursor entry on accounts with no mentions, bead o1l.1.8) is
+            // paging state, never an event: Bottom advances next_cursor,
+            // Top is skipped without emitting a "cursor-top-*" pseudo-event.
+            if let Some(cursor_obj) = content.get("operation").and_then(|o| o.get("cursor")) {
+                let ctype = cursor_obj
+                    .get("cursorType")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if ctype == "Bottom" {
+                    if let Some(cursor) = cursor_obj.get("value").and_then(Value::as_str) {
+                        next_cursor = Some(cursor.to_string());
+                    }
+                }
                 continue;
             }
             // Event rows: icon names the type; message/url/timestamp come

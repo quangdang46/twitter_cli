@@ -410,6 +410,37 @@ mod tests {
         assert_eq!(cursor.as_deref(), Some("NEXT_NOTIF"));
     }
 
+    /// Bead o1l.1.8 §1 — live-parity regression: a bare Top-cursor entry
+    /// (exactly what `mentions --max 2` returned live 2026-09-16 on an
+    /// account with no mentions: `{"entryId":"cursor-top-…","content":
+    /// {"operation":{"cursor":{"cursorType":"Top",…}}}}`) must yield ZERO
+    /// events — cursor rows are paging state, never NotificationEvents.
+    /// Previously this emitted a `cursor-top-1` pseudo-event.
+    #[test]
+    fn top_cursor_entries_emit_no_events() {
+        let payload = json!({
+            "globalObjects": {},
+            "timeline": {
+                "instructions": [{
+                    "addEntries": {
+                        "entries": [{
+                            "entryId": "cursor-top-1",
+                            "content": {
+                                "operation": {
+                                    "cursor": { "cursorType": "Top", "value": "TOPVAL" }
+                                }
+                            }
+                        }]
+                    }
+                }]
+            }
+        });
+        let (events, tweets, cursor) = crate::parse::parse_notifications_response(&payload);
+        assert!(events.is_empty(), "Top cursor is not an event");
+        assert!(tweets.is_empty());
+        assert!(cursor.is_none(), "Top cursor does not advance paging");
+    }
+
     #[test]
     fn notification_events_and_tweets_are_not_conflated() {
         // The bead's core invariant: events are NOT Tweets. An event with
