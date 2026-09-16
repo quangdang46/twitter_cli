@@ -9,8 +9,8 @@ use crate::article::parse_article;
 use crate::deep_get::parse_int;
 use crate::dget;
 use crate::model::{
-    Author, BookmarkFolder, ListOwner, Metrics, NotificationActor, NotificationEvent, Tweet,
-    TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, Metrics, NotificationActor,
+    NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
 };
 use serde_json::Value;
 
@@ -898,4 +898,99 @@ pub fn parse_notifications_response(
     }
 
     (events, tweets, next_cursor)
+}
+
+/// Parse a DM inbox_initial_state / inbox_timeline REST response into
+/// conversations, UNCONFIRMED envelope (no fixture in the corpus — see
+/// bead o1l.5.2 comment; Rettiwt's DirectMessage.ts covers request
+/// construction, not response shape). Tolerant/best-effort: any of
+/// `conversations` (object keyed by id) or `inbox.conversations` object.
+pub fn parse_dm_inbox_response(data: &Value) -> (Vec<DmConversation>, Option<String>) {
+    let empty_obj = serde_json::Map::new();
+    let convs = data
+        .get("conversations")
+        .and_then(Value::as_object)
+        .or_else(|| {
+            data.pointer("/inbox_initial_state/conversations")
+                .and_then(Value::as_object)
+        })
+        .unwrap_or(&empty_obj);
+    let mut out = Vec::new();
+    for (id, c) in convs {
+        let participants = c
+            .get("participants")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let uid = p.get("user_id").and_then(Value::as_str)?;
+                        Some(NotificationActor {
+                            id: uid.to_string(),
+                            screen_name: String::new(),
+                            name: String::new(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(DmConversation {
+            id: id.clone(),
+            participants,
+            last_message: None,
+            last_timestamp_ms: c
+                .get("sort_timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            unread_count: 0,
+        });
+    }
+    let next = data
+        .pointer("/inbox_timeline/min_entry_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (out, next)
+}
+
+/// Parse a DM conversation history response (`dm/conversation/<id>.json`)
+/// into messages, UNCONFIRMED envelope (same caveat as
+/// `parse_dm_inbox_response`). Tolerant: `entries[].message.message_data`.
+pub fn parse_dm_conversation_response(data: &Value) -> (Vec<DmMessage>, Option<String>) {
+    let empty = Vec::new();
+    let entries = data
+        .pointer("/conversation_timeline/entries")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let mut out = Vec::new();
+    for e in entries {
+        let Some(md) = e.pointer("/message/message_data") else {
+            continue;
+        };
+        let Some(id) = md.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        out.push(DmMessage {
+            id: id.to_string(),
+            sender_id: md
+                .get("sender_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            text: md
+                .pointer("/text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            timestamp_ms: md
+                .get("time")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    let next = data
+        .pointer("/conversation_timeline/min_entry_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (out, next)
 }

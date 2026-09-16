@@ -141,6 +141,34 @@ pub struct NotificationEvent {
     pub message: Option<String>,
 }
 
+/// A DM conversation (own family — NOT a Tweet, NOT a NotificationEvent:
+/// inbound social signal about your content vs. private correspondence are
+/// fundamentally different concepts; see bead o1l.5.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DmConversation {
+    pub id: String,
+    #[serde(default)]
+    pub participants: Vec<NotificationActor>,
+    #[serde(default)]
+    pub last_message: Option<String>,
+    #[serde(default)]
+    pub last_timestamp_ms: String,
+    #[serde(default)]
+    pub unread_count: i64,
+}
+
+/// One DM event within a conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DmMessage {
+    pub id: String,
+    #[serde(default)]
+    pub sender_id: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub timestamp_ms: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookmarkFolder {
     pub id: String,

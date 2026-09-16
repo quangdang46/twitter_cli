@@ -118,3 +118,13 @@ UpdatePinnedTimelines:
   queryId: AtN-0mKI3fXXmxzYYk1Wqw
   rps: 0.3
   burst: 1
+# DMs ride 1.1 REST (no queryId) — throttle only, reads gentle, sends strict.
+DmList:
+  rps: 0.5
+  burst: 2
+DmRead:
+  rps: 0.5
+  burst: 2
+DmSend:
+  rps: 0.3
+  burst: 1

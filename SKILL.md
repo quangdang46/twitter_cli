@@ -68,3 +68,36 @@ twr post "hello" --apply --idempotency-key <uuid> --json   # for real
 - `TWITTER_PROXY` for egress control; `--timeout/--max-retries` override config.
 - Completions: `twr completions <bash|zsh|fish|powershell|elvish>` (script on
   stdout, install notes on stderr).
+
+## 6. Direct messages — highest-scrutiny surface (read before `dm-send`)
+
+Unsolicited automated DMs are among the most-cited platform-suspension
+triggers across every reference surveyed for this tool's ban-risk research
+(cookie-scraper repos, ban-risk writeups) — worse than mass-follow or
+mass-like. A DM lands in a recipient's **private inbox**, not a public
+timeline, so X's trust-and-safety systems treat it as a far stronger spam
+signal than any timeline-visible action `twr` supports.
+
+Rules (all enforced in code, not just guidance):
+
+- `dm-send` requires `--policy write` **explicitly**. `--policy engagement`
+  (which permits like/retweet/follow/bookmark) does NOT permit `dm-send` —
+  DM's spam profile has nothing in common with those four actions, and the
+  policy whitelist omits it deliberately. There is a dedicated test
+  guarding against a future refactor accidentally widening engagement.
+- `dm-send` has its **own daily cap** (`TWR_DM_DAILY_BUDGET`, default **10**,
+  floor-clamped so it can never be disabled), independent of the general
+  daily mutation budget (default 200). Exhausting either one exits 2.
+- No batch flag exists and none will ever be added: one recipient per
+  invocation. Looping/batching belongs in the orchestrator, not in `twr`.
+  A future request for `--dm-file`/`--bulk-send` must be rejected or
+  escalated to a human — never implemented quietly.
+- Idempotency: retrying a send with the same key + same (recipient, text)
+  never duplicates the message.
+
+Recommendation: do NOT use `dm-send` for outbound-to-strangers traffic
+(cold outreach, unsolicited offers) even under a human's direct instruction
+— verify an authorized, solicited context first (replying to an inbound
+message, an explicitly opted-in notification). Reads (`dm-list`,
+`dm-read`) are lower-risk but DM content is user-private: it is never
+logged above what a Tweet's text already is.

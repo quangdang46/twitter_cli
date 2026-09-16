@@ -196,6 +196,27 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+    /// List your DM conversations (1.1 REST, own model — see SKILL.md §6).
+    DmList {
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Read a DM conversation's message history.
+    DmRead {
+        conversation_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Send a DM. HIGHEST-SCRUTINY write in twr — requires --policy write
+    /// explicitly (--policy engagement does NOT cover it), its own daily
+    /// cap (TWR_DM_DAILY_BUDGET, default 10), no batch flag ever. Read
+    /// SKILL.md §6 before using this for anything but a solicited reply.
+    DmSend {
+        user_id: String,
+        text: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Delete a tweet (always previews first, even with --apply).
     Delete {
         id: String,
@@ -821,6 +842,31 @@ async fn main() -> anyhow::Result<()> {
                 },
             )
             .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::DmList { cursor } => {
+            kind = "dm_list";
+            let (d, code) = run_dm_list(&opts, cursor).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::DmRead {
+            conversation_id,
+            cursor,
+        } => {
+            kind = "dm_message_list";
+            let (d, code) = run_dm_read(&opts, conversation_id, cursor).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::DmSend {
+            user_id,
+            text,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_dm_send(&opts, user_id, text, idempotency_key).await;
             data = d;
             exit_code = code;
         }
@@ -1562,6 +1608,9 @@ fn schema_data() -> serde_json::Value {
             {"name": "list-pin", "type": "write_result"},
             {"name": "list-unpin", "type": "write_result"},
             {"name": "edit", "type": "write_result"},
+            {"name": "dm-list", "type": "dm_list"},
+            {"name": "dm-read", "type": "dm_message_list"},
+            {"name": "dm-send", "type": "write_result"},
         ]
     })
 }
@@ -1612,6 +1661,9 @@ fn commands_data() -> serde_json::Value {
         {"name": "list-pin", "type": "write_result", "desc": "Pin a list to your sidebar"},
         {"name": "list-unpin", "type": "write_result", "desc": "Unpin a list from your sidebar"},
         {"name": "edit", "type": "write_result", "desc": "Edit a tweet's text (Premium-gated, same CreateTweet op)"},
+        {"name": "dm-list", "type": "dm_list", "desc": "List your DM conversations (private, never logged)"},
+        {"name": "dm-read", "type": "dm_message_list", "desc": "Read one DM conversation's message history"},
+        {"name": "dm-send", "type": "write_result", "desc": "Send a DM (write-policy only, own daily cap, no batch)"},
     ])
 }
 
@@ -4597,6 +4649,349 @@ fn extract_created_list_id(payload: &serde_json::Value) -> Option<String> {
         }
     }
     None
+}
+
+// ── DM (P6.5, highest-scrutiny surface — see SKILL.md §6) ────────────────
+
+/// `twr dm-list`: 1.1 REST inbox (`dm/inbox_initial_state.json` first page,
+/// `dm/inbox_timeline/trusted.json` when paging) — Rettiwt-API
+/// `DirectMessageService.inbox` verbatim shape (see bead o1l.5.2 comment;
+/// pinned blob 4f11105.9818c8bf, `src/requests/DirectMessage.ts`, fetched
+/// and byte-checked by e1).
+///
+/// NO GraphQL op exists for DM inbox — do not add one. Envelope
+/// UNCONFIRMED against a live capture — tolerant parsing.
+async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_json::Value, i32) {
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let config = twr_config::TwrConfig::default();
+    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let url = match &cursor {
+        Some(c) => format!(
+            "https://x.com/i/api/1.1/dm/inbox_timeline/trusted.json?max_id={}&dm_users=false",
+            url_encode_query(c)
+        ),
+        None => "https://x.com/i/api/1.1/dm/inbox_initial_state.json?dm_users=true".to_string(),
+    };
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "GET",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let resp = match ctx.transport.get(&url, &refs).await {
+        Ok(r) => r,
+        Err(_) => return (serde_json::json!({"error": "dm-list fetch failed"}), 5),
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if resp.status == 404 {
+        return (
+            serde_json::json!({"error": "contract drift (DM inbox endpoint moved)"}),
+            6,
+        );
+    }
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    let (convs, next) = twr_model::parse_dm_inbox_response(&body);
+    let mut page = serde_json::json!({"returned": convs.len(), "hasMore": next.is_some()});
+    if let Some(c) = next {
+        page["nextCursor"] = serde_json::json!(c);
+    }
+    (serde_json::json!({"conversations": convs, "page": page}), 0)
+}
+
+/// `twr dm-read <conversation_id>`: 1.1 REST `dm/conversation/<id>.json`
+/// — Rettiwt-API `DirectMessageService.conversation` verbatim shape (same
+/// pinned source as dm-list). `--cursor` here is the WITHIN-conversation
+/// axis (last message id), a DIFFERENT cursor from dm-list's inbox axis —
+/// do not conflate the two (bead o1l.5.2's explicit warning). DM content
+/// is user-private: never logged beyond what a Tweet's text already is
+/// (no -v/-vv path touches message text here).
+async fn run_dm_read(
+    opts: &OutputOptions,
+    conversation_id: String,
+    cursor: Option<String>,
+) -> (serde_json::Value, i32) {
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let config = twr_config::TwrConfig::default();
+    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let context = if cursor.is_some() {
+        "FETCH_DM_CONVERSATION_HISTORY"
+    } else {
+        "FETCH_DM_CONVERSATION"
+    };
+    let mut url = format!(
+        "https://x.com/i/api/1.1/dm/conversation/{}.json?context={}&dm_users=false&include_conversation_info=true",
+        url_encode_query(&conversation_id),
+        context
+    );
+    if let Some(c) = &cursor {
+        url.push_str(&format!("&max_id={}", url_encode_query(c)));
+    }
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "GET",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let resp = match ctx.transport.get(&url, &refs).await {
+        Ok(r) => r,
+        Err(_) => return (serde_json::json!({"error": "dm-read fetch failed"}), 5),
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if resp.status == 404 {
+        return (serde_json::json!({"error": "conversation not found"}), 3);
+    }
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    let (msgs, next) = twr_model::parse_dm_conversation_response(&body);
+    let mut page = serde_json::json!({"returned": msgs.len(), "hasMore": next.is_some()});
+    if let Some(c) = next {
+        page["nextCursor"] = serde_json::json!(c);
+    }
+    (
+        serde_json::json!({"conversation_id": conversation_id, "messages": msgs, "page": page}),
+        0,
+    )
+}
+
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `twr dm-send <user_id> <text>`: THE highest-scrutiny write in twr — see
+/// SKILL.md §6 before touching this. Enforces, in this exact order:
+/// 1. own daily cap (`TWR_DM_DAILY_BUDGET`, default 10) — SEPARATE from
+///    the general mutation budget (o1l.6 acceptance: a user with general
+///    budget left must NOT also get unbounded DMs).
+/// 2. `--policy write` EXPLICITLY — "dm-send" is deliberately absent from
+///    `Policy::Engagement`'s whitelist (that omission IS the enforcement;
+///    see crates/twr-core/src/policy.rs). Engagement already permits
+///    like/retweet/follow/bookmark; DM's spam profile has nothing in
+///    common with those four, so it must NOT ride along.
+/// 3. the standard --apply/--dry-run/--no-interactive decision table.
+/// 4. idempotency (pre_check/Acknowledged, same mechanism as post).
+///
+/// Wire shape: 1.1 REST `dm/new2.json` POST (LukewarmIntro snippet —
+/// SECOND-HAND, not byte-verified; see bead o1l.5.3 comment for the full
+/// uncertainty writeup and the GraphQL useSendMessageMutation fallback
+/// documented there if this 404s/214s live). NO batch flag, one recipient
+/// per call, by design — never add one (SKILL.md §6).
+async fn run_dm_send(
+    opts: &OutputOptions,
+    user_id: String,
+    text: String,
+    idempotency_key: Option<String>,
+) -> (serde_json::Value, i32) {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    // 1. DM's own daily cap — checked BEFORE policy, same "no side effects
+    // on denial" ordering as the general budget in run_post_write.
+    if let Some(path) = twr_core::budget::default_dm_log_path() {
+        let limit = twr_core::budget::effective_dm_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
+    // 2. Policy: "dm-send" is not in the Engagement whitelist, so only
+    // Policy::Write allows it — read_only AND engagement both deny.
+    if !opts.policy.allows("dm-send") {
+        return (
+            serde_json::json!({"error": opts.policy.denial("dm-send")}),
+            2,
+        );
+    }
+    let stdin_is_tty = true;
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
+        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Preview => return (dry_run_data("dm-send"), 0),
+        Decision::Prompt => {
+            if opts.no_interactive {
+                return (
+                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    2,
+                );
+            }
+            eprintln!("This will dm-send to user {user_id}. Type 'yes' to proceed:");
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data("dm-send"), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data("dm-send"), 0),
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
+    let store = store_path
+        .as_deref()
+        .map(|p| twr_core::idempotency::load(p, now))
+        .unwrap_or_default();
+    if let Some(key) = &idempotency_key {
+        match twr_core::idempotency::pre_check(&store, key) {
+            twr_core::PreCheck::ReplayCached(result) => {
+                return (
+                    serde_json::json!({"idempotent_replay": true, "result": result}),
+                    0,
+                );
+            }
+            twr_core::PreCheck::RefuseUnknown => {
+                return (
+                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                    1,
+                );
+            }
+            twr_core::PreCheck::Proceed => {}
+        }
+    }
+
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let config = twr_config::TwrConfig::default();
+    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let url = "https://x.com/i/api/1.1/dm/new2.json";
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "POST",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let mut refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    refs.push(("Content-Type", "application/json"));
+    let body = serde_json::json!({
+        "recipient_ids": user_id,
+        "text": text,
+        "cards_platform": "Web-12",
+        "include_cards": 1,
+        "include_quote_count": true,
+        "dm_users": false,
+    });
+    let raw = serde_json::to_vec(&body).unwrap_or_default();
+    let resp = match ctx.transport.post_json(url, &refs, &raw).await {
+        Ok(r) => r,
+        Err(_) => {
+            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            return (
+                serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                1,
+            );
+        }
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if !(200..300).contains(&resp.status) {
+        return (
+            serde_json::json!({"error": format!("dm-send failed: HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {
+        if let Some(first) = errors.first() {
+            let code = first.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            let message = first
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("mutation rejected");
+            let kind = twr_core::ErrorKind::from_api_code(code);
+            let err = twr_core::TwrError::new(
+                kind,
+                format!("dm-send rejected (X code {code}): {message}"),
+            );
+            return (serde_json::json!({"error": err.message}), kind.exit_code());
+        }
+    }
+    let u01 = (now % 1000) as f64 / 1000.0;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        cli::write::write_delay_secs(u01),
+    ))
+    .await;
+    if let Some(key) = &idempotency_key {
+        if let Some(p) = &store_path {
+            let mut s = twr_core::idempotency::load(p, now);
+            s.insert(
+                key.clone(),
+                twr_core::IdempotencyEntry {
+                    state: twr_core::WriteState::Acknowledged,
+                    created_at_secs: now,
+                    result: Some(serde_json::json!({"ok": true, "recipient": user_id})),
+                },
+            );
+            let _ = twr_core::idempotency::save(p, &s);
+        }
+    }
+    // DM's OWN daily cap record — separate file from the general budget
+    // (o1l.6 acceptance: this must not touch mutations.json).
+    if let Some(path) = twr_core::budget::default_dm_log_path() {
+        twr_core::budget::record(&path, &twr_core::budget::today_utc());
+    }
+    (
+        serde_json::json!({"ok": true, "operation": "dm-send", "recipient": user_id}),
+        0,
+    )
 }
 
 /// `twr completions <shell>`: script to stdout, instructions to stderr

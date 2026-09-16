@@ -113,6 +113,34 @@ pub fn denial_suggestion(used: u32, limit: u32) -> String {
     format!("daily mutation budget exhausted ({used}/{limit} today); raise with TWR_DAILY_BUDGET (never disableable) or wait until tomorrow")
 }
 
+/// DM daily cap (bead o1l.5.3): mirrors the general budget's exact
+/// pattern — own state file, own env override, same clamp-never-disable
+/// semantics, SAME exit code 2 / BudgetCheck::Deny shape (a LOCAL POLICY
+/// denial, not a server rate-limit — never exit 4 / retryAfterMs).
+/// Default 10: DMs are the highest-scrutiny surface (see SKILL.md §6);
+/// 10/day is enough for solicited replies, far below any spam profile.
+pub const DEFAULT_DM_DAILY_BUDGET: u32 = 10;
+/// Env override name for the DM cap.
+pub const DM_BUDGET_ENV_VAR: &str = "TWR_DM_DAILY_BUDGET";
+
+/// Effective DM budget: env override clamped to `[MIN, u32::MAX]`, else default.
+pub fn effective_dm_budget(read_env: impl FnOnce(&str) -> Option<String>) -> u32 {
+    match read_env(DM_BUDGET_ENV_VAR).and_then(|v| v.parse::<u32>().ok()) {
+        Some(n) => n.max(MIN_DAILY_BUDGET),
+        None => DEFAULT_DM_DAILY_BUDGET,
+    }
+}
+
+/// Default DM state path: `~/.twr/dm_budget.json` (sibling to mutations.json).
+pub fn default_dm_log_path() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".twr").join("dm_budget.json"))
+}
+
+/// DM denial suggestion (exit 2).
+pub fn dm_denial_suggestion(used: u32, limit: u32) -> String {
+    format!("daily DM budget exhausted ({used}/{limit} today); raise with TWR_DM_DAILY_BUDGET (never disableable) or wait until tomorrow — DMs are the highest-scrutiny surface, see SKILL.md §6")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +158,14 @@ mod tests {
         let t = today_utc();
         assert_eq!(t.len(), 10);
         assert_eq!(&t[4..5], "-");
+    }
+
+    #[test]
+    fn dm_budget_defaults_and_env_override() {
+        assert_eq!(effective_dm_budget(|_| None), 10);
+        assert_eq!(effective_dm_budget(|_| Some("3".into())), 3);
+        assert_eq!(effective_dm_budget(|_| Some("0".into())), 1);
+        assert_eq!(effective_dm_budget(|_| Some("junk".into())), 10);
     }
 
     #[test]

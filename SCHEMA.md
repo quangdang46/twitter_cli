@@ -10,7 +10,7 @@ Every machine invocation prints exactly one document on stdout
 {
   "ok": true,
   "schema_version": "1",
-  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dry_run",
+  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dry_run|dm_list|dm_message_list",
   "data": {},
   "pagination": {"nextCursor": "…", "hasMore": true},
   "meta": {"traceId": "…", "command": "search", "maxRequested": 20, "returned": 20, "filterApplied": false}
@@ -61,6 +61,8 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
   add `"graphql_operation": "CreateTweet"|"CreateNoteTweet"` (auto-routed at
   the 280-weighted-char threshold — reported in `--dry-run` previews too, so
   an agent can confirm which mutation would run before `--apply`).
+- `dm_list`: `{"conversations": DmConversation[], "page": {...}}` (from `dm-list`); `DmConversation{id, participants[{id,screen_name,name}], last_message?, last_timestamp_ms, unread_count}` — private; never logged beyond envelope
+- `dm_message_list`: `{"conversation_id": str, "messages": DmMessage[], "page": {...}}` (from `dm-read`); `DmMessage{id, sender_id, text, timestamp_ms}` — same privacy note
 - `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS", "status": "pass|warn|fail", "suggestion": …}]}`
 - `query-ids`: `{"operations": [{"operation": …, "query_id": …, "source": …}]}`
 - `schema` / `commands`: this catalog, machine-readable

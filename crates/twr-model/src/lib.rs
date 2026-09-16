@@ -11,12 +11,13 @@ pub mod model;
 pub mod parse;
 
 pub use model::{
-    Author, BookmarkFolder, ListOwner, Metrics, NotificationActor, NotificationEvent, Tweet,
-    TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, Metrics, NotificationActor,
+    NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
 };
 pub use parse::{
-    parse_bookmark_folders_response, parse_list_members_response, parse_lists_response,
-    parse_notifications_response, parse_timeline_response, parse_tweet_result, parse_user_result,
+    parse_bookmark_folders_response, parse_dm_conversation_response, parse_dm_inbox_response,
+    parse_list_members_response, parse_lists_response, parse_notifications_response,
+    parse_timeline_response, parse_tweet_result, parse_user_result,
 };
 
 #[cfg(test)]
@@ -422,6 +423,57 @@ mod tests {
         assert!(tweets.is_empty());
         let (events2, tweets2, cursor2) = crate::parse::parse_notifications_response(&json!({}));
         assert!(events2.is_empty() && tweets2.is_empty() && cursor2.is_none());
+    }
+
+    #[test]
+    fn parses_dm_inbox_conversations() {
+        let data = json!({
+            "conversations": {
+                "u1-u2": {
+                    "participants": [{"user_id": "u1"}, {"user_id": "u2"}],
+                    "sort_timestamp": "1700000000000"
+                }
+            }
+        });
+        let (convs, _) = crate::parse::parse_dm_inbox_response(&data);
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, "u1-u2");
+        assert_eq!(convs[0].participants.len(), 2);
+        assert_eq!(convs[0].last_timestamp_ms, "1700000000000");
+    }
+
+    #[test]
+    fn dm_inbox_missing_shape_is_empty_not_an_error() {
+        let (convs, cursor) = crate::parse::parse_dm_inbox_response(&json!({}));
+        assert!(convs.is_empty());
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn parses_dm_conversation_messages() {
+        let data = json!({
+            "conversation_timeline": {
+                "entries": [
+                    { "message": { "message_data": {
+                        "id": "m1", "sender_id": "u1", "text": "hi",
+                        "time": "1700000000000"
+                    }}}
+                ],
+                "min_entry_id": "m1"
+            }
+        });
+        let (msgs, cursor) = crate::parse::parse_dm_conversation_response(&data);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].sender_id, "u1");
+        assert_eq!(msgs[0].text, "hi");
+        assert_eq!(cursor.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn dm_conversation_missing_shape_is_empty_not_an_error() {
+        let (msgs, cursor) = crate::parse::parse_dm_conversation_response(&json!({}));
+        assert!(msgs.is_empty());
+        assert!(cursor.is_none());
     }
 
     #[test]

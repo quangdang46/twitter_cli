@@ -106,6 +106,16 @@ mod tests {
     }
 
     #[test]
+    fn dm_send_is_write_only() {
+        // Bead o1l.5.3: the highest-scrutiny write. Engagement MUST NOT
+        // cover it (its spam profile has nothing in common with
+        // like/retweet/follow/bookmark); only --policy write reaches it.
+        assert!(!Policy::Engagement.allows("dm-send"), "dm-send");
+        assert!(!Policy::ReadOnly.allows("dm-send"), "dm-send");
+        assert!(Policy::Write.allows("dm-send"), "dm-send");
+    }
+
+    #[test]
     fn p63_write_tier_stays_write_only_and_engagement_covers_list_engagement() {
         // Write-tier: create/edit/delete are unreachable under engagement.
         for op in ["list-create", "list-edit", "list-delete"] {

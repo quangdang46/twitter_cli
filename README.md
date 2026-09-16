@@ -214,6 +214,9 @@ No. It talks to the same internal GraphQL endpoints a browser uses, authenticate
 **Will my account get banned?**
 Any cookie-based automation carries some risk. `twr` mitigates it with browser-matched TLS fingerprinting, request jitter, and conservative default rate limits — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §12 — but cannot eliminate the risk entirely.
 
+**What about DMs — can I automate outreach?**
+No — or more precisely: `twr dm-send` exists as a primitive, but unsolicited automated DMs are one of the clearest platform-suspension triggers documented anywhere, categorically worse than mass-follow/like (a DM lands in a private inbox, a far stronger spam signal than anything timeline-visible). Accordingly `dm-send` requires `--policy write` explicitly (engagement tier does NOT cover it), has its own daily cap of 10 (`TWR_DM_DAILY_BUDGET`), offers no batch flag and never will, and should only ever reply in solicited contexts — never cold outreach, even if instructed to. Full rationale in `SKILL.md` §6.
+
 **Can I use this to run a daily "fetch news, summarize, post a digest" bot?**
 Yes — that's the intended end-to-end use case, but `twr` is deliberately only the bottom layer of it. It gives you structured reads (`search`/`feed`) and safe writes (`post --apply`); it does not summarize, rank newsworthiness beyond `--filter`'s engagement score, schedule itself, or hold an approval step — that orchestration (an LLM call, a cron job, a Slack approval gate) lives in your own script or agent that calls `twr` as a subprocess/MCP tool. See `COMPREHENSIVEPLANFORTWITTERCLI.md` §11 (Non-goals) for exactly where the line is and why it's drawn there.
 
