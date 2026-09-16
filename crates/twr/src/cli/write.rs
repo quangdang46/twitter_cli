@@ -50,12 +50,30 @@ pub fn validate_images(paths: &[String]) -> Result<Vec<String>, String> {
     Ok(paths.to_vec())
 }
 
-/// Variables for CreateTweet (post / reply / quote share the op).
+/// Variables for CreateTweet (post / reply / quote / edit share the op).
+/// `edit_target`: Some(id) adds `edit_options: {previous_tweet_id}` —
+/// the twikit mechanism (same op + endpoint, NOT a separate EditTweet
+/// mutation; see bead o1l.4.2 comment). `card_uri`: poll card passthrough
+/// (twikit `poll_uri` → `card_uri`; bead o1l.4.3 comment).
+/// Thin wrapper kept for the existing unit test + any plain-path callers.
+#[allow(dead_code)]
 pub fn create_tweet_vars(
     text: &str,
     reply_to: Option<&str>,
     quote_url: Option<&str>,
     media_ids: &[String],
+) -> serde_json::Value {
+    create_tweet_vars_full(text, reply_to, quote_url, media_ids, None, None)
+}
+
+/// Full variant with edit + card_uri (edit/poll beads).
+pub fn create_tweet_vars_full(
+    text: &str,
+    reply_to: Option<&str>,
+    quote_url: Option<&str>,
+    media_ids: &[String],
+    card_uri: Option<&str>,
+    edit_target: Option<&str>,
 ) -> serde_json::Value {
     let media_entities: Vec<serde_json::Value> = media_ids
         .iter()
@@ -75,6 +93,12 @@ pub fn create_tweet_vars(
     }
     if let Some(url) = quote_url {
         vars["attachment_url"] = serde_json::json!(url);
+    }
+    if let Some(uri) = card_uri {
+        vars["card_uri"] = serde_json::json!(uri);
+    }
+    if let Some(prev) = edit_target {
+        vars["edit_options"] = serde_json::json!({"previous_tweet_id": prev});
     }
     vars
 }
@@ -166,6 +190,46 @@ pub fn note_tweet_vars(
         });
     }
     Ok(vars)
+}
+
+/// Classify an edit rejection message into (code, suggestion), all
+/// exit-4 / retryable:false (o1l.4.2 taxonomy). Message-substring based —
+/// X has no stable numeric code per case. Returns None when the message
+/// matches none of the three known cases (caller falls through to the
+/// generic from_api_code path).
+pub fn classify_edit_rejection(message: &str) -> Option<(&'static str, &'static str)> {
+    let m = message.to_lowercase();
+    if m.contains("not eligible")
+        || m.contains("premium")
+        || m.contains("blue")
+        || m.contains("subscri")
+    {
+        Some((
+            "edit-not-eligible",
+            "tweet editing needs X Premium on this account; delete-and-repost instead, or give up",
+        ))
+    } else if m.contains("window")
+        || m.contains("expired")
+        || m.contains("too old")
+        || m.contains("editable_until")
+    {
+        Some((
+            "edit-window-expired",
+            "the edit window for this tweet has passed; delete-and-repost instead — retrying will never succeed",
+        ))
+    } else if m.contains("count")
+        || m.contains("exhausted")
+        || m.contains("limit")
+        || m.contains("no more edits")
+        || m.contains("locked")
+    {
+        Some((
+            "edit-count-exhausted",
+            "this tweet has no edits remaining; delete-and-repost instead — retrying will never succeed",
+        ))
+    } else {
+        None
+    }
 }
 
 /// Parse a CreateNoteTweet response's tweet id across the three envelope
@@ -383,6 +447,23 @@ mod tests {
     fn note_tweet_vars_fail_closed_on_reply_and_quote() {
         assert!(note_tweet_vars("t", &[], Some("123"), None).is_err());
         assert!(note_tweet_vars("t", &[], None, Some("456")).is_err());
+    }
+
+    #[test]
+    fn edit_rejection_taxonomy_has_three_distinct_cases() {
+        let (c1, _) =
+            classify_edit_rejection("not eligible for editing, Premium required").unwrap();
+        let (c2, _) = classify_edit_rejection("edit window expired").unwrap();
+        let (c3, _) = classify_edit_rejection("edit count exhausted, locked").unwrap();
+        assert_eq!(
+            (c1, c2, c3),
+            (
+                "edit-not-eligible",
+                "edit-window-expired",
+                "edit-count-exhausted"
+            )
+        );
+        assert!(classify_edit_rejection("something entirely different").is_none());
     }
 
     #[test]

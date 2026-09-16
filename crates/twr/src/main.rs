@@ -155,6 +155,11 @@ enum Command {
         /// Alt text for attached media.
         #[arg(long)]
         alt_text: Option<String>,
+        /// Poll card URI (provisioned via twikit/tweety/X UI — native
+        /// v11 create_card is UNCONFIRMED; see bead o1l.4.3 comment).
+        /// Attached as `card_uri` on the CreateTweet variables.
+        #[arg(long)]
+        card_uri: Option<String>,
         /// Idempotency key (24h dedup window).
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -165,6 +170,9 @@ enum Command {
         text: String,
         #[arg(long, short = 'i')]
         image: Vec<String>,
+        /// Poll card URI (see Post --card-uri).
+        #[arg(long)]
+        card_uri: Option<String>,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
@@ -174,6 +182,17 @@ enum Command {
         text: String,
         #[arg(long, short = 'i')]
         image: Vec<String>,
+        /// Poll card URI (see Post --card-uri).
+        #[arg(long)]
+        card_uri: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Edit a tweet's text (Premium-gated server-side; same CreateTweet
+    /// op + edit_options, NOT a separate mutation — see bead o1l.4.2).
+    Edit {
+        id: String,
+        text: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
@@ -702,6 +721,7 @@ async fn main() -> anyhow::Result<()> {
             video,
             file,
             alt_text,
+            card_uri,
             idempotency_key,
         } => {
             kind = "write_result";
@@ -744,6 +764,8 @@ async fn main() -> anyhow::Result<()> {
                         reply_to,
                         quote_id: None,
                         images: image,
+                        card_uri,
+                        edit_target: None,
                         idempotency_key,
                     },
                 )
@@ -756,6 +778,7 @@ async fn main() -> anyhow::Result<()> {
             id,
             text,
             image,
+            card_uri,
             idempotency_key,
         } => {
             kind = "write_result";
@@ -768,6 +791,32 @@ async fn main() -> anyhow::Result<()> {
                     reply_to: Some(id),
                     quote_id: None,
                     images: image,
+                    card_uri,
+                    edit_target: None,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Edit {
+            id,
+            text,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_post_write(
+                &opts,
+                &config,
+                WriteArgs {
+                    operation: "edit",
+                    text,
+                    reply_to: None,
+                    quote_id: None,
+                    images: vec![],
+                    card_uri: None,
+                    edit_target: Some(id),
                     idempotency_key,
                 },
             )
@@ -1084,6 +1133,7 @@ async fn main() -> anyhow::Result<()> {
             id,
             text,
             image,
+            card_uri,
             idempotency_key,
         } => {
             kind = "write_result";
@@ -1096,6 +1146,8 @@ async fn main() -> anyhow::Result<()> {
                     reply_to: None,
                     quote_id: Some(id),
                     images: image,
+                    card_uri,
+                    edit_target: None,
                     idempotency_key,
                 },
             )
@@ -1509,6 +1561,7 @@ fn schema_data() -> serde_json::Value {
             {"name": "list-unfollow", "type": "write_result"},
             {"name": "list-pin", "type": "write_result"},
             {"name": "list-unpin", "type": "write_result"},
+            {"name": "edit", "type": "write_result"},
         ]
     })
 }
@@ -1558,6 +1611,7 @@ fn commands_data() -> serde_json::Value {
         {"name": "list-unfollow", "type": "write_result", "desc": "Unsubscribe from a list"},
         {"name": "list-pin", "type": "write_result", "desc": "Pin a list to your sidebar"},
         {"name": "list-unpin", "type": "write_result", "desc": "Unpin a list from your sidebar"},
+        {"name": "edit", "type": "write_result", "desc": "Edit a tweet's text (Premium-gated, same CreateTweet op)"},
     ])
 }
 
@@ -3205,6 +3259,14 @@ struct WriteArgs {
     reply_to: Option<String>,
     quote_id: Option<String>,
     images: Vec<String>,
+    /// Poll card URI passthrough (twikit `poll_uri` → `card_uri`; see bead
+    /// o1l.4.3 comment — v11 create_card itself is UNCONFIRMED, so twr only
+    /// attaches caller-provisioned URIs, never mints them).
+    card_uri: Option<String>,
+    /// Edit target: Some(id) turns this CreateTweet call into an edit via
+    /// `edit_options: {previous_tweet_id}` (twikit mechanism — same op,
+    /// same endpoint, NOT a separate EditTweet mutation; see o1l.4.2).
+    edit_target: Option<String>,
     idempotency_key: Option<String>,
 }
 
@@ -3219,6 +3281,8 @@ async fn run_post_write(
         reply_to,
         quote_id,
         images,
+        card_uri,
+        edit_target,
         idempotency_key,
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
@@ -3418,11 +3482,13 @@ async fn run_post_write(
             Err(e) => return (serde_json::json!({"error": e}), 2),
         }
     } else {
-        cli::write::create_tweet_vars(
+        cli::write::create_tweet_vars_full(
             &text,
             reply_norm.as_deref(),
             quote_url.as_deref(),
             &media_ids,
+            card_uri.as_deref(),
+            edit_target.as_deref(),
         )
     };
     let qid = ctx
@@ -3492,6 +3558,22 @@ async fn run_post_write(
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("mutation rejected");
+            // Edit-eligibility taxonomy (o1l.4.2): not-eligible /
+            // window-expired / count-exhausted are all permission-shaped
+            // server rejections → exit 4 with retryable:false and a
+            // DISTINCT code/message/suggestion each (never one generic
+            // edit_failed). Detection is message-substring based because
+            // X has no stable numeric code per case. Same exit-4 family
+            // covers CreateNoteTweet Premium-gating (sibling convention).
+            if operation == "edit" {
+                if let Some((ecode, esuggest)) = cli::write::classify_edit_rejection(message) {
+                    return (
+                        serde_json::json!({"error": format!("edit rejected ({ecode}): {message}"),
+                            "code": ecode, "suggestion": esuggest, "retryable": false}),
+                        4,
+                    );
+                }
+            }
             // Premium-ineligibility for CreateNoteTweet maps to exit 4
             // (forbidden), matching the sibling EditTweet bead's convention
             // for "X rejected this because the account is not eligible"
@@ -3555,6 +3637,63 @@ async fn run_post_write(
         }
         return (
             serde_json::json!({"id": new_id, "operation": operation, "graphql_operation": "CreateNoteTweet"}),
+            0,
+        );
+    }
+    // Edit success: X mints a NEW tweet id per edit (edit history chain)
+    // — surface it as {id (new), previous_tweet_id, operation: "edit"} so
+    // the caller edits the CURRENT version next time (editing a superseded
+    // id fails; GetXAPI docs, weakest source but matches the chain model).
+    // Cache: re-upsert the returned body when present so the SQLite entity
+    // cache never serves the pre-edit text stale (twr-cache has upsert only,
+    // no delete — a partial body is never written).
+    if operation == "edit" {
+        let result = payload.pointer("/data/create_tweet/tweet_results/result");
+        let new_id_opt: Option<String> = result
+            .and_then(|r| r.get("rest_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let Some(new_id) = new_id_opt else {
+            return (
+                serde_json::json!({"error": "edit returned no new tweet id (unexpected response shape)"}),
+                6,
+            );
+        };
+        if let Some(path) = twr_cache::default_db_path() {
+            if let Ok(conn) = twr_cache::open(&path) {
+                if let Some(t) =
+                    result.and_then(|r| serde_json::from_value::<twr_model::Tweet>(r.clone()).ok())
+                {
+                    let _ = twr_cache::upsert_tweet(&conn, &t);
+                }
+            }
+        }
+        let u01 = (now % 1000) as f64 / 1000.0;
+        tokio::time::sleep(std::time::Duration::from_secs_f64(
+            cli::write::write_delay_secs(u01),
+        ))
+        .await;
+        if let Some(key) = &idempotency_key {
+            if let Some(p) = &store_path {
+                let mut s = twr_core::idempotency::load(p, now);
+                s.insert(
+                    key.clone(),
+                    twr_core::IdempotencyEntry {
+                        state: twr_core::WriteState::Acknowledged,
+                        created_at_secs: now,
+                        result: Some(serde_json::json!({"id": new_id})),
+                    },
+                );
+                let _ = twr_core::idempotency::save(p, &s);
+            }
+        }
+        if let Some(path) = twr_core::budget::default_log_path() {
+            twr_core::budget::record(&path, &twr_core::budget::today_utc());
+        }
+        let prev = edit_target.clone().unwrap_or_default();
+        return (
+            serde_json::json!({"id": new_id, "previous_tweet_id": prev, "operation": "edit"}),
             0,
         );
     }
