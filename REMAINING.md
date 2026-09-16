@@ -95,17 +95,30 @@ needs an input only a human can provide:
 When those exist, 6.1→6.2→6.3 implement in order behind
 `--backend api-v2` (feature-gated, cookie backend stays default).
 
-## P6 (feature-completeness batch) — planned, not started
+## P6 (feature-completeness batch) — in progress
 
-`COMPREHENSIVEPLANFORTWITTERCLI.md` §13 has the full spec: mentions/
-notifications/user-media/user-replies reads, bookmark-folder command wiring
-(query IDs already shipped in `consts.rs`, just never got a command),
-mute/block/pin, list management (create/edit/delete/add-member/follow/pin),
-long-form (`CreateNoteTweet`, supersedes the "not implemented" note in
-README's Limitations once it lands), `EditTweet`, poll creation, and DM
-(read + send, last and highest-scrutiny). Sequencing and per-op query-ID
-starting points (mined from `xeepy`/`Rettiwt-API`/`agentic-x`, **not**
-verified against this repo yet) are in §13.7. Explicitly excluded:
-monetization/Ads/Jobs/Grok/Spaces-live/Communities-create (§13.6) — no
-"daily digest bot" use case, or fundamentally stateful/real-time in a way
-`twr`'s one-shot command model doesn't fit.
+`COMPREHENSIVEPLANFORTWITTERCLI.md` §13 has the full spec. Read-only
+additions (mentions/notifications/user-media/user-replies/lists/list-members/
+bookmark-folders), engagement mutations (mute/block/pin), and list management
+(create/edit/delete/add-member/follow/pin) are code-shipped. Sequencing and
+per-op query-ID starting points (mined from `xeepy`/`Rettiwt-API`/`agentic-x`)
+are in §13.7 — most are still **unverified against this repo's own live
+session**; several list mutations (`CreateList`/`ListSubscribe`/…) are
+currently blocked live with X error 214 (DecodeException) despite vars/
+features/queryId-in-body all matching a working Rettiwt-API reference
+byte-for-byte — root cause unresolved, tracked as an open investigation
+(DevTools capture of `x.com/i/lists/create` is the next planned step).
+
+`CreateNoteTweet` (long-form `post`/`quote` auto-routing, supersedes the
+"not implemented" note in README's Limitations) is code-shipped 1-1 against
+a verified Rettiwt-API reference (`postNote`, blob `4f11105`, cross-checked
+byte-for-byte by a second reviewer) — **live-verification still pending**
+(needs a Premium-tier throwaway account). Long-form reply/quote variable
+shapes are UNCONFIRMED (no reference implementation has a reply/quote path
+for this mutation) and fail closed with a usage error rather than guess.
+
+Explicitly excluded: monetization/Ads/Jobs/Grok/Spaces-live/
+Communities-create (§13.6) — no "daily digest bot" use case, or
+fundamentally stateful/real-time in a way `twr`'s one-shot command model
+doesn't fit. `EditTweet`, poll creation, and DM (read + send) remain
+not-yet-started.

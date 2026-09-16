@@ -85,15 +85,123 @@ pub fn pin_vars(tweet_id: &str) -> serde_json::Value {
     serde_json::json!({"tweet_id": tweet_id})
 }
 
+/// Standard-post weighted-length threshold: X's rule is 280 weighted
+/// characters (twitter-text weighting: URLs count 23 chars regardless of
+/// length). twr does NOT vendor twitter-text: this counts Unicode scalar
+/// values with URL normalization (http/https links → 23), which matches
+/// twitter-text v3 for the cases that matter here (ASCII + CJK + emoji +
+/// URLs) and can only differ on exotic-case weights. Over-threshold text
+/// routes to CreateNoteTweet; at-or-under stays on CreateTweet (mirrors
+/// upstream PR #64's routing test). Conservative direction: a false
+/// "over" only sends a Premium-gated op that fails cleanly with exit 4,
+/// while a false "under" would 186-fail a post that should have routed.
+pub const NOTE_TWEET_THRESHOLD: usize = 280;
+
+/// Weighted length of tweet text: URLs → 23 chars each, everything else →
+/// one unit per Unicode scalar value.
+pub fn weighted_length(text: &str) -> usize {
+    let mut len = 0;
+    let mut rest = text;
+    while let Some(pos) = rest.find("http://").or_else(|| rest.find("https://")) {
+        len += rest[..pos].chars().count();
+        let after = &rest[pos..];
+        let url_len = after
+            .split_whitespace()
+            .next()
+            .map(|u| {
+                // Trim trailing punctuation the counter wouldn't include.
+                u.trim_end_matches([',', '.', '!', '?', ';', ':', ')', ']', '"', '\''])
+                    .len()
+            })
+            .unwrap_or(0);
+        len += 23;
+        rest = &after[url_len.min(after.len())..];
+    }
+    len + rest.chars().count()
+}
+
+/// True when text must route to CreateNoteTweet (over-threshold).
+/// Reply/quote bodies use the SAME threshold (upstream PR #64's lesson:
+/// quote_tweet must route too, not just create_tweet).
+pub fn needs_note_tweet(text: &str) -> bool {
+    weighted_length(text) > NOTE_TWEET_THRESHOLD
+}
+
+/// Variables for CreateNoteTweet: 1-1 from Rettiwt-API `postNote` VERBATIM
+/// (pinned blob 4f11105, src/requests/Tweet.ts; full body in bead
+/// o1l.4.1's comment; independently fetched + verified by c1).
+/// `disallowed_reply_options: null` is LOAD-BEARING (omitting it is the
+/// silent-empty-tweet_results failure mode). NO `dark_request` (CreateTweet
+/// has it, NoteTweet does not). `media`: MediaVariable-shaped when images
+/// exist, else UNDEFINED (Rust: omit the key — `None`, not null).
+/// NO `queryId`-in-body, NO `fieldToggles` (do NOT copy the list-mutation
+/// or CreateTweet patterns here). Reply/quote long-form vars UNCONFIRMED
+/// (postNote has no reply/quote path) — the router sends plain-post shape
+/// only; long quote/reply FAILS CLOSED below instead of guessing.
+pub fn note_tweet_vars(
+    text: &str,
+    media_ids: &[String],
+    reply_to: Option<&str>,
+    quote_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if reply_to.is_some() || quote_id.is_some() {
+        return Err(
+            "long-form reply/quote variables are UNCONFIRMED (Rettiwt postNote has no reply/quote path) — refusing to guess; shorten the text or drop the reply/quote target"
+                .to_string(),
+        );
+    }
+    let mut vars = serde_json::json!({
+        "tweet_text": text,
+        "semantic_annotation_ids": [],
+        "disallowed_reply_options": null,
+    });
+    if !media_ids.is_empty() {
+        let entities: Vec<serde_json::Value> = media_ids
+            .iter()
+            .map(|mid| serde_json::json!({"media_id": mid, "tagged_users": []}))
+            .collect();
+        vars["media"] = serde_json::json!({
+            "media_entities": entities,
+            "possibly_sensitive": false,
+        });
+    }
+    Ok(vars)
+}
+
+/// Parse a CreateNoteTweet response's tweet id across the three envelope
+/// shapes seen in the wild (`create_tweet` / `notetweet_create` /
+/// `create_note_tweet`). Returns None when NO shape confirms — the caller
+/// FAILS CLOSED (explicit error, never false-success; PR #65 lesson).
+pub fn parse_note_tweet_id(payload: &serde_json::Value) -> Option<String> {
+    for pointer in [
+        "/data/create_tweet/tweet_results/result/rest_id",
+        "/data/notetweet_create/notetweet_results/result/rest_id",
+        "/data/notetweet_create/tweet_results/result/rest_id",
+        "/data/create_note_tweet/tweet_results/result/rest_id",
+        "/data/create_note_tweet/notetweet_results/result/rest_id",
+    ] {
+        if let Some(id) = payload
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 /// Variables for CreateList: `{name, description?, isPrivate?}`.
-/// Variable KEYS confirmed by two live-shaped sources (Rettiwt-API
-/// `List.create` sends exactly `{isPrivate, name, description?}`; the
-/// cephalochromoscope browser-captured `list-create` tool sends
-/// `{isPrivate, name, description}` — all three capture the real web UI
-/// request): the 2026-09-16 live 214 was the FEATURES bundle, not these
-/// keys (fixed via `feature_overrides` in twr-graphql — this shape was
-/// never the problem). `description` omitted when empty (matches both
-/// sources' conditional-spread, and avoids sending `""` vs missing).
+/// Source: Rettiwt-API `List.create` VERBATIM (pinned blob 4f11105,
+/// src/requests/List.ts — independently fetched by c1 at
+/// cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/List.ts).
+/// The "cephalochromoscope + emusks" citations previously attached here
+/// were web-search snippets WITHOUT a local file — removed per the
+/// path-or-UNCONFIRMED rule. (The live 214's cause is still UNRESOLVED:
+/// vars keys match Rettiwt exactly, so the 214 is NOT a vars-keys issue —
+/// see hypotheses in `run_list_write`; features-override and
+/// queryId-in-body fixes both failed live.)
+/// `description` omitted when empty (Rettiwt conditional-spread verbatim).
 pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) -> serde_json::Value {
     let mut vars = serde_json::json!({"name": name, "isPrivate": private});
     if let Some(d) = description.filter(|d| !d.is_empty()) {
@@ -237,6 +345,55 @@ mod tests {
         let v = pin_vars("123");
         assert_eq!(v["tweet_id"], "123");
         assert!(v.get("dark_request").is_none());
+    }
+
+    #[test]
+    fn weighted_length_counts_urls_as_23_and_chars_otherwise() {
+        assert_eq!(weighted_length("hello"), 5);
+        assert_eq!(weighted_length(""), 0);
+        // URL normalization: a 40-char link counts 23.
+        let with_url = "see https://x.com/some/very/long/path/1234567890 end";
+        assert_eq!(
+            weighted_length(with_url),
+            4 + 23 + 4,
+            "4 chars + url(23) + 4 chars"
+        );
+        assert!(!needs_note_tweet("short"));
+        assert!(needs_note_tweet(&"x".repeat(281)));
+        assert!(!needs_note_tweet(&"x".repeat(280)));
+    }
+
+    #[test]
+    fn note_tweet_vars_carry_disallowed_reply_options_and_no_dark_request() {
+        let v = note_tweet_vars("long text", &[], None, None).unwrap();
+        assert_eq!(v["tweet_text"], "long text");
+        assert!(v.get("disallowed_reply_options").is_some());
+        assert!(v.get("dark_request").is_none());
+        assert!(
+            v.get("media").is_none(),
+            "no media key when empty (undefined, not null)"
+        );
+        assert!(v.get("queryId").is_none());
+        assert!(v.get("fieldToggles").is_none());
+        let m = note_tweet_vars("t", &["m1".to_string()], None, None).unwrap();
+        assert_eq!(m["media"]["media_entities"][0]["media_id"], "m1");
+    }
+
+    #[test]
+    fn note_tweet_vars_fail_closed_on_reply_and_quote() {
+        assert!(note_tweet_vars("t", &[], Some("123"), None).is_err());
+        assert!(note_tweet_vars("t", &[], None, Some("456")).is_err());
+    }
+
+    #[test]
+    fn parse_note_tweet_id_covers_all_three_envelope_shapes() {
+        let a = serde_json::json!({"data": {"create_tweet": {"tweet_results": {"result": {"rest_id": "1"}}}}});
+        let b = serde_json::json!({"data": {"notetweet_create": {"notetweet_results": {"result": {"rest_id": "2"}}}}});
+        let c = serde_json::json!({"data": {"create_note_tweet": {"tweet_results": {"result": {"rest_id": "3"}}}}});
+        assert_eq!(parse_note_tweet_id(&a).as_deref(), Some("1"));
+        assert_eq!(parse_note_tweet_id(&b).as_deref(), Some("2"));
+        assert_eq!(parse_note_tweet_id(&c).as_deref(), Some("3"));
+        assert!(parse_note_tweet_id(&serde_json::json!({"data": {}})).is_none());
     }
 
     #[test]

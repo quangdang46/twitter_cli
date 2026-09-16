@@ -3250,7 +3250,25 @@ async fn run_post_write(
     let stdin_is_tty = true; // TTY prompt path handled below via rpassword-free read
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
-        Decision::Preview => return (dry_run_data(operation), 0),
+        Decision::Preview => {
+            // Report which mutation WOULD be used (o1l.4.1 acceptance),
+            // without touching the network. reply_to/quote_id presence
+            // still needs the fail-closed note-tweet check even in
+            // preview, so the reported op matches what --apply would do.
+            let mut preview = dry_run_data(operation);
+            let would_note = cli::write::needs_note_tweet(&text);
+            preview["graphql_operation"] = serde_json::json!(if would_note {
+                "CreateNoteTweet"
+            } else {
+                "CreateTweet"
+            });
+            if would_note && (reply_to.is_some() || quote_id.is_some()) {
+                preview["warning"] = serde_json::json!(
+                    "long-form reply/quote variables are UNCONFIRMED — --apply would fail closed"
+                );
+            }
+            return (preview, 0);
+        }
         Decision::Prompt => {
             if opts.no_interactive {
                 return (
@@ -3376,17 +3394,42 @@ async fn run_post_write(
     if reply_to.is_some() && reply_norm.is_none() {
         return (serde_json::json!({"error": "not a tweet ID or URL"}), 2);
     }
-    let vars = cli::write::create_tweet_vars(
-        &text,
-        reply_norm.as_deref(),
-        quote_url.as_deref(),
-        &media_ids,
-    );
+    // Length-based routing (o1l.4.1): standard-length text stays on
+    // CreateTweet unconditionally (regression guard — see
+    // `note_tweet_regression_tests` below); over-threshold text routes to
+    // CreateNoteTweet for BOTH post and quote (PR #64's lesson: #60 only
+    // routed create_tweet and left long quote tweets 186-failing).
+    // reply/quote long-form vars are UNCONFIRMED (Rettiwt postNote has no
+    // reply/quote path) — fail closed with a clear usage error rather than
+    // guess a shape and silently corrupt or drop the target.
+    let graphql_op = if cli::write::needs_note_tweet(&text) {
+        "CreateNoteTweet"
+    } else {
+        "CreateTweet"
+    };
+    let vars = if graphql_op == "CreateNoteTweet" {
+        match cli::write::note_tweet_vars(
+            &text,
+            &media_ids,
+            reply_norm.as_deref(),
+            quote_url.as_deref(),
+        ) {
+            Ok(v) => v,
+            Err(e) => return (serde_json::json!({"error": e}), 2),
+        }
+    } else {
+        cli::write::create_tweet_vars(
+            &text,
+            reply_norm.as_deref(),
+            quote_url.as_deref(),
+            &media_ids,
+        )
+    };
     let qid = ctx
-        .query_id("CreateTweet")
+        .query_id(graphql_op)
         .map(|r| r.query_id)
         .unwrap_or_default();
-    let url = format!("https://x.com/i/api/graphql/{qid}/CreateTweet");
+    let url = format!("https://x.com/i/api/graphql/{qid}/{graphql_op}");
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
         method: "POST",
@@ -3403,7 +3446,7 @@ async fn run_post_write(
     body.insert("variables".into(), vars);
     body.insert(
         "features".into(),
-        serde_json::Value::Object(twr_graphql::compact_features("CreateTweet")),
+        serde_json::Value::Object(twr_graphql::compact_features(graphql_op)),
     );
     let raw = serde_json::to_vec(&body).unwrap_or_default();
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
@@ -3449,6 +3492,21 @@ async fn run_post_write(
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("mutation rejected");
+            // Premium-ineligibility for CreateNoteTweet maps to exit 4
+            // (forbidden), matching the sibling EditTweet bead's convention
+            // for "X rejected this because the account is not eligible"
+            // (a permission/policy-shaped rejection, not a transient one).
+            if graphql_op == "CreateNoteTweet"
+                && (message.to_lowercase().contains("premium")
+                    || message.to_lowercase().contains("not eligible")
+                    || message.to_lowercase().contains("subscri"))
+            {
+                let err = twr_core::TwrError::new(
+                    twr_core::ErrorKind::ForbiddenRateLimited,
+                    format!("long-form post rejected — account not eligible for CreateNoteTweet (X code {code}): {message}"),
+                );
+                return (serde_json::json!({"error": err.message}), 4);
+            }
             let kind = twr_core::ErrorKind::from_api_code(code);
             let err = if code == 226 {
                 twr_core::TwrError::new(
@@ -3460,6 +3518,45 @@ async fn run_post_write(
             };
             return (serde_json::json!({"error": err.message}), kind.exit_code());
         }
+    }
+    // CreateNoteTweet: tolerate all three envelope shapes seen in the wild
+    // (create_tweet / notetweet_create / create_note_tweet) and FAIL
+    // CLOSED on no confirmation — an empty tweet_results here is the
+    // documented silent-failure mode (missing disallowed_reply_options),
+    // never treated as a false success (PR #65 lesson).
+    if graphql_op == "CreateNoteTweet" {
+        let Some(new_id) = cli::write::parse_note_tweet_id(&payload) else {
+            return (
+                serde_json::json!({"error": "long-form post returned no confirmation (empty tweet_results across all known envelope shapes) — the write may or may not have landed; check `twr user-posts` before retrying to avoid a double-post"}),
+                6,
+            );
+        };
+        let u01 = (now % 1000) as f64 / 1000.0;
+        tokio::time::sleep(std::time::Duration::from_secs_f64(
+            cli::write::write_delay_secs(u01),
+        ))
+        .await;
+        if let Some(key) = &idempotency_key {
+            if let Some(p) = &store_path {
+                let mut s = twr_core::idempotency::load(p, now);
+                s.insert(
+                    key.clone(),
+                    twr_core::IdempotencyEntry {
+                        state: twr_core::WriteState::Acknowledged,
+                        created_at_secs: now,
+                        result: Some(serde_json::json!({"id": new_id})),
+                    },
+                );
+                let _ = twr_core::idempotency::save(p, &s);
+            }
+        }
+        if let Some(path) = twr_core::budget::default_log_path() {
+            twr_core::budget::record(&path, &twr_core::budget::today_utc());
+        }
+        return (
+            serde_json::json!({"id": new_id, "operation": operation, "graphql_operation": "CreateNoteTweet"}),
+            0,
+        );
     }
     let result = payload.pointer("/data/create_tweet/tweet_results/result");
     // rest_id location is NOT stable across sessions/contexts (live-proven
@@ -4185,10 +4282,7 @@ async fn run_list_write(
     // `https://x.com/i/lists/<id>/info`). 214 root cause still UNRESOLVED —
     // this is variable #2 after the in-body queryId below; DevTools capture
     // of x.com/i/lists/create is the ground truth if this also fails.
-    headers.insert(
-        "Referer".into(),
-        "https://x.com/i/lists/create".into(),
-    );
+    headers.insert("Referer".into(), "https://x.com/i/lists/create".into());
     let refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -5041,6 +5135,35 @@ async fn doctor_data_probe(
         checks.push(entry);
     }
     (data, code)
+}
+
+#[cfg(test)]
+mod note_tweet_routing_tests {
+    use super::*;
+
+    #[test]
+    fn standard_length_never_flips_to_note_tweet() {
+        // Regression guard mirroring upstream PR #64's explicit test: a
+        // routing bug that always uses CreateNoteTweet would silently
+        // change behavior for every existing "post"/"quote" caller.
+        for text in ["hi", "a normal tweet", &"x".repeat(280)] {
+            assert!(!cli::write::needs_note_tweet(text), "{text}");
+        }
+        assert!(cli::write::needs_note_tweet(&"x".repeat(281)));
+    }
+
+    #[test]
+    fn policy_gate_fires_before_length_routing() {
+        // §5.3: policy.allows("post")/("quote") must be checked with the
+        // SAME operation string regardless of length — no "post_long" op
+        // string, and read_only denies a long-form attempt identically to
+        // a normal-length one (exit 2, same message shape).
+        assert!(!twr_core::Policy::ReadOnly.allows("post"));
+        assert!(!twr_core::Policy::ReadOnly.allows("quote"));
+        assert!(twr_core::Policy::Write.allows("post"));
+        assert!(twr_core::Policy::Write.allows("quote"));
+        // No new policy.rs entry needed: "post"/"quote" cover both paths.
+    }
 }
 
 #[cfg(test)]

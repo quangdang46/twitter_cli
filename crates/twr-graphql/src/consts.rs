@@ -92,6 +92,20 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     // live capture surfaces GraphQL mute/block ops, add them here then.
     ("PinTweet", "VIHsNu89pK-kW35JpHq7Xw"),
     ("UnpinTweet", "BhKei844ypCyLYCg0nwigw"),
+    // P6.4 long-form — VERBATIM from Rettiwt-API `ListRequests`-sibling
+    // `TweetRequests.postNote` (pinned blob 4f11105, file
+    // src/requests/Tweet.ts; byte-identical at
+    // cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/Tweet.ts;
+    // independently fetched + verified by c1). QueryId
+    // `_eeuQKX1-VyRP_ROM-GN7g` matches this bead's cited ID. Variables
+    // `{tweet_text, media?, semantic_annotation_ids: [],
+    // disallowed_reply_options: null}` (NO dark_request, NO reply/quote
+    // path in postNote — reply/quote long-form UNCONFIRMED). Features:
+    // 33-flag Rettiwt-verbatim set incl. longform_notetweets_creation_enabled
+    // (absent from repo DEFAULT_FEATURES) — consult `note_features()`,
+    // NOT compact_features defaults. Body: NO queryId-in-body, NO
+    // fieldToggles (do NOT copy the list-mutation pattern here).
+    ("CreateNoteTweet", "_eeuQKX1-VyRP_ROM-GN7g"),
     // P6.3 list management — operation names + query IDs CONFIRMED in the
     // research corpus (twitter-internal-api-doc deck GraphQL.json and both
     // API.json captures agree on all seven; deck GraphQL.md ChangeLog lists
@@ -225,6 +239,68 @@ pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, boo
             ("responsive_web_graphql_timeline_navigation_enabled", true),
         ]),
         "DeleteList" => Some(&[]),
+        // CreateNoteTweet: Rettiwt postNote verbatim (33 flags; the only
+        // mutation in the repo whose feature set comes from a verified
+        // working caller rather than deck inference or repo defaults).
+        // Includes longform_notetweets_creation_enabled (absent from
+        // DEFAULT_FEATURES) and content_disclosure_*/post_ctas_*/jetfuel/
+        // grok/annotations flags the plain CreateTweet path never sends.
+        "CreateNoteTweet" => Some(&[
+            ("premium_content_api_read_enabled", false),
+            ("communities_web_enable_tweet_community_results_fetch", true),
+            ("c9s_tweet_anatomy_moderator_badge_enabled", true),
+            (
+                "responsive_web_grok_analyze_button_fetch_trends_enabled",
+                false,
+            ),
+            ("responsive_web_grok_analyze_post_followups_enabled", true),
+            ("responsive_web_jetfuel_frame", true),
+            ("responsive_web_grok_share_attachment_enabled", true),
+            ("responsive_web_grok_annotations_enabled", true),
+            ("responsive_web_edit_tweet_api_enabled", true),
+            (
+                "graphql_is_translatable_rweb_tweet_is_translatable_enabled",
+                true,
+            ),
+            ("view_counts_everywhere_api_enabled", true),
+            ("longform_notetweets_consumption_enabled", true),
+            (
+                "responsive_web_twitter_article_tweet_consumption_enabled",
+                true,
+            ),
+            ("tweet_awards_web_tipping_enabled", false),
+            ("content_disclosure_indicator_enabled", true),
+            ("content_disclosure_ai_generated_indicator_enabled", true),
+            ("responsive_web_grok_show_grok_translated_post", true),
+            ("responsive_web_grok_analysis_button_from_backend", true),
+            ("post_ctas_fetch_enabled", true),
+            ("longform_notetweets_rich_text_read_enabled", true),
+            ("longform_notetweets_inline_media_enabled", false),
+            ("profile_label_improvements_pcf_label_in_post_enabled", true),
+            ("responsive_web_profile_redirect_enabled", false),
+            ("rweb_tipjar_consumption_enabled", false),
+            ("verified_phone_label_enabled", false),
+            ("articles_preview_enabled", true),
+            (
+                "responsive_web_grok_community_note_auto_translation_is_enabled",
+                false,
+            ),
+            (
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled",
+                false,
+            ),
+            ("freedom_of_speech_not_reach_fetch_enabled", true),
+            ("standardized_nudges_misinfo", true),
+            (
+                "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled",
+                true,
+            ),
+            ("responsive_web_grok_image_annotation_enabled", true),
+            ("responsive_web_grok_imagine_annotation_enabled", true),
+            ("responsive_web_graphql_timeline_navigation_enabled", true),
+            ("responsive_web_enhance_cards_enabled", false),
+            ("longform_notetweets_creation_enabled", true),
+        ]),
         _ => None,
     }
 }
@@ -279,8 +355,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_plus_8_list_mgmt_ops() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 38);
+    fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_plus_8_list_mgmt_plus_1_note() {
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 39);
         for op in [
             "ListOwnerships",
             "ListMemberships",
@@ -298,9 +374,29 @@ mod tests {
             "ListSubscribe",
             "ListUnsubscribe",
             "UpdatePinnedTimelines",
+            "CreateNoteTweet",
         ] {
             assert!(fallback_query_id(op).is_some(), "{op}");
         }
+    }
+
+    #[test]
+    fn note_tweet_uses_rettiwt_verbatim_schema() {
+        // 25 true-valued flags (out of 35 total incl. false-valued) —
+        // byte-compared 1-1 against Rettiwt postNote by the reviewer
+        // (cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/Tweet.ts):
+        // identical true-set to postNote PLUS longform_notetweets_
+        // creation_enabled (reviewer-added, postNote predates it; harmless —
+        // PinTweet with full defaults proves features aren't strictly
+        // validated) and MINUS nothing. Must NOT contain tweetypie_unmention
+        // (a CreateTweet-only flag never in postNote).
+        let f = compact_features("CreateNoteTweet");
+        assert_eq!(f.len(), 26);
+        assert!(f.contains_key("longform_notetweets_creation_enabled"));
+        assert!(f.contains_key("c9s_tweet_anatomy_moderator_badge_enabled"));
+        assert!(f.contains_key("content_disclosure_indicator_enabled"));
+        assert!(f.contains_key("post_ctas_fetch_enabled"));
+        assert!(!f.contains_key("tweetypie_unmention_optimization_enabled"));
     }
 
     #[test]

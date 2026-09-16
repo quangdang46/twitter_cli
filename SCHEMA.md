@@ -57,7 +57,10 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
   completes with fixture parity)
 - `status`: `{"authenticated": bool, "source": "flags|env|file|browser"|null, ...}`
 - `auth`: login/logout results (`{"saved": bool, ...}`)
-- `write_result`: `{"id"|"ok"|"dry_run": ...}` or `{"error": ...}`
+- `write_result`: `{"id"|"ok"|"dry_run": ...}` or `{"error": ...}`. `post`/`quote`
+  add `"graphql_operation": "CreateTweet"|"CreateNoteTweet"` (auto-routed at
+  the 280-weighted-char threshold — reported in `--dry-run` previews too, so
+  an agent can confirm which mutation would run before `--apply`).
 - `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS", "status": "pass|warn|fail", "suggestion": …}]}`
 - `query-ids`: `{"operations": [{"operation": …, "query_id": …, "source": …}]}`
 - `schema` / `commands`: this catalog, machine-readable
