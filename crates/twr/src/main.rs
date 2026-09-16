@@ -6132,6 +6132,44 @@ mod p61_catalog_tests {
     }
 }
 
+/// Bead o1l.5.4 §2 (catalog half) — same parity anchor as p61_catalog_tests
+/// but for the DM family: dm-list/dm-read/dm-send must appear in BOTH
+/// catalogs with their envelope types (dm_list/dm_message_list/write_result),
+/// or `twr schema`/`twr commands` silently omit a live command.
+#[cfg(test)]
+mod p65_catalog_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn p65_dm_commands_present_in_both_catalogs_with_types() {
+        let schema = schema_data();
+        let got: HashMap<&str, &str> = schema["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["name"].as_str().unwrap(), c["type"].as_str().unwrap()))
+            .collect();
+        for (name, want_type) in [
+            ("dm-list", "dm_list"),
+            ("dm-read", "dm_message_list"),
+            ("dm-send", "write_result"),
+        ] {
+            assert_eq!(got.get(name), Some(&want_type), "{name} type drift");
+        }
+        let commands = commands_data();
+        let names: Vec<&str> = commands
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        for name in ["dm-list", "dm-read", "dm-send"] {
+            assert!(names.contains(&name), "{name} missing from commands_data");
+        }
+    }
+}
+
 #[cfg(test)]
 mod user_list_tests_tail {
     use super::*;

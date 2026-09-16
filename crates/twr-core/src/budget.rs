@@ -190,4 +190,49 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Bead o1l.5.4 §3 — DM-cap vs general-budget distinguishability: an
+    /// agent that only knows the general-budget error MUST still recognize
+    /// the DM-cap error as a different condition. The two denial strings
+    /// share nothing except the tail advice clause: different resource
+    /// noun ("DM budget" vs "mutation budget"), different env var
+    /// (TWR_DM_DAILY_BUDGET vs TWR_DAILY_BUDGET). Same exit-2 Deny shape
+    /// (both are local-policy denials, never exit 4). Separate files:
+    /// recording DM usage must not touch the general counter and back.
+    #[test]
+    fn p54_dm_cap_denial_is_distinguishable_from_general_budget() {
+        let dm = dm_denial_suggestion(10, 10);
+        let general = denial_suggestion(200, 200);
+        assert!(dm.contains("DM budget"), "DM denial names itself: {dm}");
+        assert!(
+            dm.contains("TWR_DM_DAILY_BUDGET"),
+            "DM denial names its var"
+        );
+        assert!(
+            general.contains("mutation budget"),
+            "general denial names itself"
+        );
+        assert!(
+            general.contains("TWR_DAILY_BUDGET"),
+            "general denial names its var"
+        );
+        assert!(!dm.contains("mutation budget"), "no noun bleed: {dm}");
+        assert!(!general.contains("DM budget"), "no noun bleed: {general}");
+        // Counters are independent: exhausting one leaves the other Allow.
+        let dir = std::env::temp_dir().join(format!("twr-dmcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dm_path = dir.join("dm_budget.json");
+        let gen_path = dir.join("mutations.json");
+        record(&dm_path, "2026-09-16");
+        assert_eq!(
+            check(&dm_path, "2026-09-16", 1),
+            BudgetCheck::Deny { used: 1, limit: 1 }
+        );
+        assert_eq!(
+            check(&gen_path, "2026-09-16", 1),
+            BudgetCheck::Allow { used: 0, limit: 1 },
+            "DM spend must not consume the general budget"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

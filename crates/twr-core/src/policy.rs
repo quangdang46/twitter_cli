@@ -115,6 +115,30 @@ mod tests {
         assert!(Policy::Write.allows("dm-send"), "dm-send");
     }
 
+    /// Bead o1l.5.4 §2 — full policy-boundary matrix for dm-send, verified
+    /// live 2026-09-16 on the release binary: engagement → deny
+    /// (`usage-policy-denied`, exit 2), read_only → deny (same envelope),
+    /// write + --dry-run → allow (`{dry_run, operation: "dm-send",
+    /// validation: "passed"}`, exit 0). The denial message must NAME the
+    /// policy so an agent never confuses it with a budget denial.
+    #[test]
+    fn p54_dm_send_policy_matrix() {
+        assert!(!Policy::ReadOnly.allows("dm-send"));
+        assert!(!Policy::Engagement.allows("dm-send"));
+        assert!(Policy::Write.allows("dm-send"));
+        for p in [Policy::ReadOnly, Policy::Engagement] {
+            let msg = p.denial("dm-send");
+            assert!(msg.contains("dm-send"), "denial names the op: {msg}");
+            assert!(msg.contains(p.as_str()), "denial names the policy: {msg}");
+        }
+        // Engagement's whitelist is a closed set: dm-send must never
+        // silently join it via a future wildcard/match-all refactor.
+        assert!(
+            !Policy::Engagement.allows("DM-SEND"),
+            "case-sensitive op names"
+        );
+    }
+
     #[test]
     fn p63_write_tier_stays_write_only_and_engagement_covers_list_engagement() {
         // Write-tier: create/edit/delete are unreachable under engagement.
