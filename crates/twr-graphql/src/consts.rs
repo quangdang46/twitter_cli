@@ -92,6 +92,30 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     // live capture surfaces GraphQL mute/block ops, add them here then.
     ("PinTweet", "VIHsNu89pK-kW35JpHq7Xw"),
     ("UnpinTweet", "BhKei844ypCyLYCg0nwigw"),
+    // P6.3 list management — operation names + query IDs CONFIRMED in the
+    // research corpus (twitter-internal-api-doc deck GraphQL.json and both
+    // API.json captures agree on all seven; deck GraphQL.md ChangeLog lists
+    // the same op names). UNVERIFIED against this repo's own
+    // `doctor --refresh` — starting points, re-resolve live (rot 2–4 wks).
+    // Disambiguation notes for the two ambiguous cases:
+    // - "follow a list" is ListSubscribe/ListUnsubscribe (NOT FollowList/
+    //   UnfollowList — no such op exists in ANY reference; the plan §13.3
+    //   table used FollowList as shorthand). Subscribe = follow someone
+    //   else's list; engagement-tier like user-follow.
+    // - "pin a list" has NO PinList/UnpinList op (deck-wide grep: only
+    //   Tweet/Reply/Timeline/Conversation pin ops exist). The list-sidebar
+    //   equivalent is UpdatePinnedTimelines (`AtN-0mKI3fXXmxzYYk1Wqw`) —
+    //   variables shape unconfirmed in the corpus, so list-pin ships behind
+    //   that op with a best-effort `{listId, pinned}` shape flagged for
+    //   live confirmation; c1 must verify/replace before trusting.
+    ("CreateList", "AkWrYT3WjoBVkzbnbvLkhg"),
+    ("UpdateList", "6fJbXehrO7k4iSr_TK1U2Q"),
+    ("DeleteList", "UnN9Th1BDbeLjpgjGSpL3Q"),
+    ("ListAddMember", "F4BvT6Af48GSxTgqNLIdrQ"),
+    ("ListRemoveMember", "llA1p2EP5J3gReAQQsW1vw"),
+    ("ListSubscribe", "1B3FqCK_7uU6W_AHqWBx8A"),
+    ("ListUnsubscribe", "8gopUa1KU_9afKsxI9Y_Rg"),
+    ("UpdatePinnedTimelines", "AtN-0mKI3fXXmxzYYk1Wqw"),
 ];
 
 /// Shipped EXTRA-rotation fallbacks (layer 3): the older/alternate query ID
@@ -195,8 +219,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_ops() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 30);
+    fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_plus_8_list_mgmt_ops() {
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 38);
         for op in [
             "ListOwnerships",
             "ListMemberships",
@@ -206,6 +230,14 @@ mod tests {
             "UserMedia",
             "PinTweet",
             "UnpinTweet",
+            "CreateList",
+            "UpdateList",
+            "DeleteList",
+            "ListAddMember",
+            "ListRemoveMember",
+            "ListSubscribe",
+            "ListUnsubscribe",
+            "UpdatePinnedTimelines",
         ] {
             assert!(fallback_query_id(op).is_some(), "{op}");
         }

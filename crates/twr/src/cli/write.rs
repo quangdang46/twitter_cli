@@ -85,6 +85,56 @@ pub fn pin_vars(tweet_id: &str) -> serde_json::Value {
     serde_json::json!({"tweet_id": tweet_id})
 }
 
+/// Variables for CreateList: `{name, description?, isPrivate?}` (op + ID
+/// confirmed in docs/json/API.json; this shape REJECTED live 2026-09-16
+/// with X code 214 DecodeException — exact accepted keys UNKNOWN.
+/// The sibling 1.1-style `{"list_id","name","mode","description"}` shape is
+/// the next candidate (mode=public|private instead of isPrivate bool).
+/// c1: confirm live with the alternate shape before trusting this one.
+/// X validates mutation variables strictly — a 214 means shape, not auth.
+pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) -> serde_json::Value {
+    let mut vars = serde_json::json!({"name": name, "isPrivate": private});
+    if let Some(d) = description.filter(|d| !d.is_empty()) {
+        vars["description"] = serde_json::json!(d);
+    }
+    vars
+}
+
+/// Variables for UpdateList: full-field resend (`{listId, name,
+/// description, isPrivate}`) — partial-update semantics UNCONFIRMED in the
+/// corpus, so resend all three (c1: confirm live whether omitting unchanged
+/// fields works; until then never send a sparse shape that could blank a
+/// field server-side).
+pub fn update_list_vars(
+    list_id: &str,
+    name: &str,
+    description: &str,
+    private: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "listId": list_id,
+        "name": name,
+        "description": description,
+        "isPrivate": private,
+    })
+}
+
+/// Variables for DeleteList / ListSubscribe / ListUnsubscribe /
+/// UpdatePinnedTimelines-by-id: bare `{listId}` (deck op names confirmed;
+/// exact key casing `listId` follows every other list op's convention in
+/// bird/xfetch — live-verify on first real call).
+pub fn list_id_vars(list_id: &str) -> serde_json::Value {
+    serde_json::json!({"listId": list_id})
+}
+
+/// Variables for ListAddMember/ListRemoveMember: `{listId, userId}` — ONE
+/// user per invocation, no batch flag (ban-risk rule, plan §13.3: bulk
+/// list-adds are a spam-report vector; looping belongs in the orchestrator,
+/// not in twr).
+pub fn list_member_vars(list_id: &str, user_id: &str) -> serde_json::Value {
+    serde_json::json!({"listId": list_id, "userId": user_id})
+}
+
 /// Per-op `variables` for the engagement ops, mirroring the Python
 /// `client.py` shapes exactly (live-fixed 2026-09-16): `DeleteRetweet`
 /// takes `{"source_tweet_id"}` NOT `{"tweet_id"}` (a real 400-class server
@@ -178,5 +228,22 @@ mod tests {
         let v = pin_vars("123");
         assert_eq!(v["tweet_id"], "123");
         assert!(v.get("dark_request").is_none());
+    }
+
+    #[test]
+    fn list_vars_shapes() {
+        let c = create_list_vars("Rust", Some("desc"), true);
+        assert_eq!(c["name"], "Rust");
+        assert_eq!(c["description"], "desc");
+        assert_eq!(c["isPrivate"], true);
+        let c2 = create_list_vars("N", None, false);
+        assert!(c2.get("description").is_none());
+        let u = update_list_vars("L1", "N", "D", false);
+        assert_eq!(u["listId"], "L1");
+        assert_eq!(u["name"], "N");
+        assert_eq!(list_id_vars("L1")["listId"], "L1");
+        let m = list_member_vars("L1", "U9");
+        assert_eq!(m["listId"], "L1");
+        assert_eq!(m["userId"], "U9");
     }
 }

@@ -30,12 +30,16 @@ impl Policy {
         }
     }
 
-    /// Engagement-tier ops (like/rt/follow/bookmark + reverses, plus P6.2's
-    /// mute/block/pin + reverses). Post-family (post/reply/quote) and delete
-    /// are NOT engagement. Mute/block/pin are relationship/profile acts on
-    /// your own account (plan §13.2), not content writes — block stays here
-    /// (not `write`) per bead o1l.2.2: moving it would silently change the
-    /// contract for every existing `--policy engagement` caller.
+    /// Engagement-tier ops (like/rt/follow/bookmark + reverses, P6.2's
+    /// mute/block/pin + reverses, P6.3's list-follow/list-unfollow/list-pin/
+    /// list-unpin/list-add-member/list-remove-member). Post-family
+    /// (post/reply/quote), delete, list-create/list-edit/list-delete, edit,
+    /// and dm-send are NOT engagement — their omission here is the ENTIRE
+    /// mechanism making them write-tier-only (no second gate exists).
+    /// Mute/block/pin are relationship/profile acts on your own account
+    /// (plan §13.2), not content writes — block stays here (not `write`)
+    /// per bead o1l.2.2: moving it would silently change the contract for
+    /// every existing `--policy engagement` caller.
     pub fn allows(&self, operation: &str) -> bool {
         match self {
             Policy::Write => true,
@@ -56,6 +60,12 @@ impl Policy {
                     | "unblock"
                     | "pin"
                     | "unpin"
+                    | "list-follow"
+                    | "list-unfollow"
+                    | "list-pin"
+                    | "list-unpin"
+                    | "list-add-member"
+                    | "list-remove-member"
             ),
         }
     }
@@ -89,6 +99,29 @@ mod tests {
     #[test]
     fn p62_engagement_covers_mute_block_pin() {
         for op in ["mute", "unmute", "block", "unblock", "pin", "unpin"] {
+            assert!(Policy::Engagement.allows(op), "{op}");
+            assert!(!Policy::ReadOnly.allows(op), "{op}");
+            assert!(Policy::Write.allows(op), "{op}");
+        }
+    }
+
+    #[test]
+    fn p63_write_tier_stays_write_only_and_engagement_covers_list_engagement() {
+        // Write-tier: create/edit/delete are unreachable under engagement.
+        for op in ["list-create", "list-edit", "list-delete"] {
+            assert!(!Policy::Engagement.allows(op), "{op}");
+            assert!(!Policy::ReadOnly.allows(op), "{op}");
+            assert!(Policy::Write.allows(op), "{op}");
+        }
+        // Engagement-tier: follow/unfollow/pin/unpin/add/remove-member.
+        for op in [
+            "list-follow",
+            "list-unfollow",
+            "list-pin",
+            "list-unpin",
+            "list-add-member",
+            "list-remove-member",
+        ] {
             assert!(Policy::Engagement.allows(op), "{op}");
             assert!(!Policy::ReadOnly.allows(op), "{op}");
             assert!(Policy::Write.allows(op), "{op}");

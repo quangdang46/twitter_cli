@@ -86,3 +86,35 @@ UnpinTweet:
   queryId: BhKei844ypCyLYCg0nwigw
   rps: 0.3
   burst: 1
+CreateList:
+  queryId: AkWrYT3WjoBVkzbnbvLkhg
+  rps: 0.3
+  burst: 1
+UpdateList:
+  queryId: 6fJbXehrO7k4iSr_TK1U2Q
+  rps: 0.3
+  burst: 1
+DeleteList:
+  queryId: UnN9Th1BDbeLjpgjGSpL3Q
+  rps: 0.3
+  burst: 1
+ListAddMember:
+  queryId: F4BvT6Af48GSxTgqNLIdrQ
+  rps: 0.3
+  burst: 1
+ListRemoveMember:
+  queryId: llA1p2EP5J3gReAQQsW1vw
+  rps: 0.3
+  burst: 1
+ListSubscribe:
+  queryId: 1B3FqCK_7uU6W_AHqWBx8A
+  rps: 0.3
+  burst: 1
+ListUnsubscribe:
+  queryId: 8gopUa1KU_9afKsxI9Y_Rg
+  rps: 0.3
+  burst: 1
+UpdatePinnedTimelines:
+  queryId: AtN-0mKI3fXXmxzYYk1Wqw
+  rps: 0.3
+  burst: 1

@@ -274,6 +274,93 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+    /// Create a list (write-tier only). Surfaces the new list_id in the
+    /// envelope so an agent can script create-then-add-members.
+    ListCreate {
+        /// List name.
+        name: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Private list (default: public).
+        #[arg(long)]
+        private: bool,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Rename/redescribe/toggle-private a list (write-tier only). Resends
+    /// all fields (partial-update semantics unconfirmed — see write.rs).
+    ListEdit {
+        id: String,
+        /// New name (required — full resend, see above).
+        #[arg(long)]
+        name: String,
+        /// New description (required — full resend, see above).
+        #[arg(long)]
+        description: String,
+        /// Private list.
+        #[arg(long)]
+        private: bool,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Delete a list (write-tier only, destructive — always previews first
+    /// even with --apply, like tweet delete; deleting a nonexistent list
+    /// reports not-found exit 3, and a delete-retry on an already-deleted
+    /// list is a success, not a failure).
+    ListDelete {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Add ONE user to a list (engagement-tier; no batch flag — bulk adds
+    /// are a spam-report vector, loop in the orchestrator instead).
+    ListAddMember {
+        /// List id (see `twr lists`).
+        #[arg(long)]
+        list_id: String,
+        /// User id to add.
+        #[arg(long)]
+        user_id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Remove ONE user from a list (engagement-tier).
+    ListRemoveMember {
+        /// List id (see `twr lists`).
+        #[arg(long)]
+        list_id: String,
+        /// User id to remove.
+        #[arg(long)]
+        user_id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Follow (subscribe to) someone else's list (engagement-tier).
+    ListFollow {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unfollow (unsubscribe from) a list (engagement-tier).
+    ListUnfollow {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Pin a list to your sidebar (engagement-tier, cosmetic; the pinned-
+    /// list limit is unconfirmed — documented when live-verified).
+    ListPin {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unpin a list from your sidebar (engagement-tier, cosmetic).
+    ListUnpin {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Home/feed timeline.
     Feed {
         /// for-you or following.
@@ -826,6 +913,173 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
+        Command::ListCreate {
+            name,
+            description,
+            private,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Create {
+                    name,
+                    description,
+                    private,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListEdit {
+            id,
+            name,
+            description,
+            private,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Edit {
+                    id,
+                    name,
+                    description,
+                    private,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListDelete {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Delete {
+                    id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListAddMember {
+            list_id,
+            user_id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::AddMember {
+                    list_id,
+                    user_id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListRemoveMember {
+            list_id,
+            user_id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::RemoveMember {
+                    list_id,
+                    user_id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListFollow {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Follow {
+                    id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListUnfollow {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Unfollow {
+                    id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListPin {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Pin {
+                    id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListUnpin {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_list_write(
+                &opts,
+                &config,
+                ListWriteArgs::Unpin {
+                    id,
+                    idempotency_key,
+                },
+            )
+            .await;
+            data = d;
+            exit_code = code;
+        }
         Command::Quote {
             id,
             text,
@@ -1246,6 +1500,15 @@ fn schema_data() -> serde_json::Value {
             {"name": "unblock", "type": "write_result"},
             {"name": "pin", "type": "write_result"},
             {"name": "unpin", "type": "write_result"},
+            {"name": "list-create", "type": "write_result"},
+            {"name": "list-edit", "type": "write_result"},
+            {"name": "list-delete", "type": "write_result"},
+            {"name": "list-add-member", "type": "write_result"},
+            {"name": "list-remove-member", "type": "write_result"},
+            {"name": "list-follow", "type": "write_result"},
+            {"name": "list-unfollow", "type": "write_result"},
+            {"name": "list-pin", "type": "write_result"},
+            {"name": "list-unpin", "type": "write_result"},
         ]
     })
 }
@@ -1286,6 +1549,15 @@ fn commands_data() -> serde_json::Value {
         {"name": "unblock", "type": "write_result", "desc": "Unblock a user id"},
         {"name": "pin", "type": "write_result", "desc": "Pin a tweet to your profile (replaces previous)"},
         {"name": "unpin", "type": "write_result", "desc": "Unpin your profile tweet"},
+        {"name": "list-create", "type": "write_result", "desc": "Create a list (surfaces list_id)"},
+        {"name": "list-edit", "type": "write_result", "desc": "Rename/redescribe/toggle-private a list"},
+        {"name": "list-delete", "type": "write_result", "desc": "Delete a list (always previews, destructive)"},
+        {"name": "list-add-member", "type": "write_result", "desc": "Add ONE user to a list (no batch flag)"},
+        {"name": "list-remove-member", "type": "write_result", "desc": "Remove ONE user from a list"},
+        {"name": "list-follow", "type": "write_result", "desc": "Subscribe to someone else's list"},
+        {"name": "list-unfollow", "type": "write_result", "desc": "Unsubscribe from a list"},
+        {"name": "list-pin", "type": "write_result", "desc": "Pin a list to your sidebar"},
+        {"name": "list-unpin", "type": "write_result", "desc": "Unpin a list from your sidebar"},
     ])
 }
 
@@ -3622,6 +3894,460 @@ async fn run_engage(
     )
 }
 
+/// Arguments for one list-management write. Operation strings are the
+/// lowercase CLI subcommand names (the policy-whitelist convention) —
+/// NOT the GraphQL op names.
+enum ListWriteArgs {
+    Create {
+        name: String,
+        description: Option<String>,
+        private: bool,
+        idempotency_key: Option<String>,
+    },
+    Edit {
+        id: String,
+        name: String,
+        description: String,
+        private: bool,
+        idempotency_key: Option<String>,
+    },
+    Delete {
+        id: String,
+        idempotency_key: Option<String>,
+    },
+    AddMember {
+        list_id: String,
+        user_id: String,
+        idempotency_key: Option<String>,
+    },
+    RemoveMember {
+        list_id: String,
+        user_id: String,
+        idempotency_key: Option<String>,
+    },
+    Follow {
+        id: String,
+        idempotency_key: Option<String>,
+    },
+    Unfollow {
+        id: String,
+        idempotency_key: Option<String>,
+    },
+    Pin {
+        id: String,
+        idempotency_key: Option<String>,
+    },
+    Unpin {
+        id: String,
+        idempotency_key: Option<String>,
+    },
+}
+
+impl ListWriteArgs {
+    /// CLI operation string (policy whitelist + envelopes).
+    fn operation(&self) -> &'static str {
+        match self {
+            ListWriteArgs::Create { .. } => "list-create",
+            ListWriteArgs::Edit { .. } => "list-edit",
+            ListWriteArgs::Delete { .. } => "list-delete",
+            ListWriteArgs::AddMember { .. } => "list-add-member",
+            ListWriteArgs::RemoveMember { .. } => "list-remove-member",
+            ListWriteArgs::Follow { .. } => "list-follow",
+            ListWriteArgs::Unfollow { .. } => "list-unfollow",
+            ListWriteArgs::Pin { .. } => "list-pin",
+            ListWriteArgs::Unpin { .. } => "list-unpin",
+        }
+    }
+
+    /// GraphQL operation + variables for the mutation.
+    fn graphql(&self) -> (&'static str, serde_json::Value) {
+        match self {
+            ListWriteArgs::Create {
+                name,
+                description,
+                private,
+                ..
+            } => (
+                "CreateList",
+                cli::write::create_list_vars(name, description.as_deref(), *private),
+            ),
+            ListWriteArgs::Edit {
+                id,
+                name,
+                description,
+                private,
+                ..
+            } => (
+                "UpdateList",
+                cli::write::update_list_vars(id, name, description, *private),
+            ),
+            ListWriteArgs::Delete { id, .. } => ("DeleteList", cli::write::list_id_vars(id)),
+            ListWriteArgs::AddMember {
+                list_id, user_id, ..
+            } => (
+                "ListAddMember",
+                cli::write::list_member_vars(list_id, user_id),
+            ),
+            ListWriteArgs::RemoveMember {
+                list_id, user_id, ..
+            } => (
+                "ListRemoveMember",
+                cli::write::list_member_vars(list_id, user_id),
+            ),
+            ListWriteArgs::Follow { id, .. } => ("ListSubscribe", cli::write::list_id_vars(id)),
+            ListWriteArgs::Unfollow { id, .. } => ("ListUnsubscribe", cli::write::list_id_vars(id)),
+            // No PinList/UnpinList op exists (deck-wide grep) — the sidebar
+            // equivalent is UpdatePinnedTimelines with a best-effort
+            // `{listId, pinned}` shape, flagged for live confirmation.
+            ListWriteArgs::Pin { id, .. } => (
+                "UpdatePinnedTimelines",
+                serde_json::json!({"listId": id, "pinned": true}),
+            ),
+            ListWriteArgs::Unpin { id, .. } => (
+                "UpdatePinnedTimelines",
+                serde_json::json!({"listId": id, "pinned": false}),
+            ),
+        }
+    }
+
+    fn idempotency_key(&self) -> Option<String> {
+        match self {
+            ListWriteArgs::Create {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Edit {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Delete {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::AddMember {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::RemoveMember {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Follow {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Unfollow {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Pin {
+                idempotency_key, ..
+            }
+            | ListWriteArgs::Unpin {
+                idempotency_key, ..
+            } => idempotency_key.clone(),
+        }
+    }
+
+    /// Human target for prompts/previews.
+    fn target(&self) -> String {
+        match self {
+            ListWriteArgs::Create { name, .. } => format!("new list {name:?}"),
+            ListWriteArgs::Edit { id, .. } => format!("list {id}"),
+            ListWriteArgs::Delete { id, .. } => format!("list {id}"),
+            ListWriteArgs::AddMember {
+                list_id, user_id, ..
+            } => {
+                format!("add user {user_id} to list {list_id}")
+            }
+            ListWriteArgs::RemoveMember {
+                list_id, user_id, ..
+            } => {
+                format!("remove user {user_id} from list {list_id}")
+            }
+            ListWriteArgs::Follow { id, .. }
+            | ListWriteArgs::Unfollow { id, .. }
+            | ListWriteArgs::Pin { id, .. }
+            | ListWriteArgs::Unpin { id, .. } => format!("list {id}"),
+        }
+    }
+}
+
+/// List-management writes (P6.3): same safety contract as every other write
+/// (budget → policy → gate → idempotency → transport → delay → record),
+/// GraphQL POST with the deck-confirmed op + vars. Differences from
+/// `run_engage`:
+/// - create surfaces the new `list_id` (parsed from `data.create_list` /
+///   `data.list` / `ListByRestId`-shaped payloads); edit/delete/add/remove/
+///   follow/unfollow/pin/unpin return `{ok, operation, target}`.
+/// - delete ALWAYS previews first even with `--apply` (like tweet delete),
+///   and a delete-retry on an already-deleted list is a success (exit 0),
+///   not a failure — not-found is not a failure state for a delete retry
+///   (plan §5.5).
+/// - add-member/remove-member are idempotent no-ops on duplicate calls
+///   (server-confirmed or already-there → success, never an error).
+async fn run_list_write(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    args: ListWriteArgs,
+) -> (serde_json::Value, i32) {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    let operation = args.operation();
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
+    if !opts.policy.allows(operation) {
+        return (
+            serde_json::json!({"error": opts.policy.denial(operation)}),
+            2,
+        );
+    }
+    let stdin_is_tty = true;
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
+        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Preview => return (dry_run_data(operation), 0),
+        Decision::Prompt => {
+            eprintln!(
+                "This will {} \"{}\". Type 'yes' to proceed:",
+                operation,
+                args.target()
+            );
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data(operation), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data(operation), 0),
+    }
+
+    // Delete always previews (id + warning) even with --apply (§5.5).
+    if matches!(args, ListWriteArgs::Delete { .. }) {
+        eprintln!("list-delete preview: {} (irreversible)", args.target());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
+    let store = store_path
+        .as_deref()
+        .map(|p| twr_core::idempotency::load(p, now))
+        .unwrap_or_default();
+    let idempotency_key = args.idempotency_key();
+    if let Some(key) = &idempotency_key {
+        match twr_core::idempotency::pre_check(&store, key) {
+            twr_core::PreCheck::ReplayCached(result) => {
+                return (
+                    serde_json::json!({"idempotent_replay": true, "result": result}),
+                    0,
+                );
+            }
+            twr_core::PreCheck::RefuseUnknown => {
+                return (
+                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                    1,
+                );
+            }
+            twr_core::PreCheck::Proceed => {}
+        }
+    }
+
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let ctx = build_ctx(opts, config, &transport, &auth);
+    let (op, vars) = args.graphql();
+    let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
+    let url = format!("https://x.com/i/api/graphql/{qid}/{op}");
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "POST",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let mut body = serde_json::Map::new();
+    body.insert("variables".into(), vars);
+    body.insert(
+        "features".into(),
+        serde_json::Value::Object(twr_graphql::compact_features(op)),
+    );
+    let raw = serde_json::to_vec(&body).unwrap_or_default();
+    let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
+        Ok(r) => r,
+        Err(_) => {
+            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            return (
+                serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                1,
+            );
+        }
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    // Delete-retry on an already-deleted list: X answers 404 / errors with
+    // a not-found shape — that is SUCCESS for a delete retry (plan §5.5),
+    // not a failure. Classify before the generic error path below.
+    if matches!(args, ListWriteArgs::Delete { .. })
+        && (resp.status == 404 || is_not_found_payload(&resp.body))
+    {
+        return (
+            serde_json::json!({"ok": true, "operation": operation, "target": args.target(), "note": "already deleted"}),
+            0,
+        );
+    }
+    if !(200..300).contains(&resp.status) {
+        return (
+            serde_json::json!({"error": format!("{operation} failed: HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {
+        if let Some(first) = errors.first() {
+            // Add/remove-member duplicates are idempotent no-ops, not
+            // errors (acceptance o1l.3.4) — detect by message since X has
+            // no stable code for "already a member".
+            let message = first
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("mutation rejected");
+            if matches!(
+                args,
+                ListWriteArgs::AddMember { .. } | ListWriteArgs::RemoveMember { .. }
+            ) && is_already_member_message(message)
+            {
+                return (
+                    serde_json::json!({"ok": true, "operation": operation, "target": args.target(), "note": "already in that state"}),
+                    0,
+                );
+            }
+            let code = first.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            let kind = twr_core::ErrorKind::from_api_code(code);
+            let err =
+                twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"));
+            return (serde_json::json!({"error": err.message}), kind.exit_code());
+        }
+    }
+    // Create surfaces the new list_id for scripting (acceptance o1l.3.1):
+    // try create_list/list/ListByRestId shapes, then rest_id/id_str.
+    if matches!(args, ListWriteArgs::Create { .. }) {
+        if let Some(list_id) = extract_created_list_id(&payload) {
+            finish_list_write(&store_path, &idempotency_key, now, operation, &args);
+            return (
+                serde_json::json!({"ok": true, "operation": operation, "list_id": list_id}),
+                0,
+            );
+        }
+        // Accepted but id-less: honest success-without-id (same rule as
+        // post's shape-3 bare success — never a fake failure an agent
+        // would retry into a duplicate list).
+        finish_list_write(&store_path, &idempotency_key, now, operation, &args);
+        return (
+            serde_json::json!({"ok": true, "operation": operation, "list_id": serde_json::Value::Null, "note": "X accepted the create but returned no id; confirm via `twr lists` before retrying"}),
+            0,
+        );
+    }
+    let u01 = (now % 1000) as f64 / 1000.0;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        cli::write::write_delay_secs(u01),
+    ))
+    .await;
+    finish_list_write(&store_path, &idempotency_key, now, operation, &args);
+    (
+        serde_json::json!({"ok": true, "operation": operation, "target": args.target()}),
+        0,
+    )
+}
+
+/// Record budget + idempotency after a successful list write.
+fn finish_list_write(
+    store_path: &Option<std::path::PathBuf>,
+    idempotency_key: &Option<String>,
+    now: u64,
+    operation: &str,
+    args: &ListWriteArgs,
+) {
+    if let Some(path) = twr_core::budget::default_log_path() {
+        twr_core::budget::record(&path, &twr_core::budget::today_utc());
+    }
+    if let (Some(key), Some(p)) = (idempotency_key, store_path) {
+        let mut s = twr_core::idempotency::load(p, now);
+        s.insert(
+            key.clone(),
+            twr_core::IdempotencyEntry {
+                state: twr_core::WriteState::Acknowledged,
+                created_at_secs: now,
+                result: Some(serde_json::json!({"ok": true, "operation": operation, "target": args.target()})),
+            },
+        );
+        let _ = twr_core::idempotency::save(p, &s);
+    }
+}
+
+/// True when a response body carries a not-found shape (tombstone /
+/// *Unavailable / "not found" message) — for the delete-retry success rule.
+fn is_not_found_payload(body: &[u8]) -> bool {
+    let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let text = payload.to_string().to_lowercase();
+    text.contains("not found")
+        || text.contains("does not exist")
+        || text.contains("unavailable")
+        || text.contains("tombstone")
+}
+
+/// True when a mutation rejection message means "already in that state"
+/// (duplicate add / redundant remove) — an idempotent no-op success.
+fn is_already_member_message(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("already")
+        || m.contains("is already a member")
+        || m.contains("not a member")
+        || m.contains("not in the list")
+}
+
+/// Extract a created list id from the known response shapes:
+/// `data.create_list(.list)`, bare `data.list`, or `rest_id`/`id_str`
+/// at any of those levels.
+fn extract_created_list_id(payload: &serde_json::Value) -> Option<String> {
+    for pointer in [
+        "/data/create_list/list/id_str",
+        "/data/create_list/id_str",
+        "/data/create_list/list/rest_id",
+        "/data/list/id_str",
+        "/data/list/rest_id",
+        "/data/create_list/list/id",
+        "/data/list/id",
+    ] {
+        if let Some(id) = payload
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 /// `twr completions <shell>`: script to stdout, instructions to stderr
 /// (xf split — keeps output pipeable). Not an envelope command.
 fn run_completions(shell: &str) -> anyhow::Result<()> {
@@ -4297,6 +5023,142 @@ async fn doctor_data_probe(
         checks.push(entry);
     }
     (data, code)
+}
+
+#[cfg(test)]
+mod list_write_tests {
+    use super::*;
+
+    #[test]
+    fn operation_strings_match_policy_whitelist_convention() {
+        // CLI subcommand names (not GraphQL op names) — must stay in sync
+        // with Policy::allows() or the gate silently never fires.
+        let cases: Vec<(ListWriteArgs, &str, &str)> = vec![
+            (
+                ListWriteArgs::Create {
+                    name: "N".into(),
+                    description: None,
+                    private: false,
+                    idempotency_key: None,
+                },
+                "list-create",
+                "CreateList",
+            ),
+            (
+                ListWriteArgs::Edit {
+                    id: "L".into(),
+                    name: "N".into(),
+                    description: "D".into(),
+                    private: false,
+                    idempotency_key: None,
+                },
+                "list-edit",
+                "UpdateList",
+            ),
+            (
+                ListWriteArgs::Delete {
+                    id: "L".into(),
+                    idempotency_key: None,
+                },
+                "list-delete",
+                "DeleteList",
+            ),
+            (
+                ListWriteArgs::AddMember {
+                    list_id: "L".into(),
+                    user_id: "U".into(),
+                    idempotency_key: None,
+                },
+                "list-add-member",
+                "ListAddMember",
+            ),
+            (
+                ListWriteArgs::RemoveMember {
+                    list_id: "L".into(),
+                    user_id: "U".into(),
+                    idempotency_key: None,
+                },
+                "list-remove-member",
+                "ListRemoveMember",
+            ),
+            (
+                ListWriteArgs::Follow {
+                    id: "L".into(),
+                    idempotency_key: None,
+                },
+                "list-follow",
+                "ListSubscribe",
+            ),
+            (
+                ListWriteArgs::Unfollow {
+                    id: "L".into(),
+                    idempotency_key: None,
+                },
+                "list-unfollow",
+                "ListUnsubscribe",
+            ),
+            (
+                ListWriteArgs::Pin {
+                    id: "L".into(),
+                    idempotency_key: None,
+                },
+                "list-pin",
+                "UpdatePinnedTimelines",
+            ),
+            (
+                ListWriteArgs::Unpin {
+                    id: "L".into(),
+                    idempotency_key: None,
+                },
+                "list-unpin",
+                "UpdatePinnedTimelines",
+            ),
+        ];
+        for (args, op, gql) in cases {
+            assert_eq!(args.operation(), op);
+            assert_eq!(args.graphql().0, gql);
+            assert!(twr_graphql::fallback_query_id(gql).is_some(), "{gql}");
+        }
+    }
+
+    #[test]
+    fn write_tier_denied_under_engagement_and_read_only() {
+        use twr_core::Policy;
+        for op in ["list-create", "list-edit", "list-delete"] {
+            assert!(!Policy::Engagement.allows(op));
+            assert!(!Policy::ReadOnly.allows(op));
+        }
+        for op in [
+            "list-follow",
+            "list-unfollow",
+            "list-pin",
+            "list-unpin",
+            "list-add-member",
+            "list-remove-member",
+        ] {
+            assert!(Policy::Engagement.allows(op));
+        }
+    }
+
+    #[test]
+    fn already_member_and_not_found_classifiers() {
+        assert!(is_already_member_message("User is already a member"));
+        assert!(is_already_member_message("not a member of this list"));
+        assert!(!is_already_member_message("rate limited"));
+        assert!(is_not_found_payload(
+            b"{\"errors\":[{\"message\":\"List not found\"}]}"
+        ));
+        assert!(!is_not_found_payload(b"{\"data\":{\"ok\":true}}"));
+    }
+
+    #[test]
+    fn created_list_id_covers_known_shapes() {
+        let p = serde_json::json!({"data": {"create_list": {"list": {"id_str": "L1"}}}});
+        assert_eq!(extract_created_list_id(&p).as_deref(), Some("L1"));
+        let p2 = serde_json::json!({"data": {"list": {"rest_id": "L2"}}});
+        assert_eq!(extract_created_list_id(&p2).as_deref(), Some("L2"));
+        assert!(extract_created_list_id(&serde_json::json!({"data": {}})).is_none());
+    }
 }
 
 #[cfg(test)]
