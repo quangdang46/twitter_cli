@@ -243,12 +243,33 @@ main() {
                 fi
                 case "$archive" in
                     *.tar.gz) tar -xzf "$TMP/$archive" -C "$TMP" ;;
-                    *.zip)    unzip -q "$TMP/$archive" -d "$TMP" ;;
+                    *.zip)
+                        if command -v unzip >/dev/null 2>&1; then
+                            unzip -q "$TMP/$archive" -d "$TMP"
+                        else
+                            # No unzip on minimal Windows git-bash installs — fall back
+                            # to python3's stdlib zipfile (live-found 2026-09-16:
+                            # download+checksum passed but extraction silently did
+                            # nothing... actually worse, `unzip` missing makes the
+                            # whole case-branch fail under `set -e` — caught here
+                            # explicitly instead).
+                            python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$TMP/$archive" "$TMP" \
+                                || die "need 'unzip' or 'python3' to extract the .zip archive"
+                        fi
+                        ;;
                 esac
+                # Locate the binary. Notes from live-testing on Windows git-bash
+                # (2026-09-16): (1) the Windows release zip stores `twr.exe`
+                # (with extension), not a bare `twr`; (2) `-perm -111` (exec
+                # bit) does not exist on files freshly extracted on Windows,
+                # so the old find predicate matched nothing. Search both names
+                # and fall back to a plain name match without the perm test.
                 local bin_path
-                bin_path=$(find "$TMP" -maxdepth 2 -name "$BINARY_NAME" -type f -perm -111 2>/dev/null | head -1)
+                bin_path=$(find "$TMP" -maxdepth 2 \( -name "$BINARY_NAME" -o -name "${BINARY_NAME}.exe" \) -type f 2>/dev/null | head -1)
                 [ -n "$bin_path" ] || die "Binary not found inside the downloaded archive"
-                install_binary_atomic "$bin_path" "$DEST/$BINARY_NAME"
+                local dest_name="$BINARY_NAME"
+                [[ "$suffix" == windows* ]] && dest_name="${BINARY_NAME}.exe"
+                install_binary_atomic "$bin_path" "$DEST/$dest_name"
             else
                 log_warn "Binary download failed — falling back to building from source"
                 build_from_source
@@ -272,8 +293,7 @@ main() {
     echo "  Quick start:"
     echo "    $BINARY_NAME status --json"
     echo ""
-    echo "  Note: twr is pre-implementation (see PLAN.md) — status/schema are"
-    echo "  scaffold stubs today, not real network calls."
+    echo "  Next: run '$BINARY_NAME login --guide' once, then '$BINARY_NAME status --json'."
 }
 
 # curl | bash safety: buffer the whole script before executing, so a
