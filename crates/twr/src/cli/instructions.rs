@@ -53,7 +53,7 @@ pub fn for_operation(operation: &str) -> fn(&Value) -> Option<&Vec<Value>> {
                 ],
             ))
         },
-        "UserTweets" | "Likes" => |data| {
+        "UserTweets" | "Likes" | "UserRepliesTimeline" | "UserMedia" => |data| {
             as_instructions(
                 deep(
                     data,
@@ -177,6 +177,16 @@ mod tests {
         let search = json!({"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": []}}}}});
         assert!(for_operation("SearchTimeline")(&search).unwrap().is_empty());
         assert!(for_operation("Nope")(&home).is_none());
+    }
+
+    #[test]
+    fn user_tab_ops_share_the_user_timeline_path() {
+        let body = json!({"data": {"user": {"result": {"timeline": {"timeline": {"instructions": [{"a": 1}]}}}}}});
+        assert_eq!(
+            for_operation("UserRepliesTimeline")(&body).unwrap().len(),
+            1
+        );
+        assert_eq!(for_operation("UserMedia")(&body).unwrap().len(), 1);
     }
 
     #[test]

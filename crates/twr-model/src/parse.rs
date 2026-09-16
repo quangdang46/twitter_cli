@@ -9,7 +9,8 @@ use crate::article::parse_article;
 use crate::deep_get::parse_int;
 use crate::dget;
 use crate::model::{
-    Author, BookmarkFolder, ListOwner, Metrics, Tweet, TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, ListOwner, Metrics, NotificationActor, NotificationEvent, Tweet,
+    TweetMedia, TwitterList, UserProfile,
 };
 use serde_json::Value;
 
@@ -662,4 +663,239 @@ where
     }
 
     (tweets, next_cursor)
+}
+
+/// Parse a URT notifications REST response
+/// (`GET /i/api/2/notifications/{all,mentions}.json`, xfetch's
+/// `NotificationsMixin::parseNotificationResponse` ported to this repo's
+/// model) into `(events, tweets, next_cursor)`.
+///
+/// Shape: `globalObjects.tweets` / `globalObjects.users` hold the bodies
+/// keyed by id; `timeline.instructions[].addEntries.entries[]` hold the
+/// events, each `entry.content` carrying the display fields. Cursor lives
+/// at `entry.content.operation.cursor` (`cursorType == "Bottom"`), with a
+/// `replaceEntry` fallback — NOT the GraphQL `content.cursorType` shape,
+/// hence a dedicated parser rather than reusing `extract_cursor`.
+///
+/// Event rows reference tweets by id; the tweet BODIES come only from
+/// `globalObjects` (a URT tweet is a legacy REST shape, not a GraphQL
+/// `TweetResult` — do not run `parse_tweet_result` on it). The caller owns
+/// the `(event.tweet_ids ↔ tweets)` join; the envelope ships both so an
+/// agent can resolve without a second call.
+pub fn parse_notifications_response(
+    data: &Value,
+) -> (Vec<NotificationEvent>, Vec<Tweet>, Option<String>) {
+    let empty_obj = Value::Object(Default::default());
+    let global = data.get("globalObjects").unwrap_or(&empty_obj);
+    let global_tweets = global
+        .get("tweets")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let global_users = global
+        .get("users")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    // Minimal REST-tweet → Tweet lift: id/text/author/metrics/created_at
+    // from the legacy extended-mode fields (full_text, user_id_str,
+    // favorite_/retweet_/reply_/quote_/bookmark_count, created_at, lang).
+    // Media/quote-nesting stay empty — the notification surface is a
+    // pointer to the tweet, `twr tweet <id>` has the full body.
+    let mut tweets = Vec::new();
+    for (tweet_id, t) in &global_tweets {
+        let user_id = t
+            .get("user_id_str")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let u = global_users.get(user_id).cloned().unwrap_or(Value::Null);
+        tweets.push(Tweet {
+            id: tweet_id.clone(),
+            text: t
+                .get("full_text")
+                .or_else(|| t.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            author: Author {
+                id: user_id.to_string(),
+                name: u
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                screen_name: u
+                    .get("screen_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                profile_image_url: u
+                    .get("profile_image_url_https")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                verified: u.get("verified").and_then(Value::as_bool).unwrap_or(false),
+            },
+            metrics: Metrics {
+                likes: parse_int(t.get("favorite_count"), 0),
+                retweets: parse_int(t.get("retweet_count"), 0),
+                replies: parse_int(t.get("reply_count"), 0),
+                quotes: parse_int(t.get("quote_count"), 0),
+                views: 0,
+                bookmarks: parse_int(t.get("bookmark_count"), 0),
+            },
+            created_at: t
+                .get("created_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            media: vec![],
+            urls: vec![],
+            is_retweet: t.get("retweeted_status_id_str").is_some(),
+            lang: t
+                .get("lang")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            retweeted_by: None,
+            quoted_tweet: None,
+            score: None,
+            article_title: None,
+            article_text: None,
+            is_subscriber_only: false,
+            is_promoted: false,
+        });
+    }
+    // Newest-first, mirroring xfetch's createdAt sort.
+    tweets.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let mut events = Vec::new();
+    let mut next_cursor = None;
+    let instructions = data
+        .get("timeline")
+        .and_then(|t| t.get("instructions"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for instruction in &instructions {
+        // replaceEntry fallback for the Bottom cursor.
+        if let Some(cursor) = instruction
+            .get("replaceEntry")
+            .and_then(|r| r.get("entry"))
+            .and_then(|e| e.get("content"))
+            .and_then(|c| c.get("operation"))
+            .and_then(|o| o.get("cursor"))
+            .filter(|c| c.get("cursorType").and_then(Value::as_str) == Some("Bottom"))
+            .and_then(|c| c.get("value"))
+            .and_then(Value::as_str)
+        {
+            next_cursor = Some(cursor.to_string());
+        }
+        let entries = instruction
+            .get("addEntries")
+            .and_then(|a| a.get("entries"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for entry in &entries {
+            let content = entry.get("content").unwrap_or(&empty_obj);
+            if let Some(cursor) = content
+                .get("operation")
+                .and_then(|o| o.get("cursor"))
+                .filter(|c| c.get("cursorType").and_then(Value::as_str) == Some("Bottom"))
+                .and_then(|c| c.get("value"))
+                .and_then(Value::as_str)
+            {
+                next_cursor = Some(cursor.to_string());
+                continue;
+            }
+            // Event rows: icon names the type; message/url/timestamp come
+            // from the content; actor + tweet ids from the entry id lists
+            // (fallback: entryId itself when the lists are absent).
+            let icon = content
+                .get("icon")
+                .and_then(|i| i.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let entry_id = entry
+                .get("entryId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let event_type = if icon.is_empty() {
+                entry_id.to_string()
+            } else {
+                icon.strip_prefix("icon_").unwrap_or(icon).to_string()
+            };
+            let mut actor_ids: Vec<String> = content
+                .get("fromUserIds")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if actor_ids.is_empty() {
+                actor_ids = content
+                    .get("from_user_id_str")
+                    .and_then(Value::as_str)
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default();
+            }
+            let actors: Vec<NotificationActor> = actor_ids
+                .into_iter()
+                .map(|id| {
+                    let u = global_users.get(&id).cloned().unwrap_or(Value::Null);
+                    NotificationActor {
+                        id: id.clone(),
+                        screen_name: u
+                            .get("screen_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: u
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    }
+                })
+                .collect();
+            let mut tweet_ids: Vec<String> = content
+                .get("tweetIds")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if tweet_ids.is_empty() {
+                tweet_ids = content
+                    .get("target_tweet_id_str")
+                    .and_then(Value::as_str)
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default();
+            }
+            events.push(NotificationEvent {
+                event_type,
+                actors,
+                tweet_ids,
+                timestamp_ms: content
+                    .get("timestampMs")
+                    .and_then(Value::as_str)
+                    .or_else(|| content.get("timestamp_ms").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string(),
+                message: content
+                    .get("message")
+                    .and_then(|m| m.get("text").or(Some(m)))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            });
+        }
+    }
+
+    (events, tweets, next_cursor)
 }

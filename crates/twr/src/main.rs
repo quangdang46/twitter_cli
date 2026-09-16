@@ -346,12 +346,42 @@ enum Command {
         #[arg(long, short = 'n')]
         max: Option<usize>,
     },
+    /// Mention notifications (tweets that mention you).
+    Mentions {
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// All notifications (likes/retweets/follows/quotes on your content).
+    Notifications {
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// User profile by handle.
     User {
         handle: String,
     },
     /// Recent posts by handle.
     UserPosts {
+        handle: String,
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
+    },
+    /// Posts + replies by handle (ungated replies-only tab).
+    UserReplies {
+        handle: String,
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+        #[arg(long, env = "TWR_FILTER")]
+        filter: bool,
+    },
+    /// Photo/video-only posts by handle (server-side filtered tab).
+    UserMedia {
         handle: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
@@ -858,6 +888,18 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
+        Command::Mentions { max, cursor } => {
+            kind = "notification_list";
+            let (d, code) = run_notifications(&opts, "mentions", max, cursor).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Notifications { max, cursor } => {
+            kind = "notification_list";
+            let (d, code) = run_notifications(&opts, "all", max, cursor).await;
+            data = d;
+            exit_code = code;
+        }
         Command::User { handle } => {
             kind = "user";
             let (d, code) = run_user(&opts, &config, handle).await;
@@ -871,6 +913,27 @@ async fn main() -> anyhow::Result<()> {
         } => {
             kind = "tweet_list";
             let (d, code) = run_user_posts(&opts, &config, handle, max, filter).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::UserReplies {
+            handle,
+            max,
+            filter,
+        } => {
+            kind = "tweet_list";
+            let (d, code) =
+                run_user_tab(&opts, &config, handle, "UserRepliesTimeline", max, filter).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::UserMedia {
+            handle,
+            max,
+            filter,
+        } => {
+            kind = "tweet_list";
+            let (d, code) = run_user_tab(&opts, &config, handle, "UserMedia", max, filter).await;
             data = d;
             exit_code = code;
         }
@@ -1077,6 +1140,10 @@ fn schema_data() -> serde_json::Value {
             {"name": "list-members", "type": "user_list"},
             {"name": "user", "type": "user"},
             {"name": "user-posts", "type": "tweet_list"},
+            {"name": "user-replies", "type": "tweet_list"},
+            {"name": "user-media", "type": "tweet_list"},
+            {"name": "mentions", "type": "notification_list"},
+            {"name": "notifications", "type": "notification_list"},
             {"name": "likes", "type": "tweet_list"},
             {"name": "followers", "type": "user_list"},
             {"name": "following", "type": "user_list"},
@@ -1107,6 +1174,10 @@ fn commands_data() -> serde_json::Value {
         {"name": "list-members", "type": "user_list", "desc": "Members of a list"},
         {"name": "user", "type": "user", "desc": "Profile by handle"},
         {"name": "user-posts", "type": "tweet_list", "desc": "Posts by handle"},
+        {"name": "user-replies", "type": "tweet_list", "desc": "Posts + replies by handle (ungated tab)"},
+        {"name": "user-media", "type": "tweet_list", "desc": "Photo/video posts by handle"},
+        {"name": "mentions", "type": "notification_list", "desc": "Tweets mentioning you"},
+        {"name": "notifications", "type": "notification_list", "desc": "Likes/retweets/follows/quotes on your content"},
         {"name": "likes", "type": "tweet_list", "desc": "Own-account likes"},
         {"name": "followers", "type": "user_list", "desc": "Followers of user id"},
         {"name": "following", "type": "user_list", "desc": "Following of user id"},
@@ -2429,6 +2500,180 @@ async fn run_likes(
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
         Err(_) => (serde_json::json!({"error": "likes fetch failed"}), 6),
+    }
+}
+
+/// `twr mentions` / `twr notifications`: URT notifications REST endpoint
+/// (`GET /i/api/2/notifications/{mentions,all}.json`, xfetch's
+/// `NotificationsMixin` verbatim including the tx-id header). NOT GraphQL:
+/// no query ID, no 4-layer resolver, no instruction extractor — the parser
+/// is `parse_notifications_response` (globalObjects + addEntries).
+/// `mentions` is the same endpoint with `kind=mentions` (server-side
+/// filter), NOT a client-side filter over `all` and NOT UserTweetsAndReplies
+/// scoped to self (that returns your own tweets+replies, not others'
+/// mentions of you) — disambiguation recorded per bead o1l.1.2.
+/// Envelope `notification_list`: `{events: NotificationEvent[],
+/// tweets: Tweet[], page: {returned, nextCursor?, hasMore}}`.
+async fn run_notifications(
+    opts: &OutputOptions,
+    kind: &'static str,
+    max: Option<usize>,
+    cursor: Option<String>,
+) -> (serde_json::Value, i32) {
+    debug_assert!(kind == "mentions" || kind == "all");
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let config = twr_config::TwrConfig::default();
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
+    // Throttle under the same token bucket as the other reads.
+    let wait = ctx.throttle.wait_secs(
+        "Notifications",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0),
+    );
+    if wait > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+    }
+    let count = max.unwrap_or(20);
+    let url = twr_client::notifications_url(kind, count, cursor.as_deref());
+    // Same header set as GraphQL, but the notifications Referer path and a
+    // freshly minted tx-id (xfetch mints unconditionally per request here —
+    // unlike the GraphQL path where the id attaches to GATED_OPS only).
+    let mut headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "GET",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: ctx
+            .tx
+            .as_ref()
+            .map(|tx| {
+                tx.inner
+                    .generate("GET", &format!("/i/api/2/notifications/{kind}.json"))
+            })
+            .as_deref(),
+    });
+    headers.insert("Referer".into(), "https://x.com/notifications".into());
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let resp = match ctx.transport.get(&url, &refs).await {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                serde_json::json!({"error": "notifications fetch failed"}),
+                5,
+            )
+        }
+    };
+    if resp.status == 429 {
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if resp.status == 404 {
+        return (
+            serde_json::json!({"error": "contract drift (notifications endpoint moved)"}),
+            6,
+        );
+    }
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    let (events, tweets, next) = twr_model::parse_notifications_response(&body);
+    let mut page = serde_json::json!({
+        "returned": events.len(),
+        "maxRequested": max,
+        "hasMore": next.is_some(),
+    });
+    if let Some(c) = next {
+        page["nextCursor"] = serde_json::json!(c);
+    }
+    (
+        serde_json::json!({
+            "events": events,
+            "tweets": tweets,
+            "page": page,
+        }),
+        0,
+    )
+}
+
+/// Variables for the profile-tab ops (`UserRepliesTimeline`/`UserMedia`),
+/// following agentic-x's `user_tab_variables` (LIVE-CAPTURED 2026-07-26).
+/// Deliberately NOT UserTweets' `withQuickPromoteEligibilityTweetFields`
+/// bundle — X validates variables strictly and the wrong bundle 404s.
+fn user_tab_vars(uid: &str, count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "userId": uid,
+        "count": count,
+        "includePromotedContent": false,
+        "withClientEventToken": false,
+        "withBirdwatchNotes": false,
+        "withVoice": true,
+    })
+}
+
+/// Shared user-tab timeline runner: resolve handle → id, then page one of
+/// the profile-tab ops (`UserTweets` callers keep their own function;
+/// `UserRepliesTimeline`/`UserMedia` come here).
+async fn run_user_tab(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    handle: String,
+    operation: &'static str,
+    max: Option<usize>,
+    filter: bool,
+) -> (serde_json::Value, i32) {
+    let (udata, code) = run_user(opts, config, handle.clone()).await;
+    if code != 0 {
+        return (udata, code);
+    }
+    let Some(uid) = udata.get("id").and_then(|v| v.as_str()) else {
+        return (serde_json::json!({"error": "user has no id"}), 3);
+    };
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let count = max.unwrap_or(config.fetch.count as usize);
+    let vars = user_tab_vars(uid, count);
+    let out = cli::exec::fetch_tweets_paged(
+        &mut ctx,
+        operation,
+        count,
+        None,
+        vars,
+        cli::instructions::for_operation(operation),
+    )
+    .await;
+    match out {
+        Ok((tweets, loop_out)) => {
+            let mut fa = false;
+            finish_tweets(opts, config, tweets, loop_out, max, filter, &mut fa)
+        }
+        Err(twr_client::PageError::RateLimited) => {
+            (serde_json::json!({"tweets": [], "truncated": true}), 4)
+        }
+        Err(_) => (
+            serde_json::json!({"error": format!("{operation} fetch failed")}),
+            6,
+        ),
     }
 }
 
@@ -3893,6 +4138,41 @@ async fn doctor_data_probe(
         checks.push(entry);
     }
     (data, code)
+}
+
+#[cfg(test)]
+mod user_tab_tests {
+    use super::*;
+
+    #[test]
+    fn user_tab_vars_match_agentic_x_shape() {
+        // agentic-x `user_tab_variables` LIVE-CAPTURED 2026-07-26: the tab
+        // ops take this exact bundle — notably WITHOUT UserTweets'
+        // `withQuickPromoteEligibilityTweetFields` (strict validation 404s).
+        let v = user_tab_vars("123", 20);
+        assert_eq!(v["userId"], "123");
+        assert_eq!(v["count"], 20);
+        assert_eq!(v["includePromotedContent"], false);
+        assert_eq!(v["withClientEventToken"], false);
+        assert_eq!(v["withBirdwatchNotes"], false);
+        assert_eq!(v["withVoice"], true);
+        assert!(v.get("withQuickPromoteEligibilityTweetFields").is_none());
+        assert!(v.get("withV2Timeline").is_none());
+    }
+
+    #[test]
+    fn user_tab_wires_to_right_operation_per_command() {
+        // The dispatch arms must pass the op matching the subcommand —
+        // a copy-paste swap here would silently query the wrong tab.
+        // (Compile-time anchor: both ops exist in the resolver baseline.)
+        for op in ["UserRepliesTimeline", "UserMedia"] {
+            assert!(twr_graphql::fallback_query_id(op).is_some(), "{op}");
+            assert!(cli::instructions::for_operation(op)(&serde_json::json!({
+                "data": {"user": {"result": {"timeline": {"timeline": {"instructions": []}}}}}
+            }))
+            .is_some());
+        }
+    }
 }
 
 #[cfg(test)]

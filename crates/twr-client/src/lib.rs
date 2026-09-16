@@ -16,7 +16,10 @@ pub mod upload;
 mod wreq_transport;
 pub use wreq_transport::WreqTransport;
 
-pub use headers::{build_headers, Credentials, HeaderInput, Os, BEARER_TOKEN};
+pub use headers::{
+    build_headers, notification_params, notifications_url, Credentials, HeaderInput, Os,
+    BEARER_TOKEN,
+};
 pub use throttle::{jittered_delay_secs, page_count, use_post, BucketConfig, Throttle, POST_OPS};
 pub use timeline::{backoff_delays_secs, fetch_timeline, Page, PageError, TimelineResult};
 

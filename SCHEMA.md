@@ -49,6 +49,8 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 - `bookmark_folder_list`: `{"folders": [{id, name}], "page": {"returned": n}}` (from `bookmarks --folders`)
 - `list_list`: `{"lists": TwitterList[], "page": {...}}` (from `lists [--member-of]`); `TwitterList{id,name,description,member_count,subscriber_count,is_private,created_at,owner?{id,screen_name,name}}`
 - `list-members` reuses the `user_list` shape verbatim (`{"users": [...], "page": {...}}`)
+- `notification_list`: `{"events": NotificationEvent[], "tweets": Tweet[], "page": {...}}` (from `mentions`/`notifications`); `NotificationEvent{event_type, actors[{id,screen_name,name}], tweet_ids[], timestamp_ms, message?}` — events are NOT Tweets, the `tweets` array holds the referenced bodies (globalObjects-resolved) so an agent needs no second call
+- `mentions` vs `notifications`: SAME REST endpoint family (`/i/api/2/notifications/{mentions,all}.json`), server-side kind filter — `mentions` is not a client-side filter over `all`, and neither is `UserTweetsAndReplies`-on-self (that returns your own posts+replies, not others' mentions of you)
 - `tweet_detail`: a single `Tweet`
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
 - `user` / `user_list`: `UserProfile` / `{"users": [...]}` (list parsing

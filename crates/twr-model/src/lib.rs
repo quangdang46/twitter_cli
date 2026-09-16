@@ -11,11 +11,12 @@ pub mod model;
 pub mod parse;
 
 pub use model::{
-    Author, BookmarkFolder, ListOwner, Metrics, Tweet, TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, ListOwner, Metrics, NotificationActor, NotificationEvent, Tweet,
+    TweetMedia, TwitterList, UserProfile,
 };
 pub use parse::{
     parse_bookmark_folders_response, parse_list_members_response, parse_lists_response,
-    parse_timeline_response, parse_tweet_result, parse_user_result,
+    parse_notifications_response, parse_timeline_response, parse_tweet_result, parse_user_result,
 };
 
 #[cfg(test)]
@@ -332,6 +333,95 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].screen_name, "member");
         assert_eq!(cursor.as_deref(), Some("NEXT_MEMBERS"));
+    }
+
+    /// Minimal URT notifications payload: globalObjects (tweets + users)
+    /// plus timeline.instructions[].addEntries.entries[] with a Bottom
+    /// cursor sibling — mirrors xfetch's parseNotificationResponse input.
+    fn notifications_fixture() -> serde_json::Value {
+        json!({
+            "globalObjects": {
+                "tweets": {
+                    "100": {
+                        "full_text": "hey @you",
+                        "user_id_str": "u9",
+                        "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                        "favorite_count": 3,
+                        "retweet_count": 1,
+                        "reply_count": 0,
+                        "quote_count": 0,
+                        "lang": "en"
+                    }
+                },
+                "users": {
+                    "u9": {
+                        "name": "Mentioner",
+                        "screen_name": "mentioner",
+                        "profile_image_url_https": "https://img",
+                        "verified": false
+                    }
+                }
+            },
+            "timeline": {
+                "instructions": [{
+                    "addEntries": {
+                        "entries": [
+                            {
+                                "entryId": "notif-1",
+                                "content": {
+                                    "icon": { "id": "icon_mention" },
+                                    "message": { "text": "mentioner mentioned you" },
+                                    "timestampMs": "1704067200000",
+                                    "fromUserIds": ["u9"],
+                                    "tweetIds": ["100"]
+                                }
+                            },
+                            {
+                                "entryId": "cursor-bottom-0",
+                                "content": {
+                                    "operation": {
+                                        "cursor": { "cursorType": "Bottom", "value": "NEXT_NOTIF" }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn parses_notification_event_with_actor_and_tweet_body() {
+        let (events, tweets, cursor) =
+            crate::parse::parse_notifications_response(&notifications_fixture());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "mention");
+        assert_eq!(events[0].actors.len(), 1);
+        assert_eq!(events[0].actors[0].screen_name, "mentioner");
+        assert_eq!(events[0].tweet_ids, vec!["100"]);
+        assert_eq!(events[0].timestamp_ms, "1704067200000");
+        assert_eq!(tweets.len(), 1, "tweet bodies resolve from globalObjects");
+        assert_eq!(tweets[0].id, "100");
+        assert_eq!(tweets[0].text, "hey @you");
+        assert_eq!(tweets[0].author.screen_name, "mentioner");
+        assert_eq!(tweets[0].metrics.likes, 3);
+        assert_eq!(cursor.as_deref(), Some("NEXT_NOTIF"));
+    }
+
+    #[test]
+    fn notification_events_and_tweets_are_not_conflated() {
+        // The bead's core invariant: events are NOT Tweets. An event with
+        // no referenced tweet still parses (empty tweet_ids), and a payload
+        // with no globalObjects yields events with zero tweet bodies —
+        // never a crash, never a force-fit.
+        let mut bare = notifications_fixture();
+        bare["globalObjects"] = json!({});
+        let (events, tweets, _) = crate::parse::parse_notifications_response(&bare);
+        assert_eq!(events.len(), 1);
+        assert!(tweets.is_empty());
+        let (events2, tweets2, cursor2) = crate::parse::parse_notifications_response(&json!({}));
+        assert!(events2.is_empty() && tweets2.is_empty() && cursor2.is_none());
     }
 
     #[test]

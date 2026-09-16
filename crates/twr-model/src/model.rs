@@ -109,6 +109,38 @@ pub struct TwitterList {
     pub owner: Option<ListOwner>,
 }
 
+/// One notification event from the URT notifications REST endpoint
+/// (`/i/api/2/notifications/{all,mentions}.json`). NOT a Tweet at the top
+/// level: an event (`like`/`retweet`/`follow`/`mention`/`reply`/`quote`…)
+/// with actor(s) and, when the event references one, the target tweet.
+/// Global tweet/user objects are resolved to ids at parse time (full bodies
+/// stay in `tweets`, same as xfetch's `Notification{fromUsers,targetTweets}`
+/// split) so the envelope stays small and agent-scannable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationActor {
+    pub id: String,
+    #[serde(default)]
+    pub screen_name: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationEvent {
+    /// Server `icon` name lowercased (`heart`/`retweet`/`person`/`mention`…),
+    /// or the timeline-entry fallback id when no icon is present.
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actors: Vec<NotificationActor>,
+    /// Referenced tweet ids (globalObjects-resolved; bodies in `tweets`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tweet_ids: Vec<String>,
+    #[serde(default)]
+    pub timestamp_ms: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookmarkFolder {
     pub id: String,

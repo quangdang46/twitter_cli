@@ -58,6 +58,25 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     // `EAARFZGlY-JHdLJbKZAA5g` becomes the EXTRA fallback. Payload is a
     // bare `data.list` object (not a timeline), parsed by parse_list_result.
     ("ListByRestId", "wXzyA5vM_aVkBL9G8Vp3kw"),
+    // P6.1 user-timeline variants — starting points from agentic-x's
+    // live-probed 2026-07-26 sweep (variables shape, envelope root, and a
+    // non-empty response all verified there), NOT yet re-verified against
+    // this repo's own `doctor --refresh`. All three answer under the SAME
+    // envelope root as UserTweets
+    // (`data.user.result.timeline.timeline.instructions`, with the
+    // `timeline_v2` fallback) and NONE is behind the tx-id wall — that is
+    // precisely why UserRepliesTimeline is preferred over the gated
+    // UserTweetsAndReplies (which interleaves replies with posts AND needs
+    // a fresh x-client-transaction-id per request, see twr-tx::GATED_OPS):
+    // replies-only tab, cheaper (no tx mint) and resilient when the
+    // tx generator rots. Variables per agentic-x `user_tab_variables`
+    // (LIVE-CAPTURED 2026-07-26): `{userId, count, includePromotedContent:
+    // false, withClientEventToken: false, withBirdwatchNotes: false,
+    // withVoice: true}` (+ cursor when paging). X validates variables
+    // strictly — do NOT copy UserTweets' `withQuickPromoteEligibility...`
+    // bundle onto these ops (known 404 cause).
+    ("UserRepliesTimeline", "pb6crFNr_CyRiKv4vRZWYQ"),
+    ("UserMedia", "6k_h0NmaKHYxL0lScGLJSw"),
 ];
 
 /// Shipped EXTRA-rotation fallbacks (layer 3): the older/alternate query ID
@@ -161,13 +180,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_22_plus_4_list_ops() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 26);
+    fn baseline_has_22_plus_4_list_plus_2_user_tab_ops() {
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 28);
         for op in [
             "ListOwnerships",
             "ListMemberships",
             "ListMembers",
             "ListByRestId",
+            "UserRepliesTimeline",
+            "UserMedia",
         ] {
             assert!(fallback_query_id(op).is_some(), "{op}");
         }

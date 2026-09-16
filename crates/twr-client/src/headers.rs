@@ -205,6 +205,80 @@ pub fn build_headers(input: &HeaderInput) -> HashMap<String, String> {
     h
 }
 
+/// Query params for the URT notifications REST endpoint
+/// (`GET https://x.com/i/api/2/notifications/{all,mentions}.json`), ported
+/// verbatim from xfetch's `NotificationsMixin::fetchNotifications`: the
+/// `include_*` bundle, `tweet_mode=extended`, `count`, and the `ext`
+/// bundle. `cursor` is appended only when paging.
+pub fn notification_params(count: usize, cursor: Option<&str>) -> Vec<(String, String)> {
+    let mut p: Vec<(String, String)> = vec![
+        ("include_profile_interstitial_type", "1"),
+        ("include_blocking", "1"),
+        ("include_blocked_by", "1"),
+        ("include_followed_by", "1"),
+        ("include_want_retweets", "1"),
+        ("include_mute_edge", "1"),
+        ("include_can_dm", "1"),
+        ("include_can_media_tag", "1"),
+        ("include_ext_is_blue_verified", "1"),
+        ("include_ext_verified_type", "1"),
+        ("include_ext_profile_image_shape", "1"),
+        ("skip_status", "1"),
+        ("cards_platform", "Web-12"),
+        ("include_cards", "1"),
+        ("include_ext_alt_text", "true"),
+        ("include_ext_limited_action_results", "true"),
+        ("include_quote_count", "true"),
+        ("include_reply_count", "1"),
+        ("tweet_mode", "extended"),
+        ("include_ext_views", "true"),
+        ("include_entities", "true"),
+        ("include_user_entities", "true"),
+        ("include_ext_media_color", "true"),
+        ("include_ext_media_availability", "true"),
+        ("include_ext_sensitive_media_warning", "true"),
+        ("include_ext_trusted_friends_metadata", "true"),
+        ("send_error_codes", "true"),
+        ("simple_quoted_tweet", "true"),
+        (
+            "ext",
+            "mediaStats,highlightedLabel,voiceInfo,birdwatchPivot,superFollowMetadata,unmentionInfo,editControl",
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    p.push(("count".to_string(), count.to_string()));
+    if let Some(c) = cursor.filter(|c| !c.is_empty()) {
+        p.push(("cursor".to_string(), c.to_string()));
+    }
+    p
+}
+
+/// Full notifications URL with the param bundle encoded.
+pub fn notifications_url(kind: &str, count: usize, cursor: Option<&str>) -> String {
+    let qs: Vec<String> = notification_params(count, cursor)
+        .iter()
+        .map(|(k, v)| format!("{k}={}", url_encode_query(v)))
+        .collect();
+    format!(
+        "https://x.com/i/api/2/notifications/{kind}.json?{}",
+        qs.join("&")
+    )
+}
+
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +300,27 @@ mod tests {
             locale: "en-US",
             transaction_id: tid,
         }
+    }
+
+    #[test]
+    fn notification_params_carry_xfetch_bundle_and_count() {
+        let p = notification_params(20, None);
+        let get = |k: &str| p.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("tweet_mode"), Some("extended"));
+        assert_eq!(get("count"), Some("20"));
+        assert_eq!(get("cursor"), None);
+        assert!(get("ext").is_some_and(|e| e.contains("mediaStats")));
+        let paged = notification_params(50, Some("CURSOR"));
+        let get2 = |k: &str| {
+            paged
+                .iter()
+                .find(|(kk, _)| kk == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get2("cursor"), Some("CURSOR"));
+        let url = notifications_url("mentions", 20, None);
+        assert!(url.starts_with("https://x.com/i/api/2/notifications/mentions.json?"));
+        assert!(url.contains("count=20"));
     }
 
     #[test]

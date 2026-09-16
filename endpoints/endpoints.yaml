@@ -64,3 +64,17 @@ ListByRestId:
   queryId: wXzyA5vM_aVkBL9G8Vp3kw
   rps: 1.0
   burst: 4
+UserRepliesTimeline:
+  queryId: pb6crFNr_CyRiKv4vRZWYQ
+  rps: 0.5
+  burst: 2
+UserMedia:
+  queryId: 6k_h0NmaKHYxL0lScGLJSw
+  rps: 0.5
+  burst: 2
+Notifications:
+  rps: 0.5
+  burst: 2
+Mentions:
+  rps: 0.5
+  burst: 2
