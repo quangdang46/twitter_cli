@@ -61,6 +61,24 @@ impl ErrorKind {
         }
     }
 
+    /// Reverse of [`Self::exit_code`] — maps a process exit code back to its
+    /// `ErrorKind`, for call sites that historically tracked `(data, i32)`
+    /// tuples ad hoc instead of building a `TwrError` directly. `0` (success)
+    /// has no `ErrorKind` and returns `None`.
+    pub fn from_exit_code(code: i32) -> Option<Self> {
+        match code {
+            1 => Some(ErrorKind::GeneralAuth),
+            2 => Some(ErrorKind::UsagePolicyDenied),
+            3 => Some(ErrorKind::NotFound),
+            4 => Some(ErrorKind::ForbiddenRateLimited),
+            5 => Some(ErrorKind::Network),
+            6 => Some(ErrorKind::ContractDrift),
+            7 => Some(ErrorKind::AttachmentIo),
+            77 => Some(ErrorKind::AuthRequired),
+            _ => None,
+        }
+    }
+
     pub fn is_retryable(self) -> bool {
         matches!(
             self,

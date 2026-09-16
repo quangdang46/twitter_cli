@@ -861,16 +861,40 @@ async fn main() -> anyhow::Result<()> {
 
     let mut meta = Meta::new(opts.trace_id.clone());
     meta.command = Some(kind.to_string());
-    let envelope = Envelope::ok(kind, data).with_meta(meta);
 
+    // CONTRACT FIX (was a systemic bug across ~30 call sites): every command
+    // handler above returns an ad-hoc `(serde_json::Value, i32)` tuple, and
+    // this used to *always* wrap the result in `Envelope::ok(...)` — which
+    // serializes `"ok":true` — even when `exit_code != 0`. Per plan §5.1, an
+    // agent must be able to trust `ok`/exit-code together; `ok:true` on a
+    // failure silently breaks that. Route any non-zero exit through a real
+    // `Envelope::err` instead, reconstructing a `TwrError` from the exit code
+    // (via `ErrorKind::from_exit_code`) and whatever message the handler put
+    // in `data.error` (or `data.saved`/`data.logged_out` failure shapes).
+    if exit_code != 0 {
+        let message = data
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("command failed (exit {exit_code})"));
+        let kind_enum = twr_core::ErrorKind::from_exit_code(exit_code)
+            .unwrap_or(twr_core::ErrorKind::GeneralAuth);
+        let err = twr_core::TwrError::new(kind_enum, message);
+        let envelope: Envelope<serde_json::Value> = Envelope::err(err).with_meta(meta);
+        match opts.format {
+            OutputFormat::Json => emit(&envelope),
+            OutputFormat::Yaml => emit_yaml(&envelope)?,
+            OutputFormat::Toon => twr_core::emit_toon(&envelope),
+        }
+        std::process::exit(exit_code);
+    }
+
+    let envelope = Envelope::ok(kind, data).with_meta(meta);
     match opts.format {
         OutputFormat::Json => emit(&envelope),
         OutputFormat::Yaml => emit_yaml(&envelope)?,
         // TOON renders data only; errors fall back to JSON inside emit_toon.
         OutputFormat::Toon => twr_core::emit_toon(&envelope),
-    }
-    if exit_code != 0 {
-        std::process::exit(exit_code);
     }
     Ok(())
 }
@@ -912,9 +936,14 @@ fn tier_guard(
     if tier == twr_client::guest::Tier::Guest && twr_client::guest::guest_covers(operation) {
         return None;
     }
+    // Exit 77 (AuthRequired), not 2 (UsagePolicyDenied): the caller has no
+    // session-level auth, which is squarely "not logged in" territory per
+    // the plan §5.2 exit-code contract, not a usage/policy mistake -- an
+    // agent should react to this the same way it reacts to a missing cookie,
+    // by running `twr status`/`twr login`, not by second-guessing its flags.
     Some((
         serde_json::json!({"error": format!("tier {} does not cover {operation}; use full session auth", tier.as_str())}),
-        2,
+        77,
     ))
 }
 
