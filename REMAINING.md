@@ -34,43 +34,35 @@ a fully clean state.
   contributor-onboarding problem, that fallback might deserve to become the
   *default*, not just an escape hatch.
 
-## P0-1 (wreq transport spike) — code done, live verification NOT done
+## P0-1 (wreq transport spike) — code done, SUPERSEDED by live proof
 
-`crates/twr-client/src/wreq_transport.rs` implements `WreqTransport` and a
-`#[ignore]`d spike test (`chrome_emulation_reaches_a_neutral_fingerprint_checker`)
-hitting `tls.peet.ws/api/all` (a public, neutral fingerprint inspector, NOT
-x.com). This test has **never actually been run** on this machine because
-`crates/twr-client` can't yet link (see above). Once the toolchain is fixed,
-run:
+The `#[ignore]`d `tls.peet.ws` fingerprint-inspector test in
+`crates/twr-client/src/wreq_transport.rs` was never run standalone — and no
+longer needs to be. The toolchain got fixed (cmake + direct-zip nasm +
+background-installed LLVM, all confirmed working: full `cargo build/test
+--workspace` green), and something strictly stronger than the neutral-probe
+test has since happened repeatedly: **real, authenticated GraphQL calls
+against actual x.com through this exact `WreqTransport`** (feed, search incl.
+the transaction-gated Latest path, tweet detail, user lookups, follows,
+posts, likes, retweets, bookmarks — plus a real post/reply/like/follow
+round-trip from a live session). If the TLS fingerprint were not
+browser-shaped, none of that would return 200. Keep the ignored test as a
+cheap regression probe for contributor machines, but do not treat its
+never-having-run as an open verification gap.
 
-```
-cargo test -p twr-client -- --ignored chrome_emulation_reaches_a_neutral_fingerprint_checker
-```
+## P0-4 (end-to-end call) — DONE, exceeded original scope
 
-and record the result (does the response body actually look Chrome-shaped?)
-in the P0-1 bead or a follow-up note — the bead was closed based on API
-correctness review against docs.rs, not a live network result.
-
-## P0-4 (end-to-end UserByScreenName call) — blocked on human input, by design
-
-Bead `twitter_cli-5o3.2.4` is technically "ready" per `br ready` (P0-1 and
-P0-2 are both closed), but making a real authenticated GraphQL call to x.com
-needs:
-
-1. The toolchain fix above (so `twr-client` builds).
-2. **Real X/Twitter session credentials.** P0-2 found that `rookie` cannot
-   extract usable cookies on this machine (Chrome/Edge app-bound encryption
-   requires admin — see the P0-2 bead's close notes, reproducing upstream
-   issue #28 exactly). The only remaining path is Method C (a manually pasted
-   cookie string) or running Chrome as admin so `rookie` can decrypt it.
-
-Deliberately NOT done autonomously: pasting/using a real account's live
-session cookie and making an authenticated request to x.com is an
-outward-facing action with genuine account-ban risk (plan §11 risk #4) that
-should be a human's explicit choice, not something an agent does on its own
-initiative just because a bead is graph-ready. When a human is ready to
-supply credentials (via `twr-auth`'s Method C `parse_cookie_string`, or by
-fixing the admin/rookie path), P0-4 can proceed.
+History: this was deliberately deferred (a human explicitly supplied a real
+x.com cookie string via Method C, which is the only correct way that step
+could happen). What actually ran went **beyond** the bead's original scope
+(UserByScreenName-only): a full live round trip — login → dry-run preview
+→ real post with idempotency key → read-back of the same tweet with
+matching text/author/URL/timestamp — plus subsequent live sessions covering
+replies, likes, retweets, bookmarks, follows, feed, search (incl. gated
+Latest), followers, headlines, and user timelines. Recorded as comments on
+beads `twitter_cli-5o3.2.4`/`5o3.2.5`, upgrading the prior "GO conditional"
+to unconditional. Nothing further to do here; keeping this note so nobody
+re-opens the bead thinking the e2e was never run.
 
 ## Retained scope decisions worth double-checking later
 
