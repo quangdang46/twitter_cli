@@ -30,7 +30,53 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     ("TweetResultByRestId", "7xflPyRiUxGVbJd4uWmbfg"),
     ("BookmarkFoldersSlice", "i78YDd0Tza-dV4SYs58kRg"),
     ("BookmarkFolderTimeline", "hNY7X2xE2N7HVF6Qb_mu6w"),
+    // P6.1 list reads — starting points mined from public reference
+    // implementations, NOT yet verified against this repo's own
+    // `doctor --refresh` (they rot every 2–4 weeks, plan §12 risk 2).
+    // Owned-vs-followed disambiguation: two SEPARATE ops, confirmed by
+    // bird (`getOwnedLists` vs `getListMemberships`) and xfetch
+    // (`getUserLists` → ListOwnerships only): `ListOwnerships` returns
+    // lists the `userId` OWNS, `ListMemberships` returns lists they are a
+    // MEMBER of (followed/subscribed are a third thing — `ListByRestId`
+    // resolves one list at a time, no bulk "followed" op exists in any
+    // reference). Both take `{userId, count, isListMembershipShown}` and
+    // walk `data.user.result.timeline.timeline.instructions` for
+    // `content.itemContent.list` entries. Every P6 bead must re-resolve
+    // these via the 4-layer resolver before landing (TWR_QID_* pin >
+    // disk cache > EXTRA rotation > live rescrape).
+    ("ListOwnerships", "wQcOSjSQ8NtgxIwvYl1lMg"),
+    ("ListMemberships", "BlEXXdARdSeL_0KyKHHvvg"),
+    // ListMembers (members of one list): x-cli-go's baseline
+    // `H_0zFfjp73xGZrJpY-C2IQ`; twitter-internal-api-doc's older capture
+    // `ljlktihgwXeYTfHwwiPj5A` is kept as the EXTRA-rotation fallback.
+    // Payload: `data.list.members_timeline.timeline.instructions` with
+    // `content.itemContent.user_results.result` entries (members ARE
+    // users — reuse parse_user_result, no new model type).
+    ("ListMembers", "H_0zFfjp73xGZrJpY-C2IQ"),
+    // ListByRestId (one list by ID, for P6.3's create/edit verification):
+    // bird's baseline `wXzyA5vM_aVkBL9G8Vp3kw`; the doc's older
+    // `EAARFZGlY-JHdLJbKZAA5g` becomes the EXTRA fallback. Payload is a
+    // bare `data.list` object (not a timeline), parsed by parse_list_result.
+    ("ListByRestId", "wXzyA5vM_aVkBL9G8Vp3kw"),
 ];
+
+/// Shipped EXTRA-rotation fallbacks (layer 3): the older/alternate query ID
+/// per op, tried when the baseline 404s. Sourced from the reference corpus
+/// (twitter-internal-api-doc captures predate bird/x-cli-go's live-scraped
+/// values); re-verified or replaced by `doctor --refresh` on drift.
+pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
+    ("ListMembers", "ljlktihgwXeYTfHwwiPj5A"),
+    ("ListByRestId", "EAARFZGlY-JHdLJbKZAA5g"),
+];
+
+/// Seed an [`crate::ExtraRotation`] map with the shipped alternates.
+pub fn seeded_extra_rotation() -> crate::ExtraRotation {
+    let mut extra = crate::ExtraRotation::new();
+    for (op, qid) in EXTRA_FALLBACK_IDS {
+        extra.insert((*op).to_string(), vec![(*qid).to_string()]);
+    }
+    extra
+}
 
 pub fn fallback_query_id(operation: &str) -> Option<&'static str> {
     FALLBACK_QUERY_IDS
@@ -115,8 +161,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_22_ops() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 22);
+    fn baseline_has_22_plus_4_list_ops() {
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 26);
+        for op in [
+            "ListOwnerships",
+            "ListMemberships",
+            "ListMembers",
+            "ListByRestId",
+        ] {
+            assert!(fallback_query_id(op).is_some(), "{op}");
+        }
+    }
+
+    #[test]
+    fn extra_fallbacks_cover_rotating_list_ops() {
+        let extra = seeded_extra_rotation();
+        assert_eq!(
+            extra.get("ListMembers").map(|v| v.as_slice()),
+            Some(["ljlktihgwXeYTfHwwiPj5A".to_string()].as_slice())
+        );
+        assert_eq!(
+            extra.get("ListByRestId").map(|v| v.as_slice()),
+            Some(["EAARFZGlY-JHdLJbKZAA5g".to_string()].as_slice())
+        );
     }
 
     #[test]

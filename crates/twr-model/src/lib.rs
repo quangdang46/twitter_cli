@@ -10,9 +10,12 @@ pub mod deep_get;
 pub mod model;
 pub mod parse;
 
-pub use model::{Author, BookmarkFolder, Metrics, Tweet, TweetMedia, UserProfile};
+pub use model::{
+    Author, BookmarkFolder, ListOwner, Metrics, Tweet, TweetMedia, TwitterList, UserProfile,
+};
 pub use parse::{
-    parse_bookmark_folders_response, parse_timeline_response, parse_tweet_result, parse_user_result,
+    parse_bookmark_folders_response, parse_list_members_response, parse_lists_response,
+    parse_timeline_response, parse_tweet_result, parse_user_result,
 };
 
 #[cfg(test)]
@@ -221,6 +224,114 @@ mod tests {
         let (folders, cursor) = parse_bookmark_folders_response(&json!({"data": {}}));
         assert!(folders.is_empty());
         assert!(cursor.is_none());
+    }
+
+    /// A minimal but structurally faithful `itemContent.list` result,
+    /// matching bird's `parseList` / xfetch's `parseList` input shape
+    /// (`id_str/name/description/member_count/subscriber_count/mode/
+    /// user_results.result`).
+    fn list_result_fixture(id: &str, name: &str) -> serde_json::Value {
+        json!({
+            "id_str": id,
+            "name": name,
+            "description": "test list",
+            "member_count": 42,
+            "subscriber_count": "7",
+            "mode": "Public",
+            "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+            "user_results": { "result": {
+                "rest_id": "u1",
+                "legacy": { "screen_name": "owner", "name": "Owner" }
+            }}
+        })
+    }
+
+    #[test]
+    fn parses_a_list_result_with_owner() {
+        let list = crate::parse::parse_list_result(&list_result_fixture("123", "Rust"))
+            .expect("should parse");
+        assert_eq!(list.id, "123");
+        assert_eq!(list.name, "Rust");
+        assert_eq!(list.member_count, 42);
+        assert_eq!(list.subscriber_count, 7);
+        assert!(!list.is_private);
+        assert_eq!(
+            list.owner.as_ref().map(|o| o.screen_name.as_str()),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn private_mode_maps_to_is_private_and_list_needs_id_and_name() {
+        let mut private = list_result_fixture("1", "P");
+        private["mode"] = json!("private");
+        assert!(
+            crate::parse::parse_list_result(&private)
+                .unwrap()
+                .is_private
+        );
+        assert!(crate::parse::parse_list_result(&json!({"name": "no id"})).is_none());
+        assert!(crate::parse::parse_list_result(&json!({"id_str": "1"})).is_none());
+    }
+
+    #[test]
+    fn parses_lists_response_with_bottom_cursor() {
+        let list_item = json!({
+            "entryId": "list-123",
+            "content": {
+                "itemContent": { "list": list_result_fixture("123", "Rust") }
+            }
+        });
+        let cursor_item = json!({
+            "entryId": "cursor-bottom-0",
+            "content": { "cursorType": "Bottom", "value": "NEXT_LISTS" }
+        });
+        let instructions = json!([{
+            "type": "TimelineAddEntries",
+            "entries": [list_item, cursor_item]
+        }]);
+        let data = json!({ "data": { "user": { "result": { "timeline": {
+            "timeline": { "instructions": instructions }
+        }}}}});
+        let (lists, cursor) = crate::parse::parse_lists_response(&data, |d| {
+            d.pointer("/data/user/result/timeline/timeline/instructions")
+                .and_then(|v| v.as_array())
+        });
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].id, "123");
+        assert_eq!(cursor.as_deref(), Some("NEXT_LISTS"));
+    }
+
+    #[test]
+    fn parses_list_members_response_as_users_with_cursor() {
+        let member = json!({
+            "rest_id": "u9",
+            "core": { "name": "Member", "screen_name": "member" },
+            "legacy": { "screen_name": "member", "name": "Member", "followers_count": 5 },
+            "is_blue_verified": false
+        });
+        let member_item = json!({
+            "entryId": "user-u9",
+            "content": { "itemContent": { "user_results": { "result": member } } }
+        });
+        let cursor_item = json!({
+            "entryId": "cursor-bottom-0",
+            "content": { "cursorType": "Bottom", "value": "NEXT_MEMBERS" }
+        });
+        let instructions = json!([{
+            "type": "TimelineAddEntries",
+            "entries": [member_item, cursor_item]
+        }]);
+        let data = json!({ "data": { "list": { "members_timeline": {
+            "timeline": { "instructions": instructions }
+        }}}});
+        let (members, cursor) = crate::parse::parse_list_members_response(&data, |d| {
+            d.pointer("/data/list/members_timeline/timeline/instructions")
+                .and_then(|v| v.as_array())
+        });
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].screen_name, "member");
+        assert_eq!(cursor.as_deref(), Some("NEXT_MEMBERS"));
     }
 
     #[test]

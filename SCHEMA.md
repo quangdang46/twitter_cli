@@ -47,6 +47,8 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 
 - `tweet_list`: `{"tweets": Tweet[], "page": {...}}` (also used by `bookmarks --folder <id>`)
 - `bookmark_folder_list`: `{"folders": [{id, name}], "page": {"returned": n}}` (from `bookmarks --folders`)
+- `list_list`: `{"lists": TwitterList[], "page": {...}}` (from `lists [--member-of]`); `TwitterList{id,name,description,member_count,subscriber_count,is_private,created_at,owner?{id,screen_name,name}}`
+- `list-members` reuses the `user_list` shape verbatim (`{"users": [...], "page": {...}}`)
 - `tweet_detail`: a single `Tweet`
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
 - `user` / `user_list`: `UserProfile` / `{"users": [...]}` (list parsing

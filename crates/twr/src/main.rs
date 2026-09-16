@@ -327,6 +327,25 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
+    /// Lists owned by a user id, or (with --member-of) lists they are a
+    /// member of. Defaults to the authenticated account when no id is
+    /// given (resolved via account/settings.json, same as bird's
+    /// getCurrentUser); pass an explicit id to inspect another account.
+    Lists {
+        /// User id whose lists to enumerate (default: self).
+        id: Option<String>,
+        /// Enumerate memberships instead of owned lists.
+        #[arg(long)]
+        member_of: bool,
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+    },
+    /// Members of a list timeline.
+    ListMembers {
+        id: String,
+        #[arg(long, short = 'n')]
+        max: Option<usize>,
+    },
     /// User profile by handle.
     User {
         handle: String,
@@ -827,6 +846,18 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
+        Command::Lists { id, member_of, max } => {
+            kind = "list_list";
+            let (d, code) = run_lists(&opts, id, member_of, max).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::ListMembers { id, max } => {
+            kind = "user_list";
+            let (d, code) = run_list_members(&opts, &config, id, max).await;
+            data = d;
+            exit_code = code;
+        }
         Command::User { handle } => {
             kind = "user";
             let (d, code) = run_user(&opts, &config, handle).await;
@@ -1042,6 +1073,8 @@ fn schema_data() -> serde_json::Value {
             {"name": "show", "type": "tweet_detail"},
             {"name": "article", "type": "article"},
             {"name": "list", "type": "tweet_list"},
+            {"name": "lists", "type": "list_list"},
+            {"name": "list-members", "type": "user_list"},
             {"name": "user", "type": "user"},
             {"name": "user-posts", "type": "tweet_list"},
             {"name": "likes", "type": "tweet_list"},
@@ -1070,6 +1103,8 @@ fn commands_data() -> serde_json::Value {
         {"name": "show", "type": "tweet_detail", "desc": "Nth item of last list"},
         {"name": "article", "type": "article", "desc": "Long-form article"},
         {"name": "list", "type": "tweet_list", "desc": "List timeline"},
+        {"name": "lists", "type": "list_list", "desc": "Lists owned (or --member-of memberships)"},
+        {"name": "list-members", "type": "user_list", "desc": "Members of a list"},
         {"name": "user", "type": "user", "desc": "Profile by handle"},
         {"name": "user-posts", "type": "tweet_list", "desc": "Posts by handle"},
         {"name": "likes", "type": "tweet_list", "desc": "Own-account likes"},
@@ -1368,7 +1403,7 @@ fn build_ctx<'a>(
             cookie_string: auth.session.full_string.clone(),
         },
         throttle: configured_throttle(),
-        extra_rotation: Default::default(),
+        extra_rotation: twr_graphql::seeded_extra_rotation(),
         disk_cache: disk,
         now_secs: now,
         max_count: 200,
@@ -1968,6 +2003,259 @@ async fn run_list(
         }
         Err(_) => (serde_json::json!({"error": "list fetch failed"}), 6),
     }
+}
+
+/// Resolve the numeric user id for `Lists` calls: explicit `--id` wins,
+/// otherwise the authenticated account via the 1.1 `account/settings.json`
+/// chain (bird's `getCurrentUser` candidate URLs verbatim). Returns the id
+/// or an `(error, exit)` tuple — settings endpoints need session cookies,
+/// so guest tier never reaches here (read_auth already gated).
+async fn resolve_self_user_id(
+    ctx: &cli::exec::ExecCtx<'_>,
+) -> Result<String, (serde_json::Value, i32)> {
+    const CANDIDATES: &[&str] = &[
+        "https://x.com/i/api/account/settings.json",
+        "https://api.twitter.com/1.1/account/settings.json",
+        "https://x.com/i/api/account/verify_credentials.json?skip_status=true&include_entities=false",
+        "https://api.twitter.com/1.1/account/verify_credentials.json?skip_status=true&include_entities=false",
+    ];
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "GET",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    for url in CANDIDATES {
+        let Ok(resp) = ctx.transport.get(url, &refs).await else {
+            continue;
+        };
+        if !(200..300).contains(&resp.status) {
+            continue;
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
+            continue;
+        };
+        // settings.json: {screen_name, user_id(_str)}; verify_credentials:
+        // nested under `user` in some builds — try both, bird verbatim.
+        let id = body
+            .get("user_id_str")
+            .or_else(|| body.get("user_id"))
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            })
+            .or_else(|| {
+                body.pointer("/user/id_str")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(id) = id.filter(|s| !s.is_empty()) {
+            return Ok(id);
+        }
+    }
+    Err((
+        serde_json::json!({"error": "could not determine own user id — pass --id explicitly"}),
+        6,
+    ))
+}
+
+/// `twr lists [--id <user_id>] [--member-of]`: enumerate owned lists
+/// (`ListOwnerships`) or memberships (`ListMemberships`). Both take
+/// `{userId, count, isListMembershipShown}` and walk
+/// `data.user.result.timeline.timeline.instructions` for
+/// `content.itemContent.list` entries (bird/xfetch verbatim). Cursor-paged
+/// internally until `max` or the cursor stops.
+async fn run_lists(
+    opts: &OutputOptions,
+    id: Option<String>,
+    member_of: bool,
+    max: Option<usize>,
+) -> (serde_json::Value, i32) {
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let config = twr_config::TwrConfig::default();
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
+    let op = if member_of {
+        "ListMemberships"
+    } else {
+        "ListOwnerships"
+    };
+    let user_id = match id {
+        Some(explicit) => explicit,
+        None => match resolve_self_user_id(&ctx).await {
+            Ok(uid) => uid,
+            Err(fail) => return fail,
+        },
+    };
+    let want = max.unwrap_or(100);
+    let mut lists: Vec<twr_model::TwitterList> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut truncated = false;
+    loop {
+        let mut vars = serde_json::json!({
+            "userId": user_id,
+            "count": 100,
+            "isListMembershipShown": true,
+            "isListMemberTargetUserId": user_id,
+        });
+        if let Some(c) = &cursor {
+            vars["cursor"] = serde_json::json!(c);
+        }
+        match cli::exec::fetch_parsed_page_generic(
+            &mut ctx,
+            op,
+            vars,
+            cli::instructions::for_operation(op),
+            twr_model::parse_lists_response,
+        )
+        .await
+        {
+            Ok((page, next)) => {
+                let fresh: Vec<_> = page
+                    .into_iter()
+                    .filter(|l| !lists.iter().any(|seen| seen.id == l.id))
+                    .collect();
+                let added = fresh.len();
+                lists.extend(fresh);
+                if lists.len() >= want {
+                    lists.truncate(want);
+                    cursor = next;
+                    break;
+                }
+                match next {
+                    Some(n) if Some(&n) != cursor.as_ref() && added > 0 => cursor = Some(n),
+                    _ => {
+                        cursor = next.filter(|_| lists.len() < want);
+                        break;
+                    }
+                }
+            }
+            Err(twr_client::PageError::RateLimited) => {
+                truncated = true;
+                break;
+            }
+            Err(_) => {
+                return (
+                    serde_json::json!({"error": format!("{op} fetch failed")}),
+                    6,
+                );
+            }
+        }
+    }
+    let returned = lists.len();
+    let data = serde_json::to_value(&lists).unwrap_or_default();
+    let mut page = serde_json::json!({"returned": returned, "truncated": truncated});
+    if let Some(c) = cursor {
+        page["nextCursor"] = serde_json::json!(c);
+        page["hasMore"] = serde_json::json!(true);
+    }
+    (serde_json::json!({"lists": data, "page": page}), 0)
+}
+
+/// `twr list-members <list_id>`: members of one list (`ListMembers`,
+/// `{listId, count, cursor?}` → `data.list.members_timeline.timeline.
+/// instructions` with `user_results.result` entries). Members ARE users:
+/// the envelope reuses the `user_list` shape from followers/following
+/// verbatim (`{"users": [...], "page": {...}}`), parsed via
+/// `parse_user_result` — no new model type.
+async fn run_list_members(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    id: String,
+    max: Option<usize>,
+) -> (serde_json::Value, i32) {
+    let Some(list_id) = cli::ids::normalize_list_id(&id) else {
+        return (
+            serde_json::json!({"error": format!("not a list ID or URL: {id}")}),
+            2,
+        );
+    };
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let want = max.unwrap_or(config.fetch.count as usize);
+    let mut members: Vec<twr_model::UserProfile> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut truncated = false;
+    loop {
+        let mut vars = serde_json::json!({"listId": list_id, "count": 20});
+        if let Some(c) = &cursor {
+            vars["cursor"] = serde_json::json!(c);
+        }
+        match cli::exec::fetch_parsed_page_generic(
+            &mut ctx,
+            "ListMembers",
+            vars,
+            cli::instructions::for_operation("ListMembers"),
+            twr_model::parse_list_members_response,
+        )
+        .await
+        {
+            Ok((page, next)) => {
+                let fresh: Vec<_> = page
+                    .into_iter()
+                    .filter(|m| !members.iter().any(|seen| seen.id == m.id))
+                    .collect();
+                let added = fresh.len();
+                members.extend(fresh);
+                if members.len() >= want {
+                    members.truncate(want);
+                    cursor = next;
+                    break;
+                }
+                match next {
+                    Some(n) if Some(&n) != cursor.as_ref() && added > 0 => cursor = Some(n),
+                    _ => {
+                        cursor = next.filter(|_| members.len() < want);
+                        break;
+                    }
+                }
+            }
+            Err(twr_client::PageError::RateLimited) => {
+                truncated = true;
+                break;
+            }
+            Err(_) => {
+                return (
+                    serde_json::json!({"error": format!("list {list_id} members fetch failed")}),
+                    6,
+                );
+            }
+        }
+    }
+    // Same user_list envelope as followers/following (extract_user_list).
+    let returned = members.len();
+    let mut data = serde_json::json!({
+        "users": members,
+        "page": {"returned": returned, "maxRequested": max, "truncated": truncated},
+    });
+    if let Some(c) = cursor {
+        data["page"]["nextCursor"] = serde_json::Value::String(c);
+    }
+    (data, 0)
 }
 
 async fn run_user(

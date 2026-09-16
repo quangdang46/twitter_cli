@@ -123,6 +123,31 @@ pub fn for_operation(operation: &str) -> fn(&Value) -> Option<&Vec<Value>> {
                 ],
             ))
         },
+        "ListOwnerships" | "ListMemberships" => |data| {
+            as_instructions(deep(
+                data,
+                &[
+                    "data",
+                    "user",
+                    "result",
+                    "timeline",
+                    "timeline",
+                    "instructions",
+                ],
+            ))
+        },
+        "ListMembers" => |data| {
+            as_instructions(deep(
+                data,
+                &[
+                    "data",
+                    "list",
+                    "members_timeline",
+                    "timeline",
+                    "instructions",
+                ],
+            ))
+        },
         "Followers" | "Following" => |data| {
             as_instructions(deep(
                 data,
@@ -152,6 +177,16 @@ mod tests {
         let search = json!({"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": []}}}}});
         assert!(for_operation("SearchTimeline")(&search).unwrap().is_empty());
         assert!(for_operation("Nope")(&home).is_none());
+    }
+
+    #[test]
+    fn list_ops_hit_their_instruction_paths() {
+        let owned = json!({"data": {"user": {"result": {"timeline": {"timeline": {"instructions": [{"a": 1}]}}}}}});
+        assert_eq!(for_operation("ListOwnerships")(&owned).unwrap().len(), 1);
+        assert_eq!(for_operation("ListMemberships")(&owned).unwrap().len(), 1);
+        let members =
+            json!({"data": {"list": {"members_timeline": {"timeline": {"instructions": []}}}}});
+        assert!(for_operation("ListMembers")(&members).unwrap().is_empty());
     }
 
     #[test]

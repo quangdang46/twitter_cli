@@ -78,6 +78,37 @@ pub struct Tweet {
     pub is_promoted: bool,
 }
 
+/// A Twitter List (owned or followed). NOT a Tweet — its own type, mirroring
+/// bird/xfetch's `TwitterList` (`id_str/name/description/member_count/
+/// subscriber_count/mode/user_results`). `owner` is a lightweight handle
+/// triple (full profile needs a separate `user` call).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListOwner {
+    pub id: String,
+    #[serde(default)]
+    pub screen_name: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TwitterList {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub member_count: i64,
+    #[serde(default)]
+    pub subscriber_count: i64,
+    #[serde(default)]
+    pub is_private: bool,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ListOwner>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BookmarkFolder {
     pub id: String,

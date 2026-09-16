@@ -96,6 +96,83 @@ pub async fn fetch_parsed_page(
     fetch_parsed_page_with_toggles(ctx, operation, variables, instructions, None).await
 }
 
+/// Extractor: response body -> timeline instructions (per-op deep-get path).
+pub type InstructionsFn = fn(&serde_json::Value) -> Option<&Vec<serde_json::Value>>;
+
+/// Page parser: `(body, instructions) -> (items, cursor)`.
+pub type PageParser<T> = fn(&serde_json::Value, InstructionsFn) -> (Vec<T>, Option<String>);
+
+/// Generic single-page fetch: same transport/throttle/headers/status mapping
+/// as [`fetch_parsed_page`], but the caller supplies the parser.
+/// Lets non-tweet timelines (lists, list members) reuse the whole transport
+/// layer without duplicating it — the tweet-specific wrapper below is one
+/// call of this.
+pub async fn fetch_parsed_page_generic<T>(
+    ctx: &mut ExecCtx<'_>,
+    operation: &str,
+    variables: serde_json::Value,
+    instructions: InstructionsFn,
+    parse: PageParser<T>,
+) -> Result<(Vec<T>, Option<String>), PageError> {
+    let qid = ctx
+        .query_id(operation)
+        .map(|r| r.query_id)
+        .unwrap_or_default();
+    let use_post = twr_client::use_post(operation);
+    let method = if use_post { "POST" } else { "GET" };
+    let path = format!("/i/api/graphql/{qid}/{operation}");
+
+    let wait = ctx.throttle.wait_secs(operation, now_f64());
+    if wait > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+    }
+
+    let tid = ctx.proof_for(operation, method, &path);
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method,
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        locale: &ctx.locale,
+        transaction_id: tid.as_deref(),
+    });
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let resp = if use_post {
+        let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
+        let mut body = serde_json::Map::new();
+        body.insert("variables".into(), variables);
+        body.insert(
+            "features".into(),
+            serde_json::Value::Object(compact_features(operation)),
+        );
+        let raw = serde_json::to_vec(&body).unwrap_or_default();
+        ctx.transport
+            .post_json(&url, &header_refs, &raw)
+            .await
+            .map_err(|_| PageError::Fatal)?
+    } else {
+        let url = graphql_get_url(&qid, operation, &variables, None);
+        ctx.transport
+            .get(&url, &header_refs)
+            .await
+            .map_err(|_| PageError::Fatal)?
+    };
+
+    if resp.status == 429 {
+        return Err(PageError::RateLimited);
+    }
+    if resp.status == 404 || (500..600).contains(&resp.status) {
+        return Err(PageError::Fatal);
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.body).map_err(|_| PageError::Fatal)?;
+    Ok(parse(&body, instructions))
+}
+
 /// Toggle-aware variant (TweetDetail needs fieldToggles; others pass None).
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_parsed_page_with_toggles(

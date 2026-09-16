@@ -48,3 +48,19 @@ BookmarkFolderTimeline:
   queryId: hNY7X2xE2N7HVF6Qb_mu6w
   rps: 0.5
   burst: 2
+ListOwnerships:
+  queryId: wQcOSjSQ8NtgxIwvYl1lMg
+  rps: 0.5
+  burst: 2
+ListMemberships:
+  queryId: BlEXXdARdSeL_0KyKHHvvg
+  rps: 0.5
+  burst: 2
+ListMembers:
+  queryId: H_0zFfjp73xGZrJpY-C2IQ
+  rps: 0.5
+  burst: 2
+ListByRestId:
+  queryId: wXzyA5vM_aVkBL9G8Vp3kw
+  rps: 1.0
+  burst: 4

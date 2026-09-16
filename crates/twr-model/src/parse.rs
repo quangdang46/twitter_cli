@@ -8,7 +8,9 @@
 use crate::article::parse_article;
 use crate::deep_get::parse_int;
 use crate::dget;
-use crate::model::{Author, BookmarkFolder, Metrics, Tweet, TweetMedia, UserProfile};
+use crate::model::{
+    Author, BookmarkFolder, ListOwner, Metrics, Tweet, TweetMedia, TwitterList, UserProfile,
+};
 use serde_json::Value;
 
 fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
@@ -448,6 +450,138 @@ pub fn parse_bookmark_folders_response(data: &Value) -> (Vec<BookmarkFolder>, Op
         .and_then(Value::as_str)
         .map(str::to_string);
     (folders, next)
+}
+
+/// Parse one `itemContent.list` result into a [`TwitterList`]. Mirrors
+/// bird's `parseList` / xfetch's `parseList`: requires `id_str` + `name`
+/// (returns None otherwise), reads `member_count`/`subscriber_count` as
+/// ints-or-strings, and treats `mode == "private"` as private. The owner
+/// comes from `user_results.result` (`rest_id` + legacy
+/// `screen_name`/`name`) when present.
+pub fn parse_list_result(list: &Value) -> Option<TwitterList> {
+    let id = list.get("id_str").and_then(Value::as_str)?;
+    let name = list.get("name").and_then(Value::as_str)?;
+    let owner_result = list.get("user_results").and_then(|u| u.get("result"));
+    let owner = owner_result.map(|o| {
+        let legacy = o.get("legacy");
+        ListOwner {
+            id: o
+                .get("rest_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            screen_name: legacy
+                .and_then(|l| l.get("screen_name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: legacy
+                .and_then(|l| l.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }
+    });
+    Some(TwitterList {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: list
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        member_count: parse_int(list.get("member_count"), 0),
+        subscriber_count: parse_int(list.get("subscriber_count"), 0),
+        is_private: list
+            .get("mode")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.eq_ignore_ascii_case("private")),
+        created_at: list
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        owner,
+    })
+}
+
+/// Walk a `ListOwnerships`/`ListMemberships` response's instructions,
+/// collecting every `content.itemContent.list` entry into [`TwitterList`]s
+/// plus the `Bottom` cursor. Same timeline-instruction/cursor convention as
+/// `parse_timeline_response` (bird's `parseListsFromInstructions` verbatim).
+/// `get_instructions` is the same extractor style: pass a closure walking
+/// `data.user.result.timeline.timeline.instructions`.
+pub fn parse_lists_response(
+    data: &Value,
+    get_instructions: fn(&Value) -> Option<&Vec<Value>>,
+) -> (Vec<TwitterList>, Option<String>) {
+    let mut lists = Vec::new();
+    let mut next_cursor = None;
+    let Some(instructions) = get_instructions(data) else {
+        return (lists, next_cursor);
+    };
+    for instruction in instructions {
+        let entries: Vec<&Value> = instruction
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        for entry in entries {
+            let empty = Value::Object(Default::default());
+            let content = entry.get("content").unwrap_or(&empty);
+            if let Some(c) = extract_cursor(content) {
+                next_cursor = Some(c);
+            }
+            if let Some(list) = content
+                .get("itemContent")
+                .and_then(|ic| ic.get("list"))
+                .and_then(parse_list_result)
+            {
+                lists.push(list);
+            }
+        }
+    }
+    (lists, next_cursor)
+}
+
+/// Walk a `ListMembers` response's instructions (`data.list.
+/// members_timeline.timeline.instructions`), collecting `content.
+/// itemContent.user_results.result` entries via [`parse_user_result`] plus
+/// the `Bottom` cursor. Members ARE users — no new model type (xfetch's
+/// `parseListMembers` verbatim, minus its hand-rolled user mapping: we
+/// reuse `parse_user_result` instead).
+pub fn parse_list_members_response(
+    data: &Value,
+    get_instructions: fn(&Value) -> Option<&Vec<Value>>,
+) -> (Vec<UserProfile>, Option<String>) {
+    let mut members = Vec::new();
+    let mut next_cursor = None;
+    let Some(instructions) = get_instructions(data) else {
+        return (members, next_cursor);
+    };
+    for instruction in instructions {
+        let entries: Vec<&Value> = instruction
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        for entry in entries {
+            let empty = Value::Object(Default::default());
+            let content = entry.get("content").unwrap_or(&empty);
+            if let Some(c) = extract_cursor(content) {
+                next_cursor = Some(c);
+            }
+            let member = content
+                .get("itemContent")
+                .and_then(|ic| ic.get("user_results"))
+                .and_then(|ur| ur.get("result"))
+                .and_then(parse_user_result);
+            if let Some(profile) = member {
+                members.push(profile);
+            }
+        }
+    }
+    (members, next_cursor)
 }
 
 /// Parse a timeline GraphQL response into `(tweets, next_cursor)`. Mirrors
