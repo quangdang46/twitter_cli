@@ -911,6 +911,11 @@ pub fn parse_notifications_response(
 /// bead o1l.5.2 comment; Rettiwt's DirectMessage.ts covers request
 /// construction, not response shape). Tolerant/best-effort: any of
 /// `conversations` (object keyed by id) or `inbox.conversations` object.
+/// FIELD NOTE: `screen_name`/`name` on participants and `last_message`
+/// text are NOT populated — the inbox response carries user_ids +
+/// sort_timestamp only; full profiles/bodies resolve via dm-read
+/// (`conversation_timeline/entries[].message.message_data`) or
+/// `twr user <id>`. Do not mistake "" names for a parse failure.
 pub fn parse_dm_inbox_response(data: &Value) -> (Vec<DmConversation>, Option<String>) {
     let empty_obj = serde_json::Map::new();
     let convs = data

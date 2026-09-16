@@ -471,6 +471,12 @@ mod tests {
         assert_eq!(convs[0].id, "u1-u2");
         assert_eq!(convs[0].participants.len(), 2);
         assert_eq!(convs[0].last_timestamp_ms, "1700000000000");
+        // FIELD NOTE (bead o1l.5.2): inbox carries ids + timestamp only.
+        assert!(convs[0]
+            .participants
+            .iter()
+            .all(|p| p.screen_name.is_empty()));
+        assert!(convs[0].last_message.is_none());
     }
 
     #[test]

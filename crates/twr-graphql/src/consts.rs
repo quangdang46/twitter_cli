@@ -142,8 +142,14 @@ pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
     ("ListByRestId", "EAARFZGlY-JHdLJbKZAA5g"),
     ("ListByRestId", "Tzkkg-NaBi_y1aAUUb6_eQ"),
     ("ListAddMember", "EadD8ivrhZhYQr2pDmCpjA"),
+    ("ListAddMember", "lLNsL7mW6gSEQG6rXP7TNw"),
+    ("ListRemoveMember", "cvDFkG5WjcXV0Qw5nfe1qQ"),
     ("CreateList", "4lSOF4GqldI-NbiFET4ofQ"),
+    ("CreateList", "EYg7JZU3A1eJ-wr2eygPHQ"),
     ("UpdateList", "UzVGAR_brbQw1n3mH_PqRA"),
+    ("UpdateList", "dIEI1sbSAuZlxhE0ggrezA"),
+    ("ListByRestId", "9hbYpeVBMq8-yB8slayGWQ"),
+    ("ListMembers", "BQp2IEYkgxuSxqbTAr1e1g"),
 ];
 
 /// Seed an [`crate::ExtraRotation`] map with the shipped alternates.
@@ -202,27 +208,45 @@ pub const DEFAULT_FEATURES: &[(&str, bool)] = &[
     ("responsive_web_enhance_cards_enabled", false),
 ];
 
-/// Per-op feature OVERRIDES: narrower schema than the repo defaults, taken
-/// VERBATIM from Rettiwt-API `ListRequests` (a live-shaped working caller:
-/// e.g. its `create()` sends profile_label=true, redirect=FALSE,
-/// tipjar=false, verified=false, skip_user_profile_image=false,
-/// timeline_nav=true).
-///
-/// NOT a proven 214 fix — schema hygiene only. Evidence against the
-/// strict-features theory: PinTweet sends the full 16-flag defaults and
-/// succeeds live on the same session that 214s CreateList. The deck
-/// `GraphQL.json` even disagrees with Rettiwt on one flag here
-/// (deck says redirect=true, Rettiwt sends false); Rettiwt wins because it
-/// is a working caller and the deck is a static capture. The 214 root
-/// cause is still UNRESOLVED — DevTools capture of x.com/i/lists/create
-/// (URL + Request Payload variables + features) is ground truth.
+/// Per-op feature OVERRIDES — 214 investigation status 2026-09-16 (a3):
+/// what is ESTABLISHED vs what is still HYPOTHESIS, kept separate deliberately.
+/// ESTABLISHED (c1 live, same session, from prior turns): (a) queryId-in-body +
+/// Referer variants both still 214; (b) pin succeeds with full 16-flag defaults
+/// on the same session, so the features bundle is IRRELEVANT to the 214;
+/// (c) vars keys `{name, description?, isPrivate}` match Rettiwt `List.create`
+/// VERBATIM (pinned blob 4f11105 + c1 byte-check at
+/// cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/List.ts) AND twikit
+/// `gql.create_list` VERBATIM (d60/twikit main, twikit/client/gql.py:516-522:
+/// `{isPrivate, name, description}` — description ALWAYS present, even empty;
+/// endpoint `EYg7JZU3A1eJ-wr2eygPHQ/CreateList`, currently the NEWEST known ID);
+/// (d) in-body `queryId` is REQUIRED by twikit's own `gql_post`
+/// (data = {variables, queryId}; features appended when non-None) — matches
+/// Rettiwt, no conflict.
+/// So the ONLY untested variable left is the queryId itself: baseline
+/// `AkWrYT3WjoBVkzbnbvLkhg` (deck) and Rettiwt EXTRA `4lSOF4GqldI-NbiFET4ofQ`
+/// both 214 on this session; twikit's `EYg7JZU3A1eJ-wr2eygPHQ` has NEVER been
+/// tried and is now the primary candidate (EXTRA head). HYPOTHESIS (NOT yet
+/// live-proven): the `{}`-variables probe discriminates queryId-gated vs
+/// vars-gated rejection — if `{}` still 214s identically, the failure is at
+/// persisted-query lookup, not variable decoding. Next step per probe
+/// plan: `TWR_QID_CreateList=EYg7JZU3A1eJ-wr2eygPHQ twr list-create --apply`
+/// (1 request); if that also 214s, ground truth is a DevTools capture of
+/// x.com/i/lists/create, not more corpus.
 /// `compact_features` consults this FIRST and skips defaults/extras for
 /// listed ops. DeleteList sends `{}` (deck declares zero features;
 /// Rettiwt's delete sends no features key at all).
 pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, bool)]> {
     match operation {
-        "CreateList"
-        | "UpdateList"
+        "CreateList" => Some(&[
+            ("responsive_web_graphql_exclude_directive_enabled", true),
+            ("verified_phone_label_enabled", false),
+            (
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled",
+                false,
+            ),
+            ("responsive_web_graphql_timeline_navigation_enabled", true),
+        ]),
+        "UpdateList"
         | "ListAddMember"
         | "ListRemoveMember"
         | "ListSubscribe"
@@ -402,13 +426,16 @@ mod tests {
     #[test]
     fn extra_fallbacks_cover_rotating_list_ops() {
         let extra = seeded_extra_rotation();
-        // Rettiwt-sourced alternates accumulate after the doc-capture ones.
+        // Rettiwt-sourced alternates accumulate after the doc-capture ones;
+        // twikit-sourced (d60/twikit main, twikit/client/gql.py Endpoint URLs)
+        // accumulate last. Order = listed order in EXTRA_FALLBACK_IDS.
         assert_eq!(
             extra.get("ListMembers").map(|v| v.as_slice()),
             Some(
                 [
                     "ljlktihgwXeYTfHwwiPj5A".to_string(),
-                    "Bnhcen0kdsMAU1tW7U79qQ".to_string()
+                    "Bnhcen0kdsMAU1tW7U79qQ".to_string(),
+                    "BQp2IEYkgxuSxqbTAr1e1g".to_string()
                 ]
                 .as_slice()
             )
@@ -418,22 +445,45 @@ mod tests {
             Some(
                 [
                     "EAARFZGlY-JHdLJbKZAA5g".to_string(),
-                    "Tzkkg-NaBi_y1aAUUb6_eQ".to_string()
+                    "Tzkkg-NaBi_y1aAUUb6_eQ".to_string(),
+                    "9hbYpeVBMq8-yB8slayGWQ".to_string()
                 ]
                 .as_slice()
             )
         );
         assert_eq!(
             extra.get("ListAddMember").map(|v| v.as_slice()),
-            Some(["EadD8ivrhZhYQr2pDmCpjA".to_string()].as_slice())
+            Some(
+                [
+                    "EadD8ivrhZhYQr2pDmCpjA".to_string(),
+                    "lLNsL7mW6gSEQG6rXP7TNw".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            extra.get("ListRemoveMember").map(|v| v.as_slice()),
+            Some(["cvDFkG5WjcXV0Qw5nfe1qQ".to_string()].as_slice())
         );
         assert_eq!(
             extra.get("CreateList").map(|v| v.as_slice()),
-            Some(["4lSOF4GqldI-NbiFET4ofQ".to_string()].as_slice())
+            Some(
+                [
+                    "4lSOF4GqldI-NbiFET4ofQ".to_string(),
+                    "EYg7JZU3A1eJ-wr2eygPHQ".to_string()
+                ]
+                .as_slice()
+            )
         );
         assert_eq!(
             extra.get("UpdateList").map(|v| v.as_slice()),
-            Some(["UzVGAR_brbQw1n3mH_PqRA".to_string()].as_slice())
+            Some(
+                [
+                    "UzVGAR_brbQw1n3mH_PqRA".to_string(),
+                    "dIEI1sbSAuZlxhE0ggrezA".to_string()
+                ]
+                .as_slice()
+            )
         );
     }
 
@@ -472,7 +522,6 @@ mod tests {
         // 2-true-flag schema, none of the 16 repo defaults (e.g.
         // view_counts_everywhere must be ABSENT).
         for op in [
-            "CreateList",
             "UpdateList",
             "ListAddMember",
             "ListRemoveMember",
@@ -495,6 +544,14 @@ mod tests {
         }
         // DeleteList declares zero features.
         assert!(compact_features("DeleteList").is_empty());
+        // CreateList uses twikit's LIST_FEATURES verbatim (2 true flags:
+        // exclude_directive + timeline_navigation) — NOT the Rettiwt
+        // profile_label schema the other list mutations use.
+        let cl = compact_features("CreateList");
+        assert_eq!(cl.len(), 2, "CreateList: {cl:?}");
+        assert!(cl.contains_key("responsive_web_graphql_exclude_directive_enabled"));
+        assert!(cl.contains_key("responsive_web_graphql_timeline_navigation_enabled"));
+        assert!(!cl.contains_key("profile_label_improvements_pcf_label_in_post_enabled"));
         // Untouched ops keep the defaults.
         assert!(
             compact_features("SearchTimeline").contains_key("view_counts_everywhere_api_enabled")

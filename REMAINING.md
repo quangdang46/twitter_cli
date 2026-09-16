@@ -104,10 +104,13 @@ bookmark-folders), engagement mutations (mute/block/pin), and list management
 per-op query-ID starting points (mined from `xeepy`/`Rettiwt-API`/`agentic-x`)
 are in §13.7 — most are still **unverified against this repo's own live
 session**; several list mutations (`CreateList`/`ListSubscribe`/…) are
-currently blocked live with X error 214 (DecodeException) despite vars/
-features/queryId-in-body all matching a working Rettiwt-API reference
-byte-for-byte — root cause unresolved, tracked as an open investigation
-(DevTools capture of `x.com/i/lists/create` is the next planned step).
+currently blocked live with X error 214 (DecodeException) despite vars
+matching TWO working references byte-for-byte (Rettiwt-API pinned blob
+`4f11105` AND twikit `gql.create_list`, `gql.py:516-522`) — current hypothesis
+is queryId-gated persisted-query rejection (twikit's
+`EYg7JZU3A1eJ-wr2eygPHQ` is the newest known ID, now queued as EXTRA
+fallback; probe plan `TWR_QID_CreateList=... --apply` documented on bead
+o1l.3.1; DevTools capture of `x.com/i/lists/create` remains ground truth).
 
 `CreateNoteTweet` (long-form `post`/`quote` auto-routing, supersedes the
 "not implemented" note in README's Limitations) is code-shipped 1-1 against

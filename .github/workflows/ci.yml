@@ -22,3 +22,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
       - run: cargo test --workspace --all-features
+      # i8s regression guard: debug --help once overflowed the Windows
+      # main-thread stack (clap ~60-variant enum). The parse now runs on a
+      # 16MB-stack thread; this smoke catches any regression on all OSes
+      # (cargo run is portable across shells — no .exe suffix handling).
+      - run: cargo run -p twr -- --help > /dev/null

@@ -612,7 +612,25 @@ enum WatchOp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Windows debug builds overflow the 1MB main-thread stack when clap
+    // renders --help for the ~60-variant Command enum (bead twitter_cli-i8s:
+    // pre-existing, release unaffected, RUST_MIN_STACK does not help since
+    // tokio installs its own runtime threads but help-rendering happens on
+    // the main thread before the runtime spins up). Parse inside an
+    // explicitly large-stack thread so debug --help works everywhere; the
+    // rest of main stays unchanged below.
+    let cli = std::thread::Builder::new()
+        .name("twr-cli-parse".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(Cli::parse)
+        .expect("spawn cli-parse thread")
+        .join()
+        .expect("cli-parse thread");
+    run(cli).await
+}
+
+/// Former `main` body: everything after CLI parsing.
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let format = OutputFormat::resolve_full(cli.json, cli.yaml, cli.toon, true);
     let mut opts = OutputOptions::new(cli.trace_id);
     opts.format = format;
@@ -4666,9 +4684,18 @@ fn extract_created_list_id(payload: &serde_json::Value) -> Option<String> {
 
 /// `twr dm-list`: 1.1 REST inbox (`dm/inbox_initial_state.json` first page,
 /// `dm/inbox_timeline/trusted.json` when paging) — Rettiwt-API
-/// `DirectMessageService.inbox` verbatim shape (see bead o1l.5.2 comment;
-/// pinned blob 4f11105.9818c8bf, `src/requests/DirectMessage.ts`, fetched
-/// and byte-checked by e1).
+/// `DMRequests.inboxInitial/inboxTimeline` VERBATIM shape
+/// (cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/DirectMessage.ts,
+/// fetched 2026-09-16; conv id example "394028042-1712730991884689408"
+/// confirms the partner-self format twikit's send_dm builds).
+/// PARAM GAP (documented, not fixed blind): Rettiwt sends a ~30-key
+/// BaseDMParams+DMUserIncludeParams bundle (nsfw_filtering, cards_platform,
+/// tweet_mode=extended, include_groups, supports_reactions, ext=mediaColor…,
+/// dm_users=true on initial / false on timeline, …); we send only
+/// dm_users (+max_id when paging). Tolerant parsers make this a fidelity
+/// gap, not a correctness bug — dm-list already returns HTTP 200 live.
+/// If a future live call returns thin/wrong payloads, align params toward
+/// Rettiwt's bundle before suspecting anything else.
 ///
 /// NO GraphQL op exists for DM inbox — do not add one. Envelope
 /// UNCONFIRMED against a live capture — tolerant parsing.
@@ -4730,12 +4757,14 @@ async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_jso
 }
 
 /// `twr dm-read <conversation_id>`: 1.1 REST `dm/conversation/<id>.json`
-/// — Rettiwt-API `DirectMessageService.conversation` verbatim shape (same
-/// pinned source as dm-list). `--cursor` here is the WITHIN-conversation
-/// axis (last message id), a DIFFERENT cursor from dm-list's inbox axis —
-/// do not conflate the two (bead o1l.5.2's explicit warning). DM content
-/// is user-private: never logged beyond what a Tweet's text already is
-/// (no -v/-vv path touches message text here).
+/// — Rettiwt-API `DMRequests.conversation` VERBATIM shape (same file as
+/// dm-list: `context` = FETCH_DM_CONVERSATION, or _HISTORY when max_id is
+/// set; `dm_users=false&include_conversation_info=true`). `--cursor` here is
+/// the WITHIN-conversation axis (last message id), a DIFFERENT cursor from
+/// dm-list's inbox axis — do not conflate the two (bead o1l.5.2's explicit
+/// warning). SAME PARAM GAP as dm-list: we send 3 keys, Rettiwt sends ~30.
+/// DM content is user-private: never logged beyond what a Tweet's text
+/// already is (no -v/-vv path touches message text here).
 async fn run_dm_read(
     opts: &OutputOptions,
     conversation_id: String,
@@ -4827,11 +4856,35 @@ fn url_encode_query(s: &str) -> String {
 /// 3. the standard --apply/--dry-run/--no-interactive decision table.
 /// 4. idempotency (pre_check/Acknowledged, same mechanism as post).
 ///
-/// Wire shape: 1.1 REST `dm/new2.json` POST (LukewarmIntro snippet —
-/// SECOND-HAND, not byte-verified; see bead o1l.5.3 comment for the full
-/// uncertainty writeup and the GraphQL useSendMessageMutation fallback
-/// documented there if this 404s/214s live). NO batch flag, one recipient
-/// per call, by design — never add one (SKILL.md §6).
+/// Wire shape: 1.1 REST `dm/new2.json` POST.
+///
+/// Source triangulation 2026-09-16 (a3, static-only, bead o1l.5.3 stays
+/// OPEN until a solicited live send proves the wire):
+///
+/// - twikit `v11.dm_new(conversation_id, text, ...)` VERBATIM
+///   (raw.githubusercontent.com/d60/twikit/main/twikit/client/v11.py:434-453):
+///   body = {cards_platform: "Web-12", conversation_id, dm_users: false,
+///   include_cards: 1, include_quote_count: true, recipient_ids: false,
+///   text} (+ media_id/reply_to_dm_id when set). Conversation id for a
+///   1:1 DM = f"{partner_id}-{self_id}" (twikit/client/client.py:send_dm).
+/// - Rettiwt-API DirectMessage + LukewarmIntro snippet use the older shape
+///   {recipient_ids, text, ...} WITHOUT conversation_id.
+///
+/// Our body below keeps {recipient_ids: user_id} and ADDS conversation_id.
+/// conversation_id here needs the SELF id (partner-self); we do not know it
+/// at this layer, so we send "" and let X resolve by recipient.
+///
+/// PROBE ORDER if live rejects (reviewer 12's catch: "" vs omitted are
+/// different hypotheses — strict validation may hate an empty string more
+/// than a missing key, so the two probes discriminate):
+/// probe 1 = current superset (conversation_id:"" present);
+/// probe 2 = OMIT the key entirely (recipient_ids-only, the pre-triangulation
+/// shape). If probe 1 rejects but probe 2 passes, "" was the poison.
+/// If BOTH reject, the fix is resolving self id first (verify_credentials
+/// chain, like `twr lists` does) and sending "{user_id}-{self_id}".
+///
+/// NO batch flag, one recipient per call, by design — never add one
+/// (SKILL.md §6).
 async fn run_dm_send(
     opts: &OutputOptions,
     user_id: String,
@@ -4938,6 +4991,7 @@ async fn run_dm_send(
     refs.push(("Content-Type", "application/json"));
     let body = serde_json::json!({
         "recipient_ids": user_id,
+        "conversation_id": "",
         "text": text,
         "cards_platform": "Web-12",
         "include_cards": 1,

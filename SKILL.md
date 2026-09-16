@@ -110,3 +110,28 @@ Recommendation: do NOT use `dm-send` for outbound-to-strangers traffic
 message, an explicitly opted-in notification). Reads (`dm-list`,
 `dm-read`) are lower-risk but DM content is user-private: it is never
 logged above what a Tweet's text already is.
+
+Wire status (honest): the `dm/new2.json` send body is triangulated from two
+references (older `recipient_ids`-only shape vs twikit's
+`conversation_id`-carrying `v11.dm_new`) with NO live solicited send yet
+proving either — the code sends a documented superset with a discriminating
+probe order (see bead `o1l.5.3`). Treat `dm-send` as wire-unverified until
+that probe runs; `dm-list`/`dm-read` are live-verified reads.
+
+## 7. List management (P6.3) — write-verification status
+
+List reads (`lists`, `list-members`) are live-verified. List WRITES are
+code-shipped but live-blocked: X answers 214 (DecodeException) on
+`CreateList` despite variables matching two working references byte-for-byte
+(Rettiwt-API + twikit) — suspected queryId-gated persisted-query rejection,
+with twikit's newest ID queued as fallback (bead `o1l.3.1`). Until a live
+create succeeds, treat every `list-create`/`list-edit`/`list-delete`/
+`list-add-member`/`list-follow`/`list-pin` as unverified: dry-run the gate
+freely (`--dry-run` proves policy/budget/idempotency), but do not script
+against their `--apply` responses.
+
+Tiers (enforced in `twr-core/src/policy.rs`, pinned by test
+`p63_write_tier_stays_write_only_and_engagement_covers_list_engagement`):
+`list-create`/`list-edit`/`list-delete` are write-only;
+`list-follow`/`list-unfollow`/`list-pin`/`list-unpin`/`list-add-member`/
+`list-remove-member` are engagement-tier.

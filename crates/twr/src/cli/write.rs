@@ -256,16 +256,22 @@ pub fn parse_note_tweet_id(payload: &serde_json::Value) -> Option<String> {
 }
 
 /// Variables for CreateList: `{name, description?, isPrivate?}`.
-/// Source: Rettiwt-API `List.create` VERBATIM (pinned blob 4f11105,
-/// src/requests/List.ts — independently fetched by c1 at
-/// cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/List.ts).
-/// The "cephalochromoscope + emusks" citations previously attached here
-/// were web-search snippets WITHOUT a local file — removed per the
-/// path-or-UNCONFIRMED rule. (The live 214's cause is still UNRESOLVED:
-/// vars keys match Rettiwt exactly, so the 214 is NOT a vars-keys issue —
-/// see hypotheses in `run_list_write`; features-override and
+/// Sources (BOTH fetched verbatim 2026-09-16, keys agree exactly):
+/// - Rettiwt-API `List.create` (pinned blob 4f11105, src/requests/List.ts;
+///   cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/List.ts):
+///   `{isPrivate, name, ...(description?)}` — description conditionally
+///   spread (omitted when undefined).
+/// - twikit `gql.create_list` (d60/twikit main, twikit/client/gql.py:516-522):
+///   `{isPrivate, name, description}` — description ALWAYS present (twikit's
+///   Client.create_list defaults it to '').
+///
+/// `description` omitted when empty below (Rettiwt spread verbatim; twikit's
+/// always-present '' is equivalent on the wire — X treats missing and ""
+/// identically for this field per both callers working).
+/// (The live 214's cause is still UNRESOLVED: vars keys match BOTH working
+/// callers exactly, so the 214 is NOT a vars-keys issue — see the
+/// queryId-gated hypothesis in `run_list_write`; features-override and
 /// queryId-in-body fixes both failed live.)
-/// `description` omitted when empty (Rettiwt conditional-spread verbatim).
 pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) -> serde_json::Value {
     let mut vars = serde_json::json!({"name": name, "isPrivate": private});
     if let Some(d) = description.filter(|d| !d.is_empty()) {
@@ -275,12 +281,17 @@ pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) ->
 }
 
 /// Variables for UpdateList: SPARSE partial update (`{listId}` + only the
-/// fields being changed). Confirmed by Rettiwt-API `List.update`
-/// (live-shaped: `{listId, ...(isPrivate?), ...(description?),
-/// ...(name?)}` — each field conditionally spread, never full-resend).
+/// fields being changed). Confirmed by BOTH working callers (fetched verbatim
+/// 2026-09-16): Rettiwt-API `List.update`
+/// (cdn.jsdelivr.net/npm/rettiwt-api@7.1.3/src/requests/List.ts:
+/// `{listId, ...(isPrivate?), ...(description?), ...(name?)}`) AND twikit
+/// `gql.update_list` (d60/twikit main, twikit/client/gql.py:535-543: same
+/// conditional-add pattern) — each field conditionally added, never
+/// full-resend.
 /// The CLI still requires all three flags (full-resend at the CLI layer —
 /// never send a sparse shape that could blank a field server-side by
-/// accident), but the WIRE shape is per-field conditional like Rettiwt's.
+/// accident), but the WIRE shape is per-field conditional like both
+/// references.
 pub fn update_list_vars(
     list_id: &str,
     name: Option<&str>,
@@ -302,8 +313,11 @@ pub fn update_list_vars(
 
 /// Variables for DeleteList / ListSubscribe / ListUnsubscribe /
 /// UpdatePinnedTimelines-by-id: bare `{listId}` (deck op names confirmed;
-/// exact key casing `listId` follows every other list op's convention in
-/// bird/xfetch — live-verify on first real call).
+/// exact key casing `listId` matches Rettiwt `List.delete/mute/unmute`
+/// (`{listId: id}` verbatim, cdn.jsdelivr.net/npm/rettiwt-api@7.1.3) and
+/// twikit banner/member mutations (`{'listId': list_id}`, gql.py:524-557) —
+/// live-verify on first real call for Subscribe/Unsubscribe/PinnedTimelines,
+/// whose vars are deck-inferred, not caller-confirmed).
 pub fn list_id_vars(list_id: &str) -> serde_json::Value {
     serde_json::json!({"listId": list_id})
 }
@@ -311,7 +325,11 @@ pub fn list_id_vars(list_id: &str) -> serde_json::Value {
 /// Variables for ListAddMember/ListRemoveMember: `{listId, userId}` — ONE
 /// user per invocation, no batch flag (ban-risk rule, plan §13.3: bulk
 /// list-adds are a spam-report vector; looping belongs in the orchestrator,
-/// not in twr).
+/// not in twr). Keys confirmed by BOTH working callers (fetched verbatim
+/// 2026-09-16): Rettiwt `List.addMember/removeMember`
+/// (`{listId, userId}`, cdn.jsdelivr.net/npm/rettiwt-api@7.1.3) AND twikit
+/// `gql.list_add_member/list_remove_member`
+/// (`{'listId': ..., 'userId': ...}`, d60/twikit main, gql.py:545-557).
 pub fn list_member_vars(list_id: &str, user_id: &str) -> serde_json::Value {
     serde_json::json!({"listId": list_id, "userId": user_id})
 }
