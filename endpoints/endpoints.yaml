@@ -78,6 +78,82 @@ Notifications:
 Mentions:
   rps: 0.5
   burst: 2
+# v0.1.0 cookie writes (bead o1l.6 audit: these NEVER had entries before —
+# pre-P6 only read paths consulted the bucket, so every write below is new;
+# same Throttle + same file, no second mechanism). Keys are the CLI op names
+# run_engage throttles on (mute/block ride 1.1 REST, no GraphQL op exists).
+CreateTweet:
+  rps: 0.3
+  burst: 1
+CreateNoteTweet:
+  rps: 0.3
+  burst: 1
+DeleteTweet:
+  rps: 0.3
+  burst: 1
+FavoriteTweet:
+  rps: 0.3
+  burst: 1
+UnfavoriteTweet:
+  rps: 0.3
+  burst: 1
+CreateRetweet:
+  rps: 0.3
+  burst: 1
+DeleteRetweet:
+  rps: 0.3
+  burst: 1
+CreateBookmark:
+  rps: 0.3
+  burst: 1
+DeleteBookmark:
+  rps: 0.3
+  burst: 1
+like:
+  rps: 0.3
+  burst: 1
+unlike:
+  rps: 0.3
+  burst: 1
+retweet:
+  rps: 0.3
+  burst: 1
+unretweet:
+  rps: 0.3
+  burst: 1
+bookmark:
+  rps: 0.3
+  burst: 1
+unbookmark:
+  rps: 0.3
+  burst: 1
+follow:
+  rps: 0.3
+  burst: 1
+unfollow:
+  rps: 0.3
+  burst: 1
+delete:
+  rps: 0.3
+  burst: 1
+mute:
+  rps: 0.3
+  burst: 1
+unmute:
+  rps: 0.3
+  burst: 1
+block:
+  rps: 0.3
+  burst: 1
+unblock:
+  rps: 0.3
+  burst: 1
+pin:
+  rps: 0.3
+  burst: 1
+unpin:
+  rps: 0.3
+  burst: 1
 PinTweet:
   queryId: VIHsNu89pK-kW35JpHq7Xw
   rps: 0.3

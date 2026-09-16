@@ -65,6 +65,15 @@ twr post "hello" --apply --idempotency-key <uuid> --json   # for real
 
 - `--policy read_only` for read-only tasks.
 - No bulk operations; one write per invocation, budget-capped.
+- Every write consults its per-operation token bucket (`endpoints.yaml`,
+  mutations at 0.3 rps / burst 1) plus a 1.5–4s jitter floor — do not
+  tight-loop writes back-to-back; the general daily budget (200) and the
+  separate DM cap (10) both exit 2 when spent.
+- Prefer `mute` over `block` when the goal is only to stop seeing someone:
+  `block` is target-visible (the target can tell), `mute` is invisible.
+- `list-add-member` pulls another user's content into your list without
+  their consent — a documented spam-report vector. Add only on-topic
+  accounts, one per invocation (no batch flag exists on purpose).
 - `TWITTER_PROXY` for egress control; `--timeout/--max-retries` override config.
 - Completions: `twr completions <bash|zsh|fish|powershell|elvish>` (script on
   stdout, install notes on stderr).

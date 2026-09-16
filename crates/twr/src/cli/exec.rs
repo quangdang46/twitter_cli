@@ -316,16 +316,92 @@ pub async fn fetch_tweets_paged(
     Ok((tweets, result))
 }
 
-fn now_f64() -> f64 {
+pub fn now_f64() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
 
+/// Best-effort per-op throttle wait (bead o1l.6): consult the token bucket
+/// built from `endpoints.yaml` rps/burst, sleep when it says to. Mutations
+/// are one-shot (no paging loop), so without this the yaml entries for new
+/// mutation ops would be dead config. Never fatal: a zero wait fires
+/// immediately, and the sleep only ever delays, never fails.
+pub async fn throttle_wait(throttle: &mut Throttle, operation: &str) {
+    let wait = throttle.wait_secs(operation, now_f64());
+    if wait > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bead o1l.6 — every mutation op the runners throttle on must resolve
+    /// to a conservative bucket (not the 1.0/4 permissive default). This
+    /// pins the yaml↔code key contract: renaming a throttle call or a yaml
+    /// key silently drops the op back to the default, and this test catches
+    /// exactly that drift. Keys are the runner-side names (CLI op for
+    /// run_engage's 1.1-REST rides, GraphQL op for post/list writes, DmSend
+    /// for the DM send).
+    #[test]
+    fn p66_mutation_buckets_are_conservative() {
+        let yaml = include_str!("../../../../endpoints/endpoints.yaml");
+        let map = twr_graphql::load_yaml(Some(yaml));
+        let mut missing = Vec::new();
+        for op in [
+            "CreateTweet",
+            "CreateNoteTweet",
+            "DeleteTweet",
+            "FavoriteTweet",
+            "UnfavoriteTweet",
+            "CreateRetweet",
+            "DeleteRetweet",
+            "CreateBookmark",
+            "DeleteBookmark",
+            "like",
+            "unlike",
+            "retweet",
+            "unretweet",
+            "bookmark",
+            "unbookmark",
+            "follow",
+            "unfollow",
+            "mute",
+            "unmute",
+            "block",
+            "unblock",
+            "pin",
+            "unpin",
+            "delete",
+            "CreateList",
+            "UpdateList",
+            "DeleteList",
+            "ListAddMember",
+            "ListRemoveMember",
+            "ListSubscribe",
+            "ListUnsubscribe",
+            "UpdatePinnedTimelines",
+            "DmSend",
+        ] {
+            match map.get(op) {
+                Some(e) => {
+                    let (rps, burst) = (e.rps.unwrap_or(99.0), e.burst.unwrap_or(99));
+                    assert!(
+                        rps <= 0.3 && burst <= 1,
+                        "{op} bucket not conservative: rps={rps} burst={burst}"
+                    );
+                }
+                None => missing.push(op),
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "mutation ops without yaml entries: {missing:?}"
+        );
+    }
 
     #[test]
     fn graphql_get_url_encodes_variables_and_features() {

@@ -3452,7 +3452,7 @@ async fn run_post_write(
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
-    let ctx = build_ctx(opts, config, &transport, &auth);
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
     // Upload -i images first (INIT→APPEND→FINALIZE each).
     let mut media_ids: Vec<String> = Vec::new();
     for path in &images {
@@ -3567,6 +3567,9 @@ async fn run_post_write(
         serde_json::Value::Object(twr_graphql::compact_features(graphql_op)),
     );
     let raw = serde_json::to_vec(&body).unwrap_or_default();
+    // Ban-risk throttle (bead o1l.6): per-op token bucket from
+    // endpoints.yaml rps/burst — best-effort wait, never fatal.
+    cli::exec::throttle_wait(&mut ctx.throttle, graphql_op).await;
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
@@ -4016,8 +4019,13 @@ async fn run_engage(
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
-    let ctx = build_ctx(opts, config, &transport, &auth);
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
     let desc = engage_op_of(cmd);
+    // Ban-risk throttle (bead o1l.6): per-op token bucket from
+    // endpoints.yaml rps/burst — best-effort wait, never fatal. Keyed by
+    // the CLI op name (mute/block/… ride 1.1 REST with no GraphQL op, so
+    // they get their own entries rather than sharing one bucket).
+    cli::exec::throttle_wait(&mut ctx.throttle, cmd).await;
     // Returns Ok(()) on a confirmed mutation, or Err((message, exit_code))
     // carrying the ALREADY-CLASSIFIED failure (inner data.errors paths
     // return early from inside, direct 429/404 handled by callers' siblings).
@@ -4455,7 +4463,7 @@ async fn run_list_write(
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
-    let ctx = build_ctx(opts, config, &transport, &auth);
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
     let (op, vars) = args.graphql();
     let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
     let url = format!("https://x.com/i/api/graphql/{qid}/{op}");
@@ -4493,6 +4501,9 @@ async fn run_list_write(
     // 214 root cause still UNRESOLVED — DevTools capture ground truth.
     body.insert("queryId".into(), serde_json::json!(qid));
     let raw = serde_json::to_vec(&body).unwrap_or_default();
+    // Ban-risk throttle (bead o1l.6): per-op token bucket from
+    // endpoints.yaml rps/burst — best-effort wait, never fatal.
+    cli::exec::throttle_wait(&mut ctx.throttle, op).await;
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
@@ -4673,7 +4684,10 @@ async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_jso
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let config = twr_config::TwrConfig::default();
-    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
+    // Ban-risk throttle (bead o1l.6): DM reads share the gentle read-class
+    // bucket (0.5/2), same as Notifications/Mentions.
+    cli::exec::throttle_wait(&mut ctx.throttle, "DmList").await;
     let url = match &cursor {
         Some(c) => format!(
             "https://x.com/i/api/1.1/dm/inbox_timeline/trusted.json?max_id={}&dm_users=false",
@@ -4738,7 +4752,9 @@ async fn run_dm_read(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let config = twr_config::TwrConfig::default();
-    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
+    // Ban-risk throttle (bead o1l.6): same gentle read-class bucket as DmList.
+    cli::exec::throttle_wait(&mut ctx.throttle, "DmRead").await;
     let context = if cursor.is_some() {
         "FETCH_DM_CONVERSATION_HISTORY"
     } else {
@@ -4905,7 +4921,7 @@ async fn run_dm_send(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let config = twr_config::TwrConfig::default();
-    let ctx = build_ctx(opts, &config, &transport, &auth);
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
     let url = "https://x.com/i/api/1.1/dm/new2.json";
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
@@ -4929,6 +4945,9 @@ async fn run_dm_send(
         "dm_users": false,
     });
     let raw = serde_json::to_vec(&body).unwrap_or_default();
+    // Ban-risk throttle (bead o1l.6): strictest mutation bucket (0.3/1) —
+    // DMs are the highest-scrutiny surface (SKILL.md §6).
+    cli::exec::throttle_wait(&mut ctx.throttle, "DmSend").await;
     let resp = match ctx.transport.post_json(url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
