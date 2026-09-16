@@ -3979,7 +3979,7 @@ impl ListWriteArgs {
                 ..
             } => (
                 "UpdateList",
-                cli::write::update_list_vars(id, name, description, *private),
+                cli::write::update_list_vars(id, Some(name), Some(description), Some(*private)),
             ),
             ListWriteArgs::Delete { id, .. } => ("DeleteList", cli::write::list_id_vars(id)),
             ListWriteArgs::AddMember {

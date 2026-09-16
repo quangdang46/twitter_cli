@@ -85,13 +85,15 @@ pub fn pin_vars(tweet_id: &str) -> serde_json::Value {
     serde_json::json!({"tweet_id": tweet_id})
 }
 
-/// Variables for CreateList: `{name, description?, isPrivate?}` (op + ID
-/// confirmed in docs/json/API.json; this shape REJECTED live 2026-09-16
-/// with X code 214 DecodeException — exact accepted keys UNKNOWN.
-/// The sibling 1.1-style `{"list_id","name","mode","description"}` shape is
-/// the next candidate (mode=public|private instead of isPrivate bool).
-/// c1: confirm live with the alternate shape before trusting this one.
-/// X validates mutation variables strictly — a 214 means shape, not auth.
+/// Variables for CreateList: `{name, description?, isPrivate?}`.
+/// Variable KEYS confirmed by two live-shaped sources (Rettiwt-API
+/// `List.create` sends exactly `{isPrivate, name, description?}`; the
+/// cephalochromoscope browser-captured `list-create` tool sends
+/// `{isPrivate, name, description}` — all three capture the real web UI
+/// request): the 2026-09-16 live 214 was the FEATURES bundle, not these
+/// keys (fixed via `feature_overrides` in twr-graphql — this shape was
+/// never the problem). `description` omitted when empty (matches both
+/// sources' conditional-spread, and avoids sending `""` vs missing).
 pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) -> serde_json::Value {
     let mut vars = serde_json::json!({"name": name, "isPrivate": private});
     if let Some(d) = description.filter(|d| !d.is_empty()) {
@@ -100,23 +102,30 @@ pub fn create_list_vars(name: &str, description: Option<&str>, private: bool) ->
     vars
 }
 
-/// Variables for UpdateList: full-field resend (`{listId, name,
-/// description, isPrivate}`) — partial-update semantics UNCONFIRMED in the
-/// corpus, so resend all three (c1: confirm live whether omitting unchanged
-/// fields works; until then never send a sparse shape that could blank a
-/// field server-side).
+/// Variables for UpdateList: SPARSE partial update (`{listId}` + only the
+/// fields being changed). Confirmed by Rettiwt-API `List.update`
+/// (live-shaped: `{listId, ...(isPrivate?), ...(description?),
+/// ...(name?)}` — each field conditionally spread, never full-resend).
+/// The CLI still requires all three flags (full-resend at the CLI layer —
+/// never send a sparse shape that could blank a field server-side by
+/// accident), but the WIRE shape is per-field conditional like Rettiwt's.
 pub fn update_list_vars(
     list_id: &str,
-    name: &str,
-    description: &str,
-    private: bool,
+    name: Option<&str>,
+    description: Option<&str>,
+    private: Option<bool>,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "listId": list_id,
-        "name": name,
-        "description": description,
-        "isPrivate": private,
-    })
+    let mut vars = serde_json::json!({"listId": list_id});
+    if let Some(p) = private {
+        vars["isPrivate"] = serde_json::json!(p);
+    }
+    if let Some(d) = description {
+        vars["description"] = serde_json::json!(d);
+    }
+    if let Some(n) = name {
+        vars["name"] = serde_json::json!(n);
+    }
+    vars
 }
 
 /// Variables for DeleteList / ListSubscribe / ListUnsubscribe /
@@ -238,7 +247,7 @@ mod tests {
         assert_eq!(c["isPrivate"], true);
         let c2 = create_list_vars("N", None, false);
         assert!(c2.get("description").is_none());
-        let u = update_list_vars("L1", "N", "D", false);
+        let u = update_list_vars("L1", Some("N"), Some("D"), Some(false));
         assert_eq!(u["listId"], "L1");
         assert_eq!(u["name"], "N");
         assert_eq!(list_id_vars("L1")["listId"], "L1");

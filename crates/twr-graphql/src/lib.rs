@@ -14,8 +14,8 @@ pub mod scrape;
 
 pub use cache::{default_cache_path, CACHE_TTL_SECS};
 pub use consts::{
-    compact_features, extra_features, fallback_query_id, seeded_extra_rotation, DEFAULT_FEATURES,
-    EXTRA_FALLBACK_IDS, FALLBACK_QUERY_IDS,
+    compact_features, extra_features, fallback_query_id, feature_overrides, seeded_extra_rotation,
+    DEFAULT_FEATURES, EXTRA_FALLBACK_IDS, FALLBACK_QUERY_IDS,
 };
 pub use endpoints::{effective_query_id, load_yaml, EndpointEntry, EndpointsMap};
 pub use resolve::{

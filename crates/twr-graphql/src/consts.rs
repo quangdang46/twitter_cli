@@ -124,14 +124,23 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
 /// values); re-verified or replaced by `doctor --refresh` on drift.
 pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
     ("ListMembers", "ljlktihgwXeYTfHwwiPj5A"),
+    ("ListMembers", "Bnhcen0kdsMAU1tW7U79qQ"),
     ("ListByRestId", "EAARFZGlY-JHdLJbKZAA5g"),
+    ("ListByRestId", "Tzkkg-NaBi_y1aAUUb6_eQ"),
+    ("ListAddMember", "EadD8ivrhZhYQr2pDmCpjA"),
+    ("CreateList", "4lSOF4GqldI-NbiFET4ofQ"),
+    ("UpdateList", "UzVGAR_brbQw1n3mH_PqRA"),
 ];
 
 /// Seed an [`crate::ExtraRotation`] map with the shipped alternates.
+/// Multiple entries per op accumulate (rotation order = listed order).
 pub fn seeded_extra_rotation() -> crate::ExtraRotation {
     let mut extra = crate::ExtraRotation::new();
     for (op, qid) in EXTRA_FALLBACK_IDS {
-        extra.insert((*op).to_string(), vec![(*qid).to_string()]);
+        extra
+            .entry((*op).to_string())
+            .or_default()
+            .push((*qid).to_string());
     }
     extra
 }
@@ -179,6 +188,49 @@ pub const DEFAULT_FEATURES: &[(&str, bool)] = &[
     ("responsive_web_enhance_cards_enabled", false),
 ];
 
+/// Per-op feature OVERRIDES for ops whose persisted query declares a
+/// narrower feature schema than the repo defaults. X validates `features`
+/// strictly per persisted query: sending the full 16-flag default bundle to
+/// an op that declares fewer flags is a 214 DecodeException (LIVE-PROVEN
+/// 2026-09-16: CreateList + ListSubscribe rejected with code 214 while the
+/// same session's mute/unmute 1.1 REST calls succeeded — auth was fine,
+/// the feature bundle was not).
+///
+/// Deck source: twitter-internal-api-doc `GraphQL.json` per-op
+/// `metadata.featureSwitches` + `featureSwitch` values (the deck records
+/// exactly which flags each persisted query declares, and each flag's
+/// value). An op listed here sends ONLY its deck-declared true-valued
+/// flags — `compact_features` consults this FIRST and skips the defaults.
+/// Ops NOT listed here keep the old behavior (defaults + extras).
+///
+/// Covered: CreateList, UpdateList, ListAddMember, ListRemoveMember,
+/// ListSubscribe, ListUnsubscribe, UpdatePinnedTimelines (all declare the
+/// same 5-flag schema: profile_label...=true,
+/// responsive_web_profile_redirect_enabled=true,
+/// rweb_tipjar...=false→stripped, verified_phone...=false→stripped,
+/// responsive_web_graphql_timeline_navigation_enabled=true — i.e. exactly
+/// 3 true flags on the wire). DeleteList declares NO features at all
+/// (empty schema — sends `{}`).
+pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, bool)]> {
+    match operation {
+        "CreateList"
+        | "UpdateList"
+        | "ListAddMember"
+        | "ListRemoveMember"
+        | "ListSubscribe"
+        | "ListUnsubscribe"
+        | "UpdatePinnedTimelines" => Some(&[
+            ("profile_label_improvements_pcf_label_in_post_enabled", true),
+            ("responsive_web_profile_redirect_enabled", true),
+            ("rweb_tipjar_consumption_enabled", false),
+            ("verified_phone_label_enabled", false),
+            ("responsive_web_graphql_timeline_navigation_enabled", true),
+        ]),
+        "DeleteList" => Some(&[]),
+        _ => None,
+    }
+}
+
 /// Per-call extras from plan §1.2 (appended to the defaults per operation).
 pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
     match operation {
@@ -204,8 +256,18 @@ pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
 }
 
 /// Merge defaults + per-op extras, dropping false values (414 guard).
+/// Ops with a [`feature_overrides`] entry use ONLY their deck-declared
+/// schema (strict-validation 214 guard) — defaults/extras are skipped.
 pub fn compact_features(operation: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
+    if let Some(schema) = feature_overrides(operation) {
+        for (k, v) in schema {
+            if *v {
+                out.insert((*k).to_string(), serde_json::Value::Bool(true));
+            }
+        }
+        return out;
+    }
     for (k, v) in DEFAULT_FEATURES.iter().chain(extra_features(operation)) {
         if *v {
             out.insert((*k).to_string(), serde_json::Value::Bool(true));
@@ -246,13 +308,38 @@ mod tests {
     #[test]
     fn extra_fallbacks_cover_rotating_list_ops() {
         let extra = seeded_extra_rotation();
+        // Rettiwt-sourced alternates accumulate after the doc-capture ones.
         assert_eq!(
             extra.get("ListMembers").map(|v| v.as_slice()),
-            Some(["ljlktihgwXeYTfHwwiPj5A".to_string()].as_slice())
+            Some(
+                [
+                    "ljlktihgwXeYTfHwwiPj5A".to_string(),
+                    "Bnhcen0kdsMAU1tW7U79qQ".to_string()
+                ]
+                .as_slice()
+            )
         );
         assert_eq!(
             extra.get("ListByRestId").map(|v| v.as_slice()),
-            Some(["EAARFZGlY-JHdLJbKZAA5g".to_string()].as_slice())
+            Some(
+                [
+                    "EAARFZGlY-JHdLJbKZAA5g".to_string(),
+                    "Tzkkg-NaBi_y1aAUUb6_eQ".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            extra.get("ListAddMember").map(|v| v.as_slice()),
+            Some(["EadD8ivrhZhYQr2pDmCpjA".to_string()].as_slice())
+        );
+        assert_eq!(
+            extra.get("CreateList").map(|v| v.as_slice()),
+            Some(["4lSOF4GqldI-NbiFET4ofQ".to_string()].as_slice())
+        );
+        assert_eq!(
+            extra.get("UpdateList").map(|v| v.as_slice()),
+            Some(["UzVGAR_brbQw1n3mH_PqRA".to_string()].as_slice())
         );
     }
 
@@ -283,5 +370,36 @@ mod tests {
         assert!(user.contains_key("hidden_profile_subscriptions_enabled"));
         let detail = compact_features("TweetDetail");
         assert!(detail.contains_key("withArticleRichContentState"));
+    }
+
+    #[test]
+    fn list_mutations_use_deck_schema_not_defaults() {
+        // The 214 fix: deck-declared 3-true-flag schema, none of the 16
+        // repo defaults (e.g. view_counts_everywhere must be ABSENT).
+        for op in [
+            "CreateList",
+            "UpdateList",
+            "ListAddMember",
+            "ListRemoveMember",
+            "ListSubscribe",
+            "ListUnsubscribe",
+            "UpdatePinnedTimelines",
+        ] {
+            let f = compact_features(op);
+            assert_eq!(f.len(), 3, "{op}: {f:?}");
+            assert!(f.contains_key("profile_label_improvements_pcf_label_in_post_enabled"));
+            assert!(f.contains_key("responsive_web_profile_redirect_enabled"));
+            assert!(f.contains_key("responsive_web_graphql_timeline_navigation_enabled"));
+            assert!(
+                !f.contains_key("view_counts_everywhere_api_enabled"),
+                "{op}"
+            );
+        }
+        // DeleteList declares zero features.
+        assert!(compact_features("DeleteList").is_empty());
+        // Untouched ops keep the defaults.
+        assert!(
+            compact_features("SearchTimeline").contains_key("view_counts_everywhere_api_enabled")
+        );
     }
 }
