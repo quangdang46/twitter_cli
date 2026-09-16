@@ -9,14 +9,15 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Status](https://img.shields.io/badge/status-pre--implementation%20(P0)-yellow.svg)
+![Release](https://img.shields.io/github/v/release/quangdang46/twitter_cli?include_prereleases)
+![CI](https://github.com/quangdang46/twitter_cli/actions/workflows/ci.yml/badge.svg?branch=main)
 
 </div>
 
 **A Rust CLI for X/Twitter, built for AI agents first and humans second — reading and posting through your own logged-in session, no developer API key required.**
 It talks to X's internal GraphQL surface the same way your browser does (cookie auth, browser-matched TLS, a real `x-client-transaction-id`), and wraps every command in a stable JSON/YAML/[TOON](https://github.com/toon-format/toon) envelope with frozen exit codes, so an agent can drive it without ever screen-scraping stdout.
 
-> **Status: pre-implementation.** This repo currently ships the design (`COMPREHENSIVEPLANFORTWITTERCLI.md`) plus a minimal Cargo workspace that compiles (`twr status` / `twr schema` stubs). No network code exists yet — see [Roadmap](#roadmap) for what's real today vs. planned.
+> **Status: v0.1.0 released and live-verified.** The full read surface (feed, bookmarks, search incl. the transaction-gated Latest path, tweet detail, user/timelines, followers/following, lists, articles, headlines) and the full write surface (post/reply/quote, like/retweet/bookmark/follow + reverses, media upload, idempotency, `--policy`, daily budget) are implemented across 11 crates, tested by 196 unit/integration tests, and verified end-to-end against real x.com — including real posts, replies, likes, and follows from a live session. See [Roadmap](#roadmap) for what's shipped vs. what's still future work (official API v2 extras, long-form posts, MCP extras).
 
 ---
 
@@ -125,7 +126,7 @@ twr search "x" --policy read_only --json     # read_only scope: writes are impos
 
 ## Installation
 
-> No tagged release exists yet — Phase 0/1 is still in progress, so the installer below will fall back to building from source (needs `cargo`) until the first `vX.Y.Z` tag ships prebuilt binaries via CI.
+Prebuilt binaries ship with every `vX.Y.Z` tag (Linux x86_64 musl, macOS x86_64/aarch64, Windows x86_64 — each with a `.sha256` sidecar).
 
 ```bash
 # macOS / Linux
@@ -134,12 +135,17 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/insta
 # With PATH auto-update + a post-install self-test
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
 
+# Pin a specific version
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.sh?$(date +%s)" | bash -s -- --version v0.1.0
+
 # Windows PowerShell
 irm "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.ps1" | iex
 ```
 
 ```bash
-# From source, manually
+# From source, manually (needs Rust stable + cmake/nasm/LLVM for wreq's
+# BoringSSL linkage — see REMAINING.md if the build complains about
+# missing native tools)
 git clone https://github.com/quangdang46/twitter_cli
 cd twitter_cli
 cargo build --release -p twr
@@ -153,21 +159,23 @@ cargo build --release -p twr
 ```
 twitter_cli/
 ├── crates/
-│   ├── twr/            # binary: CLI entry point (clap)
-│   ├── twr-core/        # envelope + error/exit-code contract (implemented, tested)
-│   ├── twr-client/      # HttpTransport trait + GraphQL client (stub — P0/P1)
-│   ├── twr-auth/        # cookie resolution + browser extraction        (planned, P1)
-│   ├── twr-graphql/     # query-ID resolver + bundle scraping           (planned, P1)
-│   ├── twr-tx/          # x-client-transaction-id derivation            (planned, P0)
-│   ├── twr-model/       # Tweet/User/Media structs + parser             (planned, P1)
-│   ├── twr-filter/      # engagement scoring                            (planned, P3)
-│   ├── twr-output/      # table/YAML/TOON rendering                     (planned, P3)
-│   └── twr-config/      # figment-based config resolution               (planned, P1)
-├── COMPREHENSIVEPLANFORTWITTERCLI.md              # the full design doc — read this first
-└── SCHEMA.md / SKILL.md # written once the core contract stabilizes (P3)
+│   ├── twr/            # binary: full CLI (36 commands — read, write, introspection, MCP)
+│   ├── twr-core/       # envelope + error/exit codes + --apply table + idempotency + budget + TOON/compact/fields
+│   ├── twr-client/     # HttpTransport trait + WreqTransport + headers + throttle + timeline + upload + guest tiers
+│   ├── twr-auth/       # credential chain (flags/env/file/browser) + rookie + Method-C paste + session file
+│   ├── twr-graphql/    # 4-layer query-ID resolver + bundle scraper + endpoints.yaml + cache
+│   ├── twr-tx/         # x-client-transaction-id (RequestProof trait + ClientTransactionV1 + cache)
+│   ├── twr-model/      # Tweet/User/Media structs + GraphQL parser + article Markdown
+│   ├── twr-filter/     # engagement scoring (opt-in --filter)
+│   ├── twr-config/     # figment resolution (cwd → home → defaults + env)
+│   ├── twr-cache/      # SQLite entity cache + watchlist (WAL/FTS5)
+│   └── twr-v2/         # official API v2 backend (OAuth2 PKCE, dual routing, video upload)
+├── COMPREHENSIVEPLANFORTWITTERCLI.md  # the full design doc — read this first
+├── SCHEMA.md / SKILL.md               # agent contract docs (shipped, validated by real agent runs)
+└── LIB.md                             # library-consumption guide (every crate is a real lib)
 ```
 
-Full rationale — including the 15+ reference projects (Python `twitter-cli`, `xurl-rs`, `xmaster-cli`, `agentic-x`, our own prior `discord_cli`, and others) whose patterns were evaluated, kept, or explicitly rejected — is in [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md).
+Full rationale — including the 15+ reference projects (Python `twitter-cli`, `xurl-rs`, `xmaster-cli`, `agentic-x`, our own prior `discord_cli`, and others) whose patterns were evaluated, kept, or explicitly rejected — is in [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md). `REMAINING.md` tracks the few known loose ends (native toolchain setup, `linux-aarch64` release target, deferred P4 human-input items).
 
 ---
 
@@ -175,21 +183,24 @@ Full rationale — including the 15+ reference projects (Python `twitter-cli`, `
 
 | Phase | Scope | Status |
 |---|---|---|
-| P0 | Transport + cookie-extraction + transaction-ID viability spike | ⏳ not started |
-| P1 | Read commands (feed/search/tweet/user/...) + full agent contract | ⏳ not started |
-| P2 | Write commands + media upload + idempotency + policy gating | ⏳ not started |
-| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ⏳ not started |
-| P4 | Official API v2 backend (feature-gated), extras (MCP, SQLite cache) | ⏳ not started |
+| P0 | Transport + cookie-extraction + transaction-ID viability spike | ✅ done (live-verified; P0-4 recorded as bead comments) |
+| P1 | Read commands (feed/search/tweet/user/...) + full agent contract | ✅ done (196 tests, fixture + semantic parity) |
+| P2 | Write commands + media upload + idempotency + policy gating | ✅ done (live post/reply/like/retweet/bookmark/follow round-trips) |
+| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers + `v0.1.0` tag) |
+| P4 | Official API v2 backend (`--backend api-v2`, OAuth2 PKCE, dual routing) | ✅ code shipped; needs a human's X developer app to fully exercise |
+| P5 | SQLite cache, `twr mcp` server, headlines, guest tiers, `future` | ✅ code shipped; guest tier + MCP smoke-tested live |
 
-See [`COMPREHENSIVEPLANFORTWITTERCLI.md` §9](COMPREHENSIVEPLANFORTWITTERCLI.md#9-phases--acceptance-criteria) for acceptance criteria per phase, and [`COMPREHENSIVEPLANFORTWITTERCLI.md` §10](COMPREHENSIVEPLANFORTWITTERCLI.md#10-issue-coverage--every-open-issue-in-the-source-repo-accounted-for) for how every open issue in the source Python project is addressed.
+See [`COMPREHENSIVEPLANFORTWITTERCLI.md` §9](COMPREHENSIVEPLANFORTWITTERCLI.md#9-phases--acceptance-criteria) for acceptance criteria per phase, and [`COMPREHENSIVEPLANFORTWITTERCLI.md` §10](COMPREHENSIVEPLANFORTWITTERCLI.md#10-issue-coverage--every-open-issue-in-the-source-repo-accounted-for) for how every open issue in the source Python project is addressed. All 21 open upstream issues have also been notified on the upstream tracker with what the Rust port fixes (or honestly doesn't — e.g. long-form posts and native SigCLI support are documented as out of scope, not claimed).
 
 ---
 
 ## Limitations (honest, today)
 
-- **Nothing talks to X yet.** This is a design + scaffold repository; `twr status`/`twr schema` are stubs proving the envelope contract, not real auth checks.
-- **Unofficial surface.** Cookie-based GraphQL access carries the same account-risk profile as any scraper — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §12 for mitigations, but there is no zero-risk mode until the Phase 4 official-API backend lands.
-- **Windows cookie extraction is the highest-risk unknown.** The upstream Python tool has an open, well-documented failure mode here ([issue #28](https://github.com/public-clis/twitter-cli/issues/28)); the P0 spike exists specifically to validate a fix before committing to the full port.
+- **Cookie writes carry residual ban-risk.** Mitigations are built in (browser-matched TLS, jitter, conservative defaults, daily mutation budget, `--policy`), and the `--backend api-v2` path exists for the sanctioned route where it covers the operation — but there is no zero-risk mode for cookie automation. See `COMPREHENSIVEPLANFORTWITTERCLI.md` §12.
+- **Windows browser-cookie auto-extraction is still broken by Chrome/Edge app-bound encryption.** Verified live (not theoretical): both `browser_cookie3` upstream and this port's `rookie` backend fail identically without admin. The mandatory fallback is `twr login --cookie` (full paste, preserved whole so writes pass the 226 gate) — see [issue #28](https://github.com/public-clis/twitter-cli/issues/28) and `REMAINING.md`.
+- **Long-form posts (>280 chars) are not implemented.** X error 186 is classified honestly so callers know exactly why, but CreateNoteTweet is future work — see upstream [issue #54](https://github.com/public-clis/twitter-cli/issues/54).
+- **Native toolchain needed to build from source.** `wreq`'s BoringSSL linkage needs cmake + nasm + libclang/LLVM on the build machine (documented in `REMAINING.md`); use the prebuilt release binaries if you don't want to set that up.
+- **`linux-aarch64` release binary is temporarily missing.** BoringSSL cross-links host-arch objects into the aarch64 musl sysroot under `cross` — that target is disabled until fixed; the other four ship normally.
 
 ## FAQ
 
@@ -209,12 +220,12 @@ Yes — that's the intended end-to-end use case, but `twr` is deliberately only 
 Single static binary, no interpreter/dependency footprint, and a chance to fix the agent-contract gaps (stdout/stderr discipline, exit codes, idempotency) that are hard to retrofit into the existing Python codebase without a breaking rewrite.
 
 **Where's `SKILL.md`?**
-Written in Phase 3, once the envelope/exit-code contract is frozen and validated against a real agent — see `COMPREHENSIVEPLANFORTWITTERCLI.md` §8.
+Shipped at repo root — the agent playbook (status gate first, `--json --max 20` reads, preview-before-`--apply` writes, exit-code table, `--policy read_only` for read-only tasks), validated by real agent runs during verification. See `COMPREHENSIVEPLANFORTWITTERCLI.md` §8 for the outline it was written from.
 
 ---
 
 <div align="center">
 
-*Designed contract-first: the plan in [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) is the source of truth until the code catches up to it.*
+*Built contract-first from [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) — 196 tests green, live-verified against real x.com, released as `v0.1.0`.*
 
 </div>
