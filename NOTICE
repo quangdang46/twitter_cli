@@ -1,0 +1,41 @@
+NOTICE — third-party and upstream attributions for twr
+============================================================
+
+This project (`twr`, https://github.com/quangdang46/twitter_cli) is a
+clean-room Rust port of the architecture and behavior of
+`public-clis/twitter-cli` (Apache License 2.0 — full text vendored in
+LICENSE-APACHE-UPSTREAM). No source file was copied from that project;
+constants that must match X's live API surface (the public web-client
+bearer token, GraphQL operation names, feature-flag keys) are facts about
+a third-party service, not copyrightable expression, and are re-expressed
+here in original Rust code with original comments.
+
+The following components carry their own licenses/attributions, preserved
+verbatim as their licenses require:
+
+1. Transaction-ID derivation (`crates/twr-tx/`)
+   Ported from iSarabjitDhiman/XClientTransaction (MIT License,
+   Copyright (c) 2025 Sarabjit Dhiman), via the intermediate Python port
+   in tmp/_research/agentic-x (used for parity vectors only, not shipped).
+   The full MIT text is reproduced in the module docs of
+   `crates/twr-tx/src/lib.rs` (lines 25-46 of the original port header)
+   and must stay there as long as that code exists:
+
+       MIT License. Copyright (c) 2025 Sarabjit Dhiman
+       (full text in crates/twr-tx/src/lib.rs)
+
+2. TOON output format (`toon` crate dependency, crates/twr-core)
+   The `toon` Rust crate (Dicklesworthstone/toon_rust, MIT + AI-rider
+   terms — see https://github.com/Dicklesworthstone/toon_rust/blob/main/LICENSE)
+   is used as an ordinary crates.io dependency for the `--toon` renderer
+   only. No TOON source is vendored here.
+
+3. Test vectors and research fixtures
+   `tests/fixtures/` and parity tests in `crates/twr-model` use
+   synthetically constructed JSON matching X's documented GraphQL shapes
+   (core/legacy split, Draft.js blocks), plus short strings captured by
+   running the reference implementations locally during development.
+   No fixture contains another project's copyrighted creative expression.
+
+Project license: see LICENSE (MIT).
+Upstream license text: see LICENSE-APACHE-UPSTREAM (Apache-2.0, for reference).
