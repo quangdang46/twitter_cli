@@ -79,6 +79,12 @@ pub fn create_tweet_vars(
     vars
 }
 
+/// Variables for PinTweet/UnpinTweet: `{"tweet_id"}` (deck GraphQL.json
+/// capture; same bare shape as the favorite/bookmark ops).
+pub fn pin_vars(tweet_id: &str) -> serde_json::Value {
+    serde_json::json!({"tweet_id": tweet_id})
+}
+
 /// Per-op `variables` for the engagement ops, mirroring the Python
 /// `client.py` shapes exactly (live-fixed 2026-09-16): `DeleteRetweet`
 /// takes `{"source_tweet_id"}` NOT `{"tweet_id"}` (a real 400-class server
@@ -165,5 +171,12 @@ mod tests {
     fn gate_delegates_to_decision_table() {
         assert_eq!(gate(true, false, false, true), Decision::Execute);
         assert_eq!(gate(false, true, false, true), Decision::Preview);
+    }
+
+    #[test]
+    fn pin_vars_are_bare_tweet_id() {
+        let v = pin_vars("123");
+        assert_eq!(v["tweet_id"], "123");
+        assert!(v.get("dark_request").is_none());
     }
 }

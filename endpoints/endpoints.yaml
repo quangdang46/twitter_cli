@@ -78,3 +78,11 @@ Notifications:
 Mentions:
   rps: 0.5
   burst: 2
+PinTweet:
+  queryId: VIHsNu89pK-kW35JpHq7Xw
+  rps: 0.3
+  burst: 1
+UnpinTweet:
+  queryId: BhKei844ypCyLYCg0nwigw
+  rps: 0.3
+  burst: 1

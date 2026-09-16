@@ -235,6 +235,45 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+    /// Mute a user id (self-only, invisible to the target).
+    Mute {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unmute a user id.
+    Unmute {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Block a user id (target-visible: they can detect it; also triggers
+    /// X's own implicit unfollow-on-block — the response may say so).
+    Block {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unblock a user id.
+    Unblock {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Pin a tweet to your profile (X allows only ONE pinned tweet at a
+    /// time — pinning a second tweet REPLACES the previous pin, it does not
+    /// error; re-pinning the already-pinned tweet is a no-op success).
+    Pin {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Unpin your profile tweet (no-op success when nothing is pinned).
+    Unpin {
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Home/feed timeline.
     Feed {
         /// for-you or following.
@@ -733,6 +772,60 @@ async fn main() -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
+        Command::Mute {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "mute", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unmute {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "unmute", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Block {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "block", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unblock {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "unblock", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Pin {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "pin", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
+        Command::Unpin {
+            id,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_engage(&opts, &config, "unpin", id, idempotency_key, None).await;
+            data = d;
+            exit_code = code;
+        }
         Command::Quote {
             id,
             text,
@@ -1147,6 +1240,12 @@ fn schema_data() -> serde_json::Value {
             {"name": "likes", "type": "tweet_list"},
             {"name": "followers", "type": "user_list"},
             {"name": "following", "type": "user_list"},
+            {"name": "mute", "type": "write_result"},
+            {"name": "unmute", "type": "write_result"},
+            {"name": "block", "type": "write_result"},
+            {"name": "unblock", "type": "write_result"},
+            {"name": "pin", "type": "write_result"},
+            {"name": "unpin", "type": "write_result"},
         ]
     })
 }
@@ -1181,6 +1280,12 @@ fn commands_data() -> serde_json::Value {
         {"name": "likes", "type": "tweet_list", "desc": "Own-account likes"},
         {"name": "followers", "type": "user_list", "desc": "Followers of user id"},
         {"name": "following", "type": "user_list", "desc": "Following of user id"},
+        {"name": "mute", "type": "write_result", "desc": "Mute a user id (invisible to target)"},
+        {"name": "unmute", "type": "write_result", "desc": "Unmute a user id"},
+        {"name": "block", "type": "write_result", "desc": "Block a user id (target-visible)"},
+        {"name": "unblock", "type": "write_result", "desc": "Unblock a user id"},
+        {"name": "pin", "type": "write_result", "desc": "Pin a tweet to your profile (replaces previous)"},
+        {"name": "unpin", "type": "write_result", "desc": "Unpin your profile tweet"},
     ])
 }
 
@@ -3201,9 +3306,31 @@ struct EngageOp {
     use_friendships: bool,
 }
 
+/// 1.1 REST path for one mute/block subcommand: mute rides
+/// `mutes/users/create|destroy`, block rides `blocks/create|destroy`
+/// (deck v1.1.json; form-POST like follow/unfollow). There is NO GraphQL
+/// MuteUser/BlockUser op in any reference — do not add one.
+fn mute_block_rest_path(cmd: &str) -> Option<&'static str> {
+    match cmd {
+        "mute" => Some("mutes/users/create"),
+        "unmute" => Some("mutes/users/destroy"),
+        "block" => Some("blocks/create"),
+        "unblock" => Some("blocks/destroy"),
+        _ => None,
+    }
+}
+
 /// Map subcommand to GraphQL op (or 1.1 friendships endpoint).
 fn engage_op_of(cmd: &str) -> EngageOp {
     match cmd {
+        "pin" => EngageOp {
+            op: "PinTweet",
+            use_friendships: false,
+        },
+        "unpin" => EngageOp {
+            op: "UnpinTweet",
+            use_friendships: false,
+        },
         "delete" => EngageOp {
             op: "DeleteTweet",
             use_friendships: false,
@@ -3361,6 +3488,34 @@ async fn run_engage(
             }
             Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
         }
+    } else if let Some(rest_path) = mute_block_rest_path(cmd) {
+        // Mute/block ride the 1.1 REST endpoints (no GraphQL op exists) —
+        // same form-POST shape as follow/unfollow, different path.
+        let url = format!("https://x.com/i/api/1.1/{rest_path}.json");
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: None,
+        });
+        let mut refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        refs.push(("Content-Type", "application/x-www-form-urlencoded"));
+        let body = format!("user_id={target_id}&include_profile_interstitial_type=1");
+        match ctx.transport.post_json(&url, &refs, body.as_bytes()).await {
+            Ok(r) => {
+                if (200..300).contains(&r.status) {
+                    Ok(())
+                } else {
+                    Err((format!("{cmd} failed: HTTP {}", r.status), 6))
+                }
+            }
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
+        }
     } else {
         let qid = ctx
             .query_id(desc.op)
@@ -3379,7 +3534,11 @@ async fn run_engage(
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let vars = cli::write::tweet_id_vars(desc.op, &target_id);
+        let vars = if desc.op == "PinTweet" || desc.op == "UnpinTweet" {
+            cli::write::pin_vars(&target_id)
+        } else {
+            cli::write::tweet_id_vars(desc.op, &target_id)
+        };
         let mut body = serde_json::Map::new();
         body.insert("variables".into(), vars);
         body.insert(

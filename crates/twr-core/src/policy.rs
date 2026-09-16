@@ -30,8 +30,12 @@ impl Policy {
         }
     }
 
-    /// Engagement-tier ops (like/rt/follow/bookmark + reverses). Post-family
-    /// (post/reply/quote) and delete are NOT engagement.
+    /// Engagement-tier ops (like/rt/follow/bookmark + reverses, plus P6.2's
+    /// mute/block/pin + reverses). Post-family (post/reply/quote) and delete
+    /// are NOT engagement. Mute/block/pin are relationship/profile acts on
+    /// your own account (plan §13.2), not content writes — block stays here
+    /// (not `write`) per bead o1l.2.2: moving it would silently change the
+    /// contract for every existing `--policy engagement` caller.
     pub fn allows(&self, operation: &str) -> bool {
         match self {
             Policy::Write => true,
@@ -46,6 +50,12 @@ impl Policy {
                     | "unbookmark"
                     | "follow"
                     | "unfollow"
+                    | "mute"
+                    | "unmute"
+                    | "block"
+                    | "unblock"
+                    | "pin"
+                    | "unpin"
             ),
         }
     }
@@ -74,5 +84,14 @@ mod tests {
         assert!(Policy::Write.allows("post"));
         assert_eq!(Policy::parse("READ_ONLY"), Some(Policy::ReadOnly));
         assert_eq!(Policy::parse("nope"), None);
+    }
+
+    #[test]
+    fn p62_engagement_covers_mute_block_pin() {
+        for op in ["mute", "unmute", "block", "unblock", "pin", "unpin"] {
+            assert!(Policy::Engagement.allows(op), "{op}");
+            assert!(!Policy::ReadOnly.allows(op), "{op}");
+            assert!(Policy::Write.allows(op), "{op}");
+        }
     }
 }

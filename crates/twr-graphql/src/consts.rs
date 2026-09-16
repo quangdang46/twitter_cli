@@ -77,6 +77,21 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     // bundle onto these ops (known 404 cause).
     ("UserRepliesTimeline", "pb6crFNr_CyRiKv4vRZWYQ"),
     ("UserMedia", "6k_h0NmaKHYxL0lScGLJSw"),
+    // P6.2 pin — operation name CONFIRMED in the research corpus
+    // (twitter-internal-api-doc deck GraphQL.json + API.json agree:
+    // PinTweet/UnpinTweet mutations). Query IDs from the deck capture:
+    // PinTweet `VIHsNu89pK-kW35JpHq7Xw`, UnpinTweet `BhKei844ypCyLYCg0nwigw`.
+    // UNVERIFIED against this repo's own `doctor --refresh` — starting
+    // points, re-resolve live before trusting (they rot every 2–4 weeks).
+    // NOTE: mute/block have NO GraphQL op in any reference (no MuteUser/
+    // BlockUser anywhere in xeepy/Rettiwt-API/agentic-x/deck-GraphQL or
+    // xfetch/bird/peep). They ride the 1.1 REST endpoints instead
+    // (`mutes/users/create|destroy`, `blocks/create|destroy` — deck
+    // v1.1.json, form-POST like the existing follow/unfollow path), so no
+    // FALLBACK_QUERY_IDS entry exists or is needed for them. If a future
+    // live capture surfaces GraphQL mute/block ops, add them here then.
+    ("PinTweet", "VIHsNu89pK-kW35JpHq7Xw"),
+    ("UnpinTweet", "BhKei844ypCyLYCg0nwigw"),
 ];
 
 /// Shipped EXTRA-rotation fallbacks (layer 3): the older/alternate query ID
@@ -180,8 +195,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_22_plus_4_list_plus_2_user_tab_ops() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 28);
+    fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_ops() {
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 30);
         for op in [
             "ListOwnerships",
             "ListMemberships",
@@ -189,6 +204,8 @@ mod tests {
             "ListByRestId",
             "UserRepliesTimeline",
             "UserMedia",
+            "PinTweet",
+            "UnpinTweet",
         ] {
             assert!(fallback_query_id(op).is_some(), "{op}");
         }
