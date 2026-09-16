@@ -20,10 +20,16 @@ jobs:
             runner: ubuntu-latest
             suffix: linux-x86_64
             use_cross: true
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
-            suffix: linux-aarch64
-            use_cross: true
+          # NOTE (2026-09-16): temporarily disabled — BoringSSL (via wreq)
+          # builds host-arch C objects into the aarch64 sysroot under
+          # `cross`, producing "Relocations in generic ELF (EM: 62) / file
+          # in wrong format" at final link. x86_64 musl is unaffected. Track
+          # re-enabling (prebuilt BoringSSL for the target, or vendored
+          # boring-sys2 cross flags) before claiming 5-target releases.
+          # - target: aarch64-unknown-linux-musl
+          #   runner: ubuntu-latest
+          #   suffix: linux-aarch64
+          #   use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             suffix: macos-x86_64
