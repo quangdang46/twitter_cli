@@ -95,7 +95,13 @@ needs an input only a human can provide:
 When those exist, 6.1→6.2→6.3 implement in order behind
 `--backend api-v2` (feature-gated, cookie backend stays default).
 
-## P6 (feature-completeness batch) — in progress
+## P6 (feature-completeness batch) — mostly done, 3 beads need humans
+
+Bead status (2026-09-17): P6.1 (8/8), P6.2 (4/4), P6.4 (4/4), ban-risk `.6`,
+and DM `.5.1/.5.2/.5.4` are CLOSED. Still OPEN and needing human input:
+P6.3 list writes (`.3.1`–`.3.7`, X error 214 — see below), `dm-send`
+(`.5.3`, needs a solicited live send to prove the wire shape), and the top
+epics (`.3`, `.5`, `o1l`) which close only when their children do.
 
 `COMPREHENSIVEPLANFORTWITTERCLI.md` §13 has the full spec. Read-only
 additions (mentions/notifications/user-media/user-replies/lists/list-members/
