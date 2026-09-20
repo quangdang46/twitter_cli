@@ -4330,6 +4330,9 @@ impl ListWriteArgs {
             // No PinList/UnpinList op exists (deck-wide grep) — the sidebar
             // equivalent is UpdatePinnedTimelines with a best-effort
             // `{listId, pinned}` shape, flagged for live confirmation.
+            // (UNREACHABLE: run_list_write fails closed for Pin/Unpin
+            // before reaching here — UpdatePinnedTimelines item shape is
+            // UNCONFIRMED, live-probed 2026-09-20. See bead o1l.3.6.)
             ListWriteArgs::Pin { id, .. } => (
                 "UpdatePinnedTimelines",
                 serde_json::json!({"listId": id, "pinned": true}),
@@ -4498,6 +4501,23 @@ async fn run_list_write(
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
+    // list-pin/unpin: fail closed BEFORE any network (but AFTER the
+    // gate, so --dry-run still previews). UpdatePinnedTimelines takes
+    // `{pinnedTimelineItems: [...]}` but the item shape is UNCONFIRMED
+    // (live-probed 2026-09-20: every guessed shape 422s; only `[]`
+    // round-trips). Same policy as long-form reply/quote vars: refuse to
+    // guess rather than send a shape known to fail. See bead o1l.3.6.
+    if !opts.dry_run
+        && matches!(
+            args,
+            ListWriteArgs::Pin { .. } | ListWriteArgs::Unpin { .. }
+        )
+    {
+        return (
+            serde_json::json!({"error": "list-pin/unpin vars are UNCONFIRMED (UpdatePinnedTimelines item shape unknown) — refusing to guess; see bead o1l.3.6"}),
+            2,
+        );
+    }
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let (op, vars) = args.graphql();
     let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
@@ -4527,14 +4547,12 @@ async fn run_list_write(
         "features".into(),
         serde_json::Value::Object(twr_graphql::compact_features(op)),
     );
-    // Rettiwt-shaped body: list mutations send `queryId` INSIDE the POST
-    // body alongside variables+features (all other twr mutations send only
-    // variables+features — the queryId lives in the URL path alone).
-    // Rettiwt `List.create/delete/update/addMember` verbatim; whether the
-    // persisted-query validation REQUIRES it is unconfirmed, but sending it
-    // matches the one working caller verbatim and costs nothing.
-    // 214 root cause still UNRESOLVED — DevTools capture ground truth.
-    body.insert("queryId".into(), serde_json::json!(qid));
+    // Body holds variables+features ONLY (queryId lives in the URL path
+    // alone, like every other twr mutation). The in-body `queryId` came
+    // from Rettiwt's shape, but live-probing 2026-09-20 proved it is the
+    // 214 trigger: identical vars+features succeed via curl without it and
+    // 214 WITH it. twikit's own `gql_post` only adds queryId-in-body when
+    // features is None — never for list mutations.
     let raw = serde_json::to_vec(&body).unwrap_or_default();
     // Ban-risk throttle (bead o1l.6): per-op token bucket from
     // endpoints.yaml rps/burst — best-effort wait, never fatal.
@@ -4590,6 +4608,32 @@ async fn run_list_write(
                 );
             }
             let code = first.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            // Partial-data tolerance (live-found 2026-09-20): X can return
+            // HTTP 200 with BOTH `data` (mutation fully applied — e.g.
+            // CreateList returns the new list with id_str) AND an `errors[]`
+            // entry for a NON-mutation sub-selection (path
+            // `list.default_banner_media_results.result`, code 214 — a
+            // banner-media decode hiccup server-side, nothing to do with
+            // our variables). Failing hard here turned real successes into
+            // fake failures (and any retry into a duplicate). When the
+            // mutation demonstrably landed (created id present) and the
+            // error path points away from the mutation root, report success
+            // with the server warning attached — never a fake failure.
+            if extract_created_list_id(&payload).is_some()
+                && is_sub_selection_error(first)
+            {
+                let message = first
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("mutation rejected");
+                if let Some(list_id) = extract_created_list_id(&payload) {
+                    finish_list_write(&store_path, &idempotency_key, now, operation, &args);
+                    return (
+                        serde_json::json!({"ok": true, "operation": operation, "list_id": list_id, "warning": format!("X returned a non-fatal sub-selection warning (code {code}): {message}")}),
+                        0,
+                    );
+                }
+            }
             let kind = twr_core::ErrorKind::from_api_code(code);
             let err =
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"));
@@ -4695,6 +4739,24 @@ fn extract_created_list_id(payload: &serde_json::Value) -> Option<String> {
         }
     }
     None
+}
+
+/// True when a GraphQL error targets a sub-selection (nested field) rather
+/// than the mutation root — i.e., its `path` descends more than one level
+/// below the operation root. Used by the partial-data success rule: when
+/// the mutation landed (id present) but only a non-critical sub-field
+/// errored (e.g. banner media, code 214), report success with a warning
+/// instead of a fake failure.
+fn is_sub_selection_error(error: &serde_json::Value) -> bool {
+    let Some(path) = error.get("path") else {
+        return false;
+    };
+    let Some(path_arr) = path.as_array() else {
+        return false;
+    };
+    // A root-level error has a single-segment path (the mutation's own
+    // return field). Multi-segment paths descend into sub-selections.
+    path_arr.len() > 1
 }
 
 // ── DM (P6.5, highest-scrutiny surface — see SKILL.md §6) ────────────────

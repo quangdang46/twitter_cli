@@ -32,9 +32,19 @@ impl WreqTransport {
     /// show) — if this fails to compile after a dependency bump, check
     /// `wreq_util::Emulation`'s available variants and adjust.
     pub fn new_chrome() -> Result<Self, TransportError> {
+        // cookie_store(false): twr sends a full explicit `Cookie:` header
+        // on every request (Method C paste, code-226 gate). Letting wreq
+        // ALSO jar cookies means Set-Cookie responses (e.g. rotated guest
+        // tokens, cf_clearance refreshes) silently append/override the
+        // explicit header on later requests in the same process — a
+        // stateful mutation of auth material the caller cannot see. The
+        // caller owns cookies; the transport must be stateless.
+        // (Live-found 2026-09-20: CreateList 214'd through this transport
+        // while succeeding via curl with byte-identical vars/features —
+        // cookie-jar interference is the prime suspect.)
         let client = Client::builder()
             .emulation(Emulation::Chrome131)
-            .cookie_store(true)
+            .cookie_store(false)
             .build()
             .map_err(|e| TransportError::Io(format!("failed to build wreq client: {e}")))?;
         Ok(Self { client })

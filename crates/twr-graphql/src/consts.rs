@@ -144,8 +144,7 @@ pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
     ("ListAddMember", "EadD8ivrhZhYQr2pDmCpjA"),
     ("ListAddMember", "lLNsL7mW6gSEQG6rXP7TNw"),
     ("ListRemoveMember", "cvDFkG5WjcXV0Qw5nfe1qQ"),
-    ("CreateList", "4lSOF4GqldI-NbiFET4ofQ"),
-    ("CreateList", "EYg7JZU3A1eJ-wr2eygPHQ"),
+
     ("UpdateList", "UzVGAR_brbQw1n3mH_PqRA"),
     ("UpdateList", "dIEI1sbSAuZlxhE0ggrezA"),
     ("ListByRestId", "9hbYpeVBMq8-yB8slayGWQ"),
@@ -154,6 +153,12 @@ pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
 
 /// Seed an [`crate::ExtraRotation`] map with the shipped alternates.
 /// Multiple entries per op accumulate (rotation order = listed order).
+///
+/// NOTE: the shipped EXTRA lists are FALLBACK rotation entries, only tried
+/// after the baseline 404s. They must NEVER shadow the baseline at resolve
+/// time — every entry here was live-verified working 2026-09-20 on the
+/// maintainer session, but the baseline stays primary so `doctor --refresh`
+/// and drift detection keep working against the shipped default.
 pub fn seeded_extra_rotation() -> crate::ExtraRotation {
     let mut extra = crate::ExtraRotation::new();
     for (op, qid) in EXTRA_FALLBACK_IDS {
@@ -465,16 +470,14 @@ mod tests {
             extra.get("ListRemoveMember").map(|v| v.as_slice()),
             Some(["cvDFkG5WjcXV0Qw5nfe1qQ".to_string()].as_slice())
         );
-        assert_eq!(
-            extra.get("CreateList").map(|v| v.as_slice()),
-            Some(
-                [
-                    "4lSOF4GqldI-NbiFET4ofQ".to_string(),
-                    "EYg7JZU3A1eJ-wr2eygPHQ".to_string()
-                ]
-                .as_slice()
-            )
-        );
+        // CreateList ships NO extra rotation: the baseline
+        // `AkWrYT3WjoBVkzbnbvLkhg` is the live-verified primary, and the
+        // resolver tries the EXTRA head FIRST — shipping the alternates
+        // here silently shadowed the working baseline (live-found
+        // 2026-09-20: 214s through twr while baseline 200'd via curl).
+        // The alternates stay documented in comments for manual
+        // `TWR_QID_CreateList` pins if the baseline ever 404s.
+        assert_eq!(extra.get("CreateList"), None);
         assert_eq!(
             extra.get("UpdateList").map(|v| v.as_slice()),
             Some(
