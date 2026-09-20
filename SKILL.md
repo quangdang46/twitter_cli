@@ -47,6 +47,9 @@ twr post "hello" --apply --idempotency-key <uuid> --json   # for real
 - Writes need full browser cookies; env-only auth risks HTTP 226.
 - `--policy read_only` blocks all writes (exit 2) — use it for read-only tasks.
 - Daily mutation budget (default 200, `TWR_DAILY_BUDGET`) exits 2 when spent.
+- Post-family cap (default 10/day, `TWR_POST_DAILY_BUDGET`) + 15min min-interval
+  (`TWR_POST_MIN_INTERVAL_SECS`) on post/reply/quote/edit — CreateTweet-family ops
+  trip X's code-226 automation gate long before the general budget matters.
 
 ## 4. Errors → actions
 
@@ -67,8 +70,9 @@ twr post "hello" --apply --idempotency-key <uuid> --json   # for real
 - No bulk operations; one write per invocation, budget-capped.
 - Every write consults its per-operation token bucket (`endpoints.yaml`,
   mutations at 0.3 rps / burst 1) plus a 1.5–4s jitter floor — do not
-  tight-loop writes back-to-back; the general daily budget (200) and the
-  separate DM cap (10) both exit 2 when spent.
+  tight-loop writes back-to-back; the general daily budget (200), the post
+  cap (10/day + 15min cooldown), and the separate DM cap (10) all exit 2
+  when spent.
 - Prefer `mute` over `block` when the goal is only to stop seeing someone:
   `block` is target-visible (the target can tell), `mute` is invisible.
 - `list-add-member` pulls another user's content into your list without

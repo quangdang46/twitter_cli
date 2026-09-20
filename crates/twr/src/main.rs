@@ -3387,6 +3387,37 @@ async fn run_post_write(
             );
         }
     }
+    // Post-family cap + cooldown (2026-09-20 incident): CreateTweet-family
+    // ops trip X's code-226 gate long before the general 200/day budget
+    // matters. Own daily counter (TWR_POST_DAILY_BUDGET, default 10) plus a
+    // min-interval gap (TWR_POST_MIN_INTERVAL_SECS, default 900s).
+    {
+        use twr_core::budget::PostCheck;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(path) = twr_core::budget::default_post_log_path() {
+            let limit = twr_core::budget::effective_post_budget(|k| std::env::var(k).ok());
+            let interval = twr_core::budget::effective_post_min_interval(|k| std::env::var(k).ok());
+            let today = twr_core::budget::today_utc();
+            match twr_core::budget::check_post(&path, &today, limit, interval, now_secs) {
+                PostCheck::DenyBudget { used, limit } => {
+                    return (
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        2,
+                    );
+                }
+                PostCheck::DenyCooldown { wait_secs } => {
+                    return (
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        2,
+                    );
+                }
+                PostCheck::Allow { .. } => {}
+            }
+        }
+    }
     // Policy BEFORE the decision table: read_only-scoped agents cannot post even with --apply.
     if !opts.policy.allows(operation) {
         return (
@@ -3488,6 +3519,7 @@ async fn run_post_write(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let has_full_cookie = auth.session.full_string.as_deref().is_some_and(|v| !v.trim().is_empty());
     // Upload -i images first (INIT→APPEND→FINALIZE each).
     let mut media_ids: Vec<String> = Vec::new();
     for path in &images {
@@ -3681,10 +3713,17 @@ async fn run_post_write(
             }
             let kind = twr_core::ErrorKind::from_api_code(code);
             let err = if code == 226 {
-                twr_core::TwrError::new(
-                    kind,
-                    "write rejected as automated behavior (X code 226): this session's cookie context is too thin — re-login with full browser cookies (Method B) or a fresh full-cookie paste",
-                )
+                if has_full_cookie {
+                    twr_core::TwrError::new(
+                        kind,
+                        "write rejected as automated behavior (X code 226): cookie context is FULL but X still flagged this write — the ACCOUNT is rate-shaped, not the session. Back off for hours, do NOT paste the same cookie again (it changes nothing), test further writes on a throwaway account, and check `twr user-posts` before retrying to avoid a double-post",
+                    )
+                } else {
+                    twr_core::TwrError::new(
+                        kind,
+                        "write rejected as automated behavior (X code 226): this session uses env-only auth (auth_token+ct0 pair, no full cookie context) — re-login with full browser cookies (Method B) or a fresh full-cookie paste, then retry once",
+                    )
+                }
             } else {
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"))
             };
@@ -3724,6 +3763,9 @@ async fn run_post_write(
         }
         if let Some(path) = twr_core::budget::default_log_path() {
             twr_core::budget::record(&path, &twr_core::budget::today_utc());
+        }
+        if let Some(path) = twr_core::budget::default_post_log_path() {
+            twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
         }
         return (
             serde_json::json!({"id": new_id, "operation": operation, "graphql_operation": "CreateNoteTweet"}),
@@ -3780,6 +3822,9 @@ async fn run_post_write(
         }
         if let Some(path) = twr_core::budget::default_log_path() {
             twr_core::budget::record(&path, &twr_core::budget::today_utc());
+        }
+        if let Some(path) = twr_core::budget::default_post_log_path() {
+            twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
         }
         let prev = edit_target.clone().unwrap_or_default();
         return (
@@ -3869,6 +3914,9 @@ async fn run_post_write(
     }
     if let Some(path) = twr_core::budget::default_log_path() {
         twr_core::budget::record(&path, &twr_core::budget::today_utc());
+    }
+    if let Some(path) = twr_core::budget::default_post_log_path() {
+        twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
     }
     (serde_json::json!({"id": new_id, "operation": operation}), 0)
 }
@@ -4180,7 +4228,7 @@ async fn run_engage(
                         let err = if code == 226 {
                             twr_core::TwrError::new(
                                 kind,
-                                "write rejected as automated behavior (X code 226): this session's cookie context is too thin — re-login with full browser cookies (Method B) or a fresh full-cookie paste",
+                                "write rejected as automated behavior (X code 226): X flagged this write as automation. If this session uses env-only auth (auth_token+ct0 pair, no full cookie string), re-login with full browser cookies (Method B) or a fresh full-cookie paste — otherwise the ACCOUNT itself is flagged: back off for hours, test further writes on a throwaway account, and check `twr user-posts` before retrying to avoid a double-post",
                             )
                         } else {
                             twr_core::TwrError::new(
