@@ -394,10 +394,20 @@ mod tests {
                 a.error
             );
         }
-        // We assert the sweep runs to completion and reports one attempt
-        // per supported browser; we do NOT assert `found` since whether
-        // this machine is logged into x.com in a supported browser is an
-        // environment fact, not a crate-correctness fact.
-        assert_eq!(summary.attempts.len(), Browser::resolution_order().len());
+        // The sweep stops early once a complete pair is found, so attempts
+        // can be FEWER than the browser list — assert the sweep behaved:
+        // it ran at least one attempt, and if it stopped early it must
+        // have found a complete pair (early-stop is only allowed on hit).
+        // We do NOT assert `found` itself since whether this machine is
+        // logged into x.com in a supported browser is an environment fact,
+        // not a crate-correctness fact.
+        assert!(!summary.attempts.is_empty());
+        assert!(summary.attempts.len() <= Browser::resolution_order().len());
+        if summary.attempts.len() < Browser::resolution_order().len() {
+            assert!(
+                summary.found,
+                "sweep stopped early without a complete pair — early-stop must only fire on hit"
+            );
+        }
     }
 }
