@@ -127,6 +127,13 @@ pub struct SessionCookies {
     /// over the pair at header-build time (see
     /// `twr_client::Credentials::cookie_header`).
     pub full_string: Option<String>,
+    /// Numeric account id decoded from the `twid=u=<id>` cookie when the
+    /// session came from a Method C paste. Lets `twr lists` (and any future
+    /// self-scoped command) resolve "self" without a REST round trip — the
+    /// 1.1 `account/settings.json` / `verify_credentials` chain returns
+    /// 401/403 with cookie auth even on live sessions, so it cannot be
+    /// relied on. Never logged; informational only.
+    pub twid_user_id: Option<String>,
 }
 
 impl SessionCookies {
@@ -142,10 +149,18 @@ impl SessionCookies {
         if self.full_string.is_none() {
             self.full_string = other.full_string;
         }
+        if self.twid_user_id.is_none() {
+            self.twid_user_id = other.twid_user_id;
+        }
     }
 
     pub fn is_complete(&self) -> bool {
         self.auth_token.is_some() && self.ct0.is_some()
+    }
+
+    /// Best-effort self user id: the `twid`-decoded id when available.
+    pub fn self_user_id(&self) -> Option<&str> {
+        self.twid_user_id.as_deref()
     }
 }
 
@@ -173,10 +188,12 @@ pub fn parse_cookie_string(s: &str) -> HashMap<String, String> {
 /// Build `SessionCookies` from a parsed cookie map (Method C entry point).
 pub fn session_from_cookie_string(s: &str) -> SessionCookies {
     let map = parse_cookie_string(s);
+    let twid_user_id = decode_twid_user_id(map.get("twid").map(String::as_str).unwrap_or(""));
     let session = SessionCookies {
         auth_token: map.get(AUTH_TOKEN).cloned(),
         ct0: map.get(CT0).cloned(),
         full_string: None,
+        twid_user_id,
     };
     if !session.is_complete() {
         return session;
@@ -187,6 +204,20 @@ pub fn session_from_cookie_string(s: &str) -> SessionCookies {
     SessionCookies {
         full_string: Some(s.trim().to_string()),
         ..session
+    }
+}
+
+/// Decode the numeric account id from a `twid` cookie value (`u=<id>`, the
+/// value arriving percent-encoded as `u%3D<id>` in a raw paste — tolerate
+/// both). Returns `None` for anything that is not all digits.
+pub fn decode_twid_user_id(raw: &str) -> Option<String> {
+    let v = raw.trim().trim_matches('"').trim();
+    let v = v.replace("%3D", "=").replace("%3d", "=");
+    let id = v.strip_prefix("u=").unwrap_or(&v).trim();
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        Some(id.to_string())
+    } else {
+        None
     }
 }
 
@@ -314,6 +345,22 @@ mod tests {
         assert!(session.auth_token.is_some());
         assert!(session.ct0.is_some());
         assert!(session.is_complete());
+    }
+
+    #[test]
+    fn twid_user_id_decodes_from_cookie_paste() {
+        // SYNTHETIC values only — never a real cookie.
+        let raw = "auth_token=fake_synthetic_token; ct0=fake_synthetic_csrf; twid=u%3D1758783014887124992";
+        let session = session_from_cookie_string(raw);
+        assert_eq!(
+            session.twid_user_id.as_deref(),
+            Some("1758783014887124992")
+        );
+        assert_eq!(session.self_user_id(), Some("1758783014887124992"));
+        // Unencoded form + junk both tolerated.
+        assert_eq!(decode_twid_user_id("u=12345"), Some("12345".into()));
+        assert_eq!(decode_twid_user_id("not-an-id"), None);
+        assert_eq!(decode_twid_user_id(""), None);
     }
 
     #[test]

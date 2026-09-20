@@ -2578,13 +2578,30 @@ async fn run_list(
 }
 
 /// Resolve the numeric user id for `Lists` calls: explicit `--id` wins,
-/// otherwise the authenticated account via the 1.1 `account/settings.json`
-/// chain (bird's `getCurrentUser` candidate URLs verbatim). Returns the id
-/// or an `(error, exit)` tuple — settings endpoints need session cookies,
-/// so guest tier never reaches here (read_auth already gated).
+/// otherwise the authenticated account — first from the `twid` cookie
+/// decoded at login time (offline, always works for Method C sessions),
+/// then via the 1.1 `account/settings.json` chain (bird's `getCurrentUser`
+/// candidate URLs verbatim). Returns the id or an `(error, exit)` tuple —
+/// settings endpoints need session cookies, so guest tier never reaches
+/// here (read_auth already gated).
+///
+/// NOTE (live-verified 2026-09-20): the settings/verify_credentials chain
+/// returns 401/403 with cookie auth even on live sessions, so the twid
+/// path is the one that actually fires in practice.
 async fn resolve_self_user_id(
     ctx: &cli::exec::ExecCtx<'_>,
 ) -> Result<String, (serde_json::Value, i32)> {
+    // Fast path: twid-decoded id from the session's full cookie paste.
+    // The full paste rides in the Cookie header (see `cookie_header`), so
+    // parse it the same way login did.
+    if let Some(twid) = twr_auth::decode_twid_user_id(
+        &twr_auth::parse_cookie_string(&ctx.creds.cookie_header())
+            .get("twid")
+            .cloned()
+            .unwrap_or_default(),
+    ) {
+        return Ok(twid);
+    }
     const CANDIDATES: &[&str] = &[
         "https://x.com/i/api/account/settings.json",
         "https://api.twitter.com/1.1/account/settings.json",

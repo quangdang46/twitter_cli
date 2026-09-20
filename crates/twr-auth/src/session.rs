@@ -30,6 +30,9 @@ struct SessionFile {
     /// `None` — backward compatible by construction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full_string: Option<String>,
+    /// `twid`-decoded self user id (see `SessionCookies::twid_user_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    twid_user_id: Option<String>,
 }
 
 /// Load a session from disk. `None` = missing/unparseable/incomplete — never
@@ -42,6 +45,22 @@ pub fn load(path: &Path) -> Option<SessionCookies> {
         auth_token: file.auth_token.filter(|v| !v.is_empty()),
         ct0: file.ct0.filter(|v| !v.is_empty()),
         full_string: file.full_string.filter(|v| !v.trim().is_empty()),
+        twid_user_id: file.twid_user_id.filter(|v| !v.trim().is_empty()),
+    };
+    // Backfill: old session files predate twid_user_id but still carry the
+    // full paste — decode it on load so `twr lists` self-resolution works
+    // without forcing a re-login.
+    let session = match (&session.twid_user_id, &session.full_string) {
+        (None, Some(full)) => SessionCookies {
+            twid_user_id: crate::decode_twid_user_id(
+                &crate::parse_cookie_string(full)
+                    .get("twid")
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            ..session
+        },
+        _ => session,
     };
     if session.is_complete() {
         Some(session)
@@ -84,6 +103,7 @@ pub fn save(path: &Path, session: &SessionCookies, force: bool) -> Result<SaveOu
         auth_token: session.auth_token.clone(),
         ct0: session.ct0.clone(),
         full_string: session.full_string.clone(),
+        twid_user_id: session.twid_user_id.clone(),
     };
     let raw = serde_json::to_string(&file).map_err(|e| SaveError::Io(e.to_string()))?;
     std::fs::write(path, raw).map_err(|e| SaveError::Io(e.to_string()))?;
@@ -136,6 +156,7 @@ mod tests {
             auth_token: Some("tok".into()),
             ct0: Some("ct".into()),
             full_string: Some("auth_token=tok; ct0=ct".into()),
+            twid_user_id: None,
         }
     }
 
