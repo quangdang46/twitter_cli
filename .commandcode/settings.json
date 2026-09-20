@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(find /Users/tranquangdang21/Projects/twitter_cli -name \"continue.txt\" 2>/dev/null; find /private/tmp/commandcode-501/-Users-tranquangdang21-Projects-twitter-cli -name \"continue.txt\" 2>/dev/null)",
+      "Shell(cargo:*)",
+      "Shell(grep:*)",
+      "Shell(git add crates/twr-client/src/wreq_transport.rs crates/twr-graphql/src/consts.rs crates/twr/src/main.rs && git commit -F - <<'EOF' Fix list-write 214: cookie-jar off, queryId out-of-body, partial-data tolerance Three coordinated fixes for the CreateList 214 regression (live-found 2026-09-20): - twr-client: cookie_store(false) — transport must be stateless; the cookie jar was silently appending Set-Cookie rotations (guest token, cf_clearance) that overrode the explicit Cookie: header on follow-ups. - twr-graphql: drop CreateList from EXTRA_FALLBACK_IDS — the fallback rotation was tried first and shadowed the live-verified baseline, causing 214s while curl with the baseline QID returned 200. - twr: stop sending in-body queryId for list mutations — the Reottiwt shape is the 214 trigger (identical vars succeed via curl without it); twikit only adds queryId-in-body when features is None. - twr: partial-data tolerance — HTTP 200 with both data (mutation landed, id present) and a non-root errors[] entry (code 214 on list.default_banner_media_results.result) now reports success with a server-attached warning instead of a fake failure. - twr: fail-closed on pin/unpin before network — UpdatePinnedTimelines item shape is unconfirmed (live-probed: every guess 422s). EOF)",
+      "Shell(git:*)",
+      "Shell(rm:*)",
+      "Shell()",
+      "Shell(twr:*)",
+      "Shell(twr post --help 2>&1; echo \"===\"; twr search --help 2>&1 | head -30)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('data',{}).get('query_ids',{}).get('CreateList','N/A'), indent=2)) 2 >& 1)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); lists=d.get('data',{}).get('lists',[]); print(f'Found {len(lists)} lists'); [print(f' - {l[\"name\"]} ({l[\"id\"]})') for l in lists] 2 >& 1)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(d.get(\"data\",{}).get(\"tweets\",[]))}'))",
+      "Shell(cat:*)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(d.get('user_id','N/A')) 2 >& 1)",
+      "Shell(python3 -c import json; d=json.load(open('/Users/tranquangdang21/.twr/session.json')); print(d.get('user_id','N/A')) 2 >& 1)",
+      "Shell(python3 -c import json; print(json.dumps(json.load(open('/Users/tranquangdang21/.twr/session.json')), indent=2)) 2 >& 1)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(d.get(\"data\",{}).get(\"followers\",[]))}'))",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(d.get(\"data\",{}).get(\"following\",[]))}'))",
+      "Shell(echo:*)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(d.get(\"data\",{}).get(\"lists\",[]))}'))",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(d.get(\"data\",{}).get(\"users\",[]))}'))",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); convs=d.get('data',{}).get('conversations',[]); print(f'ok={d[\"ok\"]}, type={d[\"type\"]}, count={len(convs)}'); [print(f' conv: {c.get(\"id\")}') for c in convs[:2]])",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(json.dumps(d, indent=2)) 2 >& 1)",
+      "Shell(python3 -c import sys,json; d=json.load(sys.stdin); print(f'ok={d[\"ok\"]}, dry_run={d.get(\"data\",{}).get(\"dry_run\",\"?\")}'))",
+      "Shell(# Test CreateRetweet QID with curl to see if it's drifted COOKIE=$(python3 -c \"import json; d=json.load(open('/Users/tranquangdang21/.twr/session.json')); print(d['full_string'])\") QID=\"ojPdsZsimiJrUGLR1sjUtA\" curl -s -o /dev/null -w \"%{http_code}\" \\ -X POST \"https://x.com/i/api/graphql/${QID}/CreateRetweet\" \\ -H \"Authorization: Bearer f3fdd27cf0188d9a3ee4d1df40ac6ea51facc1eb\" \\ -H \"Content-Type: application/json\" \\ -H \"x-twitter-auth-type: oauth2\" \\ -H \"x-csrf-response-product: retweet\" \\ -H \"x-twitter-client-language: en\" \\ -H \"x-requested-with: XMLHttpRequest\" \\ -H \"x-twitter-features-2: \" \\ -d '{\"variables\":{\"tweet_id\":\"2101689216233353368\",\"dark_request\":false},\"features\":{}}' \\ -b \"$COOKIE\" 2>&1 echo \"\")",
+      "Shell(#:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

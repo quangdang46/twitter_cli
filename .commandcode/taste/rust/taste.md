@@ -1,0 +1,4 @@
+- Uses `cargo check -p <crate>` for targeted crate-level compilation checks rather than full workspace checks. Confidence: 0.85
+- Uses `cargo test --workspace -- --skip <test_name>` to selectively exclude tests (e.g., live network tests) from the test suite. Confidence: 0.9
+- Runs `cargo clippy --workspace --all-targets` as a standard quality gate after compilation and tests pass. Confidence: 0.85
+- Verifies compilation after each targeted edit before running broader checks. Confidence: 0.8
