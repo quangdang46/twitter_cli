@@ -189,7 +189,7 @@ Full rationale — including the 15+ reference projects (Python `twitter-cli`, `
 | P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers + `v0.1.0` tag) |
 | P4 | Official API v2 backend (`--backend api-v2`, OAuth2 PKCE, dual routing) | ✅ code shipped; needs a human's X developer app to fully exercise |
 | P5 | SQLite cache, `twr mcp` server, headlines, guest tiers, `future` | ✅ code shipped; guest tier + MCP smoke-tested live |
-| P6 | Feature-completeness batch: reads + mute/block/pin + long-form/`EditTweet`/polls + DM (shipped, live-verified where accounts allow) | ✅ mostly done — list writes + `dm-send` live-gated, see `REMAINING.md` |
+| P6 | Feature-completeness batch: reads + mute/block/pin + long-form/`EditTweet`/polls + DM (shipped, live-verified where accounts allow) | ✅ mostly done (shipped in `v0.1.1`) — list writes + `dm-send` live-gated, see `REMAINING.md` |
 
 See [`COMPREHENSIVEPLANFORTWITTERCLI.md` §9](COMPREHENSIVEPLANFORTWITTERCLI.md#9-phases--acceptance-criteria) for acceptance criteria per phase, and [`COMPREHENSIVEPLANFORTWITTERCLI.md` §10](COMPREHENSIVEPLANFORTWITTERCLI.md#10-issue-coverage--every-open-issue-in-the-source-repo-accounted-for) for how every open issue in the source Python project is addressed. All 21 open upstream issues have also been notified on the upstream tracker with what the Rust port fixes (or honestly doesn't — e.g. long-form posts and native SigCLI support are documented as out of scope, not claimed).
 
