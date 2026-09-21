@@ -226,13 +226,37 @@ pub fn apply_compact(value: serde_json::Value) -> serde_json::Value {
 
 /// Apply `--fields a.b,c`: post-parse dotted-path projection over the
 /// serialized data value. Unknown paths are skipped (not an error).
+///
+/// Collection envelopes (`tweet_list`, `user_list`, …) are projected
+/// per-item, not at the envelope root: `--fields id,text` on a
+/// `tweet_list` projects each tweet in `data.tweets` (live-found
+/// 2026-09-21: root-level lookup returned `{}` because the envelope root
+/// has no `id`/`text` keys). Pass `tweets.id` only when you want the
+/// envelope shape preserved around the projected items.
 pub fn apply_fields(data: &serde_json::Value, fields: &[String]) -> serde_json::Value {
-    fn get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
-        let mut cur = value;
-        for seg in path {
-            cur = cur.get(seg)?;
+    fn get_path(value: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
+        // Intermediate arrays map the remainder over each item
+        // (`tweets.id` on `{tweets: [{id..}]}` → `[{id..}]`), so dotted
+        // paths keep working on collection envelopes.
+        if path.is_empty() {
+            return Some(value.clone());
         }
-        Some(cur)
+        match value {
+            serde_json::Value::Array(items) => {
+                let mapped: Vec<serde_json::Value> =
+                    items.iter().filter_map(|it| get_path(it, path)).collect();
+                if mapped.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Array(mapped))
+                }
+            }
+            serde_json::Value::Object(_) => {
+                let next = value.get(path[0])?;
+                get_path(next, &path[1..])
+            }
+            _ => None,
+        }
     }
     fn set_path(
         map: &mut serde_json::Map<String, serde_json::Value>,
@@ -264,6 +288,29 @@ pub fn apply_fields(data: &serde_json::Value, fields: &[String]) -> serde_json::
                 })
                 .unwrap_or_default(),
         );
+    }
+    // Collection envelopes carry items under a single array key
+    // (`tweets`, `users`, `lists`, …): project each item so bare field
+    // names (`--fields id,text`) work without forcing callers to spell
+    // the envelope key (`tweets.id`). Explicit `tweets.id` paths keep
+    // working — they resolve against the envelope directly first.
+    if let serde_json::Value::Object(map) = data {
+        let arrays: Vec<(&String, &Vec<serde_json::Value>)> = map
+            .iter()
+            .filter_map(|(k, v)| v.as_array().map(|a| (k, a)))
+            .collect();
+        if arrays.len() == 1 {
+            let (key, items) = arrays[0];
+            if fields.iter().all(|f| !f.contains('.')) {
+                let projected: Vec<serde_json::Value> = items
+                    .iter()
+                    .map(|item| apply_fields(item, fields).clone())
+                    .collect();
+                let mut out = serde_json::Map::new();
+                out.insert(key.clone(), serde_json::Value::Array(projected));
+                return serde_json::Value::Object(out);
+            }
+        }
     }
     let mut out = serde_json::Map::new();
     for field in fields {
@@ -336,6 +383,19 @@ mod tests {
         assert_eq!(out, json!({"id": "1", "author": {"screen_name": "a"}}));
         let arr = apply_fields(&json!([data]), &["id".into()]);
         assert_eq!(arr, json!([{"id": "1"}]));
+    }
+
+    #[test]
+    fn fields_project_each_item_of_collection_envelopes() {
+        // Live-found 2026-09-21: `--fields id,text` on a tweet_list
+        // returned `{}` (root has no id/text). Bare names now project
+        // per item under the single array key.
+        let data = json!({"tweets": [{"id": "1", "text": "hi", "extra": 9}]});
+        let out = apply_fields(&data, &["id".into(), "text".into()]);
+        assert_eq!(out, json!({"tweets": [{"id": "1", "text": "hi"}]}));
+        // Dotted paths keep resolving against the envelope directly.
+        let out2 = apply_fields(&data, &["tweets.id".into()]);
+        assert!(out2.get("tweets").is_some());
     }
 
     #[test]

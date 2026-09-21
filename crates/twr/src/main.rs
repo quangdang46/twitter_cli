@@ -3329,6 +3329,11 @@ fn extract_user_list(payload: &serde_json::Value, max: Option<usize>) -> serde_j
         }
     }
 
+    // Honor --max: first page can carry more entries than requested
+    // (live-found 2026-09-21: followers --max 3 returned 70 users).
+    if let Some(m) = max {
+        users.truncate(m);
+    }
     let returned = users.len();
     let mut data = serde_json::json!({
         "users": users,
@@ -3519,7 +3524,11 @@ async fn run_post_write(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
-    let has_full_cookie = auth.session.full_string.as_deref().is_some_and(|v| !v.trim().is_empty());
+    let has_full_cookie = auth
+        .session
+        .full_string
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty());
     // Upload -i images first (INIT→APPEND→FINALIZE each).
     let mut media_ids: Vec<String> = Vec::new();
     for path in &images {
@@ -4667,9 +4676,7 @@ async fn run_list_write(
             // mutation demonstrably landed (created id present) and the
             // error path points away from the mutation root, report success
             // with the server warning attached — never a fake failure.
-            if extract_created_list_id(&payload).is_some()
-                && is_sub_selection_error(first)
-            {
+            if extract_created_list_id(&payload).is_some() && is_sub_selection_error(first) {
                 let message = first
                     .get("message")
                     .and_then(|m| m.as_str())
@@ -6227,6 +6234,18 @@ mod user_list_tests {
         assert_eq!(data["users"][0]["followers_count"], 41898624);
         assert_eq!(data["page"]["returned"], 1);
         assert_eq!(data["page"]["nextCursor"], "0|NEXT");
+    }
+
+    #[test]
+    fn honors_max_by_truncating_first_page_overflow() {
+        // Live-found 2026-09-21: `followers --max 3` returned 70 users —
+        // a single page can carry more entries than requested, and the old
+        // code never truncated (page.returned lied about maxRequested).
+        let payload = payload_with(vec![spacex(), spacex(), spacex()], "0|NEXT");
+        let data = extract_user_list(&payload, Some(2));
+        assert_eq!(data["users"].as_array().unwrap().len(), 2);
+        assert_eq!(data["page"]["returned"], 2);
+        assert_eq!(data["page"]["maxRequested"], 2);
     }
 
     #[test]
