@@ -24,6 +24,9 @@ jobs:
       - run: cargo test --workspace --all-features
       # i8s regression guard: debug --help once overflowed the Windows
       # main-thread stack (clap ~60-variant enum). The parse now runs on a
-      # 16MB-stack thread; this smoke catches any regression on all OSes
-      # (cargo run is portable across shells — no .exe suffix handling).
-      - run: cargo run -p twr -- --help > /dev/null
+      # 16MB-stack thread; this smoke catches any regression on all OSes.
+      # NOTE: `> /dev/null` is Unix-only — windows-latest runs steps in
+      # PowerShell where `/dev/null` is not a path (live-found 2026-09-21:
+      # "Could not find a part of the path 'D:\dev\null'"). Plain invocation
+      # with no redirect works on all three shells.
+      - run: cargo run -p twr -- --help
