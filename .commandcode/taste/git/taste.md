@@ -1,4 +1,0 @@
-- Uses heredoc syntax (`git commit -F - <<'EOF' ... EOF`) for detailed, multi-line commit messages that explain the full rationale of each change. Confidence: 0.95
-- Includes `Co-authored-by` trailers in commit messages. Confidence: 0.9
-- Stages specific files with explicit paths in `git add` rather than staging all changes. Confidence: 0.8
-- Commits interrupted session work to preserve progress and provide closure. Confidence: 0.7

@@ -1,4 +1,0 @@
-- Writes detailed Rust doc comments (`///`) that explain not just what a function does but the rationale and how it fits into the broader error-handling strategy. Confidence: 0.9
-- References external documentation files (e.g., SKILL.md §6) in doc comments to anchor reasoning. Confidence: 0.7
-- Uses named `let`-binding with `else` patterns (`let Some(x) = expr else { return ...; }`) for explicit guard-style early returns. Confidence: 0.8
-- Documents edge cases and failure modes in function-level comments before the implementation. Confidence: 0.7

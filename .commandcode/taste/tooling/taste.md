@@ -1,5 +1,0 @@
-- Searches for files using `find` in both the real project path and the sandbox/mirror path (`/private/tmp/...`) to locate files in restricted environments. Confidence: 0.85
-- Uses `grep` with `output_mode: "content"` to inspect function/class definitions directly in search results. Confidence: 0.8
-- Reads files with offset and limit parameters to inspect specific line ranges when context is needed. Confidence: 0.8
-- Pipes `cargo test` output through `grep` with regex patterns (`test result|error|FAILED|running`) to extract concise summaries. Confidence: 0.85
-- Uses `git diff --stat` and `git log` / `git status` as a first diagnostic step to understand the current state of a project. Confidence: 0.9
