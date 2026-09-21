@@ -352,10 +352,7 @@ mod tests {
         // SYNTHETIC values only — never a real cookie.
         let raw = "auth_token=fake_synthetic_token; ct0=fake_synthetic_csrf; twid=u%3D1758783014887124992";
         let session = session_from_cookie_string(raw);
-        assert_eq!(
-            session.twid_user_id.as_deref(),
-            Some("1758783014887124992")
-        );
+        assert_eq!(session.twid_user_id.as_deref(), Some("1758783014887124992"));
         assert_eq!(session.self_user_id(), Some("1758783014887124992"));
         // Unencoded form + junk both tolerated.
         assert_eq!(decode_twid_user_id("u=12345"), Some("12345".into()));

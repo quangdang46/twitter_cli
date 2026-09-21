@@ -220,7 +220,13 @@ pub enum PostCheck {
 }
 
 /// Check the post cap AND the cooldown. `now_secs` is epoch seconds.
-pub fn check_post(path: &Path, today: &str, limit: u32, min_interval_secs: u64, now_secs: u64) -> PostCheck {
+pub fn check_post(
+    path: &Path,
+    today: &str,
+    limit: u32,
+    min_interval_secs: u64,
+    now_secs: u64,
+) -> PostCheck {
     let log = load_post_log(path);
     let used = log.days.get(today).copied().unwrap_or(0);
     if used >= limit {
@@ -394,7 +400,10 @@ mod tests {
         );
         // Denials name their own resource/var.
         let d = post_denial_suggestion(10, 10);
-        assert!(d.contains("post budget") && d.contains("TWR_POST_DAILY_BUDGET"), "{d}");
+        assert!(
+            d.contains("post budget") && d.contains("TWR_POST_DAILY_BUDGET"),
+            "{d}"
+        );
         let c = post_cooldown_suggestion(600);
         assert!(c.contains("600") && c.contains("226"), "{c}");
         let _ = std::fs::remove_dir_all(&dir);

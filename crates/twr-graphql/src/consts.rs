@@ -144,7 +144,6 @@ pub const EXTRA_FALLBACK_IDS: &[(&str, &str)] = &[
     ("ListAddMember", "EadD8ivrhZhYQr2pDmCpjA"),
     ("ListAddMember", "lLNsL7mW6gSEQG6rXP7TNw"),
     ("ListRemoveMember", "cvDFkG5WjcXV0Qw5nfe1qQ"),
-
     ("UpdateList", "UzVGAR_brbQw1n3mH_PqRA"),
     ("UpdateList", "dIEI1sbSAuZlxhE0ggrezA"),
     ("ListByRestId", "9hbYpeVBMq8-yB8slayGWQ"),
