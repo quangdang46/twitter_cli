@@ -15,13 +15,19 @@ use twr_core::{decide, ApplyInput};
 
 /// Max attached images per post (plan §1.1).
 pub const MAX_IMAGES: usize = 4;
-/// Max image bytes (5MB; chunked GIF to 15MB lands in 3.4.5).
-pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
-
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
 /// Validate `-i` image paths without uploading. Returns the paths when all
-/// exist, are files, have image extensions, and fit in 5MB.
+/// exist, are files, have image extensions, and fit their per-type size cap.
+///
+/// Extension→MIME and the size caps both come from
+/// [`twr_client::upload`] so this pre-flight check and the uploader can never
+/// disagree (the old local copy enforced a flat 5MB, silently rejecting the
+/// 15MB chunked-GIF path before it was ever reached).
+///
+/// Video is rejected here even though `mime_for` recognises it: `-i` is the
+/// image-gallery slot (4 per post), so a video must go through `--video`,
+/// which is capped at 1 per post. Accepting both through one flag would make
+/// the gallery cap ambiguous.
 pub fn validate_images(paths: &[String]) -> Result<Vec<String>, String> {
     if paths.len() > MAX_IMAGES {
         return Err(format!(
@@ -31,23 +37,53 @@ pub fn validate_images(paths: &[String]) -> Result<Vec<String>, String> {
     }
     for p in paths {
         let path = std::path::Path::new(p);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
-        if !IMAGE_EXTS.contains(&ext.as_str()) {
-            return Err(format!("unsupported image type: {p} (jpeg/png/gif/webp)"));
+        let mime = match twr_client::upload::mime_for(path) {
+            Some(m) => m,
+            None => return Err(format!("unsupported image type: {p} (jpeg/png/gif/webp)")),
+        };
+        if twr_client::upload::is_video(mime) {
+            return Err(format!(
+                "{p} is a video — post it with --video (1 per post), not -i"
+            ));
         }
         let meta = std::fs::metadata(path).map_err(|_| format!("cannot read image file: {p}"))?;
         if !meta.is_file() {
             return Err(format!("not a file: {p}"));
         }
-        if meta.len() > MAX_IMAGE_BYTES {
-            return Err(format!("image over 5MB: {p} (chunked GIF lands in 3.4.5)"));
+        // Per-type cap: 5MB plain image, 15MB chunked GIF. Using the shared
+        // helper keeps this in step with the uploader instead of pre-empting
+        // it with a flat limit.
+        let cap = twr_client::upload::max_bytes_for(mime);
+        if meta.len() > cap {
+            return Err(format!("image over {}MB: {p}", cap / (1024 * 1024)));
         }
     }
     Ok(paths.to_vec())
+}
+
+/// Validate a `--video` path: one video per post, an X-supported video MIME,
+/// within the video cap. Mirrors [`validate_images`] so bad input fails on
+/// `--dry-run` too, before the apply gate.
+pub fn validate_video(path: &str) -> Result<String, String> {
+    let p = std::path::Path::new(path);
+    let mime = match twr_client::upload::mime_for(p) {
+        Some(m) if twr_client::upload::is_video(m) => m,
+        Some(_) => {
+            return Err(format!(
+                "{path} is an image — post it with -i (up to 4 per post), not --video"
+            ))
+        }
+        None => return Err(format!("unsupported video type: {path} (mp4/mov/webm)")),
+    };
+    let meta = std::fs::metadata(p).map_err(|_| format!("cannot read video file: {path}"))?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    let cap = twr_client::upload::max_bytes_for(mime);
+    if meta.len() > cap {
+        return Err(format!("video over {}MB: {path}", cap / (1024 * 1024)));
+    }
+    Ok(path.to_string())
 }
 
 /// Variables for CreateTweet (post / reply / quote / edit share the op).
@@ -397,6 +433,59 @@ mod tests {
         let ok = validate_images(&[p.display().to_string()]).unwrap();
         assert_eq!(ok.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #1: `-i` stays the 4-image gallery and points video at
+    /// `--video`; `--video` takes one video and points images at `-i`.
+    /// Neither flag silently accepts the other's media type.
+    #[test]
+    fn video_and_image_flags_do_not_cross_accept() {
+        let dir = std::env::temp_dir().join(format!("twr-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("a.mp4");
+        std::fs::write(&clip, [0u8; 32]).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+
+        // A video via -i is rejected with a pointer to --video.
+        let err = validate_images(&[clip.display().to_string()]).unwrap_err();
+        assert!(err.contains("--video"), "{err}");
+
+        // An image via --video is rejected with a pointer to -i.
+        let err = validate_video(&png.display().to_string()).unwrap_err();
+        assert!(err.contains("-i"), "{err}");
+
+        // Each flag accepts its own type.
+        assert!(validate_images(&[png.display().to_string()]).is_ok());
+        assert!(validate_video(&clip.display().to_string()).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 5MB/15MB caps are per-type, so a 6MB GIF must pass pre-flight —
+    /// the old flat 5MB check here rejected it before the chunked uploader
+    /// was ever reached.
+    #[test]
+    fn gif_uses_the_fifteen_mb_cap() {
+        let dir = std::env::temp_dir().join(format!("twr-gif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gif = dir.join("big.gif");
+        // 6MB: over the image cap, under the GIF cap.
+        std::fs::write(&gif, vec![0u8; 6 * 1024 * 1024]).unwrap();
+        assert!(validate_images(&[gif.display().to_string()]).is_ok());
+        // The same size as a PNG is over the plain-image cap.
+        let png = dir.join("big.png");
+        std::fs::write(&png, vec![0u8; 6 * 1024 * 1024]).unwrap();
+        let err = validate_images(&[png.display().to_string()]).unwrap_err();
+        assert!(err.contains("over 5MB"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn video_validation_rejects_unknown_type_and_missing_file() {
+        assert!(validate_video("clip.avi").is_err());
+        assert!(validate_video("missing.mp4").is_err());
     }
 
     #[test]

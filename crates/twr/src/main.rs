@@ -140,13 +140,13 @@ enum Command {
         /// Reply target tweet ID.
         #[arg(long)]
         reply_to: Option<String>,
-        /// Attach images (repeatable, up to 4).
+        /// Attach images (repeatable, up to 4; jpeg/png/gif/webp, 5MB, or 15MB GIF).
         #[arg(long, short = 'i')]
         image: Vec<String>,
         /// Compress images to this max dimension (needs `compress` feature).
         #[arg(long)]
         compress: Option<u32>,
-        /// Attach a video (mp4/mov, api-v2 chunked upload; ≤128MB).
+        /// Attach a video (mp4/mov/webm, 1 per post, ≤128MB).
         #[arg(long)]
         video: Option<String>,
         /// Alias for --video.
@@ -769,15 +769,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     serde_json::json!({"error": "--compress needs the `compress` cargo feature"});
                 exit_code = 2;
             } else if video.is_some() || file.is_some() {
-                // v2 video path: validated here, uploaded in run_post_write's
-                // media stage via twr-v2 (STATUS polling); cookie backend
-                // rejects --video with guidance.
+                // Video goes through the normal cookie write path: the upload
+                // stage in `run_post_write` handles `media_category=tweet_video`
+                // + the async STATUS poll on `upload.twitter.com/i/...`
+                // (issue #1). The official API v2 backend keeps its own path.
                 let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
                 let (routed, _) = twr_v2::route("post", backend);
-                if routed != twr_v2::Backend::ApiV2 {
-                    data = serde_json::json!({"error": "--video/--file need --backend api-v2 (cookie backend takes -i images only)"});
-                    exit_code = 2;
-                } else {
+                if routed == twr_v2::Backend::ApiV2 {
                     let vpath = video.or(file).unwrap_or_default();
                     let alt = alt_text.clone();
                     let (d, code) = run_post_write_v2video(
@@ -788,6 +786,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         vpath,
                         alt,
                         idempotency_key,
+                    )
+                    .await;
+                    data = d;
+                    exit_code = code;
+                } else {
+                    let vpath = video.or(file).unwrap_or_default();
+                    let (d, code) = run_post_write(
+                        &opts,
+                        &config,
+                        WriteArgs {
+                            operation: "post",
+                            text,
+                            reply_to,
+                            quote_id: None,
+                            images: image,
+                            video: Some(vpath),
+                            card_uri,
+                            edit_target: None,
+                            idempotency_key,
+                        },
                     )
                     .await;
                     data = d;
@@ -803,6 +821,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         reply_to,
                         quote_id: None,
                         images: image,
+                        video: None,
                         card_uri,
                         edit_target: None,
                         idempotency_key,
@@ -830,6 +849,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     reply_to: Some(id),
                     quote_id: None,
                     images: image,
+                    video: None,
                     card_uri,
                     edit_target: None,
                     idempotency_key,
@@ -854,6 +874,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     reply_to: None,
                     quote_id: None,
                     images: vec![],
+                    video: None,
                     card_uri: None,
                     edit_target: Some(id),
                     idempotency_key,
@@ -1210,6 +1231,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     reply_to: None,
                     quote_id: Some(id),
                     images: image,
+                    video: None,
                     card_uri,
                     edit_target: None,
                     idempotency_key,
@@ -3351,6 +3373,11 @@ struct WriteArgs {
     reply_to: Option<String>,
     quote_id: Option<String>,
     images: Vec<String>,
+    /// Video attachment (issue #1). Uploaded through the same cookie
+    /// `upload.twitter.com/i/media/upload.json` path as `-i`, with
+    /// `media_category=tweet_video` and a STATUS poll. `None` for every
+    /// command but `post`.
+    video: Option<String>,
     /// Poll card URI passthrough (twikit `poll_uri` → `card_uri`; see bead
     /// o1l.4.3 comment — v11 create_card itself is UNCONFIRMED, so twr only
     /// attaches caller-provisioned URIs, never mints them).
@@ -3373,6 +3400,7 @@ async fn run_post_write(
         reply_to,
         quote_id,
         images,
+        video,
         card_uri,
         edit_target,
         idempotency_key,
@@ -3430,9 +3458,22 @@ async fn run_post_write(
             2,
         );
     }
-    // Validate -i up front so even --dry-run fails fast on bad images.
+    // Validate -i/--video up front so even --dry-run fails fast on bad media.
     if let Err(e) = cli::write::validate_images(&images) {
         return (serde_json::json!({"error": e}), 2);
+    }
+    if let Some(v) = &video {
+        if !v.is_empty() && !images.is_empty() {
+            return (
+                serde_json::json!({
+                    "error": "cannot attach a video and images to the same post (X allows 4 photos OR 1 video)"
+                }),
+                2,
+            );
+        }
+        if let Err(e) = cli::write::validate_video(v) {
+            return (serde_json::json!({"error": e}), 2);
+        }
     }
     let stdin_is_tty = true; // TTY prompt path handled below via rpassword-free read
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
@@ -3529,14 +3570,19 @@ async fn run_post_write(
         .full_string
         .as_deref()
         .is_some_and(|v| !v.trim().is_empty());
-    // Upload -i images first (INIT→APPEND→FINALIZE each).
+    // Upload attached media (INIT→APPEND→FINALIZE each), images first then
+    // the optional video. Both use the same cookie upload endpoint; video
+    // differs only by `media_category=tweet_video` + the STATUS poll inside
+    // `upload_media` (issue #1).
     let mut media_ids: Vec<String> = Vec::new();
-    for path in &images {
+    // Images and a video can't share a tweet: X allows 4 photos *or* 1 video.
+    let attachments: Vec<&String> = images.iter().chain(video.iter()).collect();
+    for path in attachments {
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(_) => {
                 return (
-                    serde_json::json!({"error": format!("cannot read image: {path}")}),
+                    serde_json::json!({"error": format!("cannot read media: {path}")}),
                     7,
                 )
             }
@@ -3545,14 +3591,19 @@ async fn run_post_write(
             Some(m) => m,
             None => {
                 return (
-                    serde_json::json!({"error": format!("unsupported image: {path}")}),
+                    serde_json::json!({"error": format!("unsupported media type: {path}")}),
                     2,
                 )
             }
         };
         if data.len() as u64 > twr_client::upload::max_bytes_for(mime) {
             return (
-                serde_json::json!({"error": format!("image too large: {path}")}),
+                serde_json::json!({
+                    "error": format!(
+                        "{} too large: {path}",
+                        if twr_client::upload::is_video(mime) { "video" } else { "image" }
+                    )
+                }),
                 2,
             );
         }
@@ -3571,10 +3622,20 @@ async fn run_post_write(
         match twr_client::upload::upload_media(&transport, &refs, data, mime).await {
             Ok(id) => media_ids.push(id),
             Err(e) => {
+                let (kind, code) = match e {
+                    // A processing timeout or server-side transcode failure is
+                    // not a transport problem — surface it as such so the
+                    // message reads as actionable, not a generic upload error.
+                    twr_client::upload::UploadError::ProcessingTimeout { .. }
+                    | twr_client::upload::UploadError::ProcessingFailed(_) => {
+                        ("media processing", 4)
+                    }
+                    _ => ("upload", 7),
+                };
                 return (
-                    serde_json::json!({"error": format!("upload failed: {e}")}),
-                    7,
-                )
+                    serde_json::json!({"error": format!("{kind} failed: {e}")}),
+                    code,
+                );
             }
         }
     }

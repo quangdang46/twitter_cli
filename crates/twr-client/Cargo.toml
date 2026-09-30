@@ -11,11 +11,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+# `time` for the async video-processing STATUS poll (issue #1).
+tokio = { workspace = true, features = ["time"] }
 wreq = { version = "0.15.3", features = ["cookies", "gzip"] }
 wreq-util = { version = "0.1", features = ["emulation"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# `test-util` backs `#[tokio::test(start_paused = true)]`, so the processing
+# timeout test costs no wall-clock time.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 anyhow = { workspace = true }
 twr-auth = { path = "../twr-auth" }
 twr-graphql = { path = "../twr-graphql" }
