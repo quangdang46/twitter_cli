@@ -1498,7 +1498,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .unwrap_or_else(|| format!("command failed (exit {exit_code})"));
         let kind_enum = twr_core::ErrorKind::from_exit_code(exit_code)
             .unwrap_or(twr_core::ErrorKind::GeneralAuth);
-        let err = twr_core::TwrError::new(kind_enum, message);
+        let err = error_with_data_suggestion(twr_core::TwrError::new(kind_enum, message), &data);
         let envelope: Envelope<serde_json::Value> = Envelope::err(err).with_meta(meta);
         match opts.format {
             OutputFormat::Json => emit(&envelope),
@@ -1516,6 +1516,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         OutputFormat::Toon => twr_core::emit_toon(&envelope),
     }
     Ok(())
+}
+
+/// A handler that explains its own failure (`error` + `suggestion` in its
+/// data) overrides the exit code's generic recovery hint, which can point the
+/// wrong way (exit 6 always says to refresh query ids).
+fn error_with_data_suggestion(
+    err: twr_core::TwrError,
+    data: &serde_json::Value,
+) -> twr_core::TwrError {
+    match (
+        data.get("error"),
+        data.get("suggestion").and_then(|s| s.as_str()),
+    ) {
+        (Some(_), Some(suggestion)) => err.with_suggestion(suggestion),
+        _ => err,
+    }
 }
 
 /// YAML sibling of `twr_core::emit` — the only other allowed stdout print.
@@ -1964,7 +1980,7 @@ fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (AuthFail, 
 }
 
 fn build_ctx<'a>(
-    _opts: &OutputOptions,
+    opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     transport: &'a dyn twr_client::HttpTransport,
     auth: &twr_auth::ResolvedAuth,
@@ -1984,6 +2000,7 @@ fn build_ctx<'a>(
                 inner: twr_tx::ClientTransactionV1::new(kb, c.animation_key),
             })
         });
+    let tx_from_cache = tx.is_some();
     let locale = twr_client::headers::locale_tag(|k| std::env::var(k).ok());
     cli::exec::ExecCtx {
         transport,
@@ -2005,6 +2022,12 @@ fn build_ctx<'a>(
         chrome_major: "133".into(),
         locale,
         tx,
+        tx_cache_path: twr_tx::cache::default_cache_path(),
+        tx_from_cache,
+        tx_attempted: false,
+        tx_failure: None,
+        verbose: opts.verbose > 0,
+        diag: std::sync::Arc::new(|line| eprintln!("{line}")),
     }
 }
 
@@ -3252,13 +3275,14 @@ async fn run_user_list(
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
-    let ctx = build_ctx(opts, config, &transport, &auth);
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
     // POST per Python (followers/following use POST).
     let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
     let url = format!("https://x.com/i/api/graphql/{qid}/{op}");
     let count = max.unwrap_or(20).min(ctx.max_count);
     let vars =
         serde_json::json!({"userId": id, "count": count.min(40), "includePromotedContent": false});
+    ctx.ensure_tx(op).await;
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
         method: "POST",
@@ -4238,45 +4262,14 @@ async fn run_engage(
             Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
         }
     } else {
-        let qid = ctx
-            .query_id(desc.op)
-            .map(|r| r.query_id)
-            .unwrap_or_default();
-        let url = format!("https://x.com/i/api/graphql/{qid}/{}", desc.op);
-        let headers = twr_client::build_headers(&twr_client::HeaderInput {
-            creds: &ctx.creds,
-            method: "POST",
-            os: twr_client::Os::current(),
-            chrome_major: &ctx.chrome_major,
-            locale: &ctx.locale,
-            transaction_id: None,
-        });
-        let refs: Vec<(&str, &str)> = headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let vars = if desc.op == "PinTweet" || desc.op == "UnpinTweet" {
-            cli::write::pin_vars(&target_id)
-        } else {
-            cli::write::tweet_id_vars(desc.op, &target_id)
-        };
-        let mut body = serde_json::Map::new();
-        body.insert("variables".into(), vars);
-        body.insert(
-            "features".into(),
-            serde_json::Value::Object(twr_graphql::compact_features(desc.op)),
-        );
-        let raw = serde_json::to_vec(&body).unwrap_or_default();
-        match ctx.transport.post_json(&url, &refs, &raw).await {
-            Ok(r) => {
+        match cli::exec::post_engage_graphql(&mut ctx, desc.op, &target_id, cmd).await {
+            Ok(post) => {
+                let r = &post.response;
                 if r.status == 429 {
                     return (serde_json::json!({"error": "rate limited"}), 4);
                 }
                 if !(200..300).contains(&r.status) {
-                    return (
-                        serde_json::json!({"error": format!("{cmd} failed: HTTP {}", r.status)}),
-                        6,
-                    );
+                    return (cli::exec::engage_failure_data(&ctx, cmd, desc.op, &post), 6);
                 }
                 // Inner data.errors on HTTP 200: X puts mutation rejections
                 // (88/348/349/226/187/186) INSIDE the body (live-confirmed
@@ -6487,5 +6480,32 @@ mod user_list_tests_tail {
         let data = extract_user_list(&payload, Some(3));
         assert_eq!(data["users"].as_array().unwrap().len(), 1);
         assert_eq!(data["users"][0]["screen_name"], "SpaceX");
+    }
+}
+
+#[cfg(test)]
+mod error_suggestion_tests {
+    use super::*;
+
+    fn exit6(data: serde_json::Value) -> twr_core::TwrError {
+        error_with_data_suggestion(
+            twr_core::TwrError::new(twr_core::ErrorKind::ContractDrift, "boom"),
+            &data,
+        )
+    }
+
+    #[test]
+    fn a_handler_suggestion_replaces_the_exit_code_default() {
+        let err = exit6(serde_json::json!({"error": "boom", "suggestion": "retry later"}));
+        assert_eq!(err.suggestion.as_deref(), Some("retry later"));
+    }
+
+    #[test]
+    fn without_a_handler_suggestion_the_exit_code_default_stays() {
+        let err = exit6(serde_json::json!({"error": "boom"}));
+        assert!(err.suggestion.unwrap().contains("doctor --refresh"));
+        // `state: unknown` writes carry a suggestion but no error message.
+        let err = exit6(serde_json::json!({"state": "unknown", "suggestion": "x"}));
+        assert!(err.suggestion.unwrap().contains("doctor --refresh"));
     }
 }

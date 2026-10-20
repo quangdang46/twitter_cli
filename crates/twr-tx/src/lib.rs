@@ -32,10 +32,17 @@ use thiserror::Error;
 pub use frames::extract_frame_paths;
 
 /// The only ops that need the header, live-probed 2026-07-20 per the
-/// agentic-x reference. Everything else answers 200 without it and must not
+/// agentic-x reference; the bookmark pair answered 404 without it from
+/// 2026-10-20 (issue #3). Everything else answers 200 without it and must not
 /// be sent one — attaching it to an ungated op is one more thing that can
 /// break for no benefit.
-pub const GATED_OPS: [&str; 3] = ["SearchTimeline", "UserTweetsAndReplies", "Followers"];
+pub const GATED_OPS: [&str; 5] = [
+    "SearchTimeline",
+    "UserTweetsAndReplies",
+    "Followers",
+    "CreateBookmark",
+    "DeleteBookmark",
+];
 
 const ADDITIONAL_RANDOM_NUMBER: u8 = 3;
 const DEFAULT_KEYWORD: &str = "obfiowerehiring";
@@ -50,6 +57,10 @@ static VERIFICATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 static INDICES_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(\w\[(\d{1,2})\],\s*16\)").unwrap());
 static NON_DIGIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^0-9]+").unwrap());
+static ONDEMAND_INDEX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[,{](\d+):["']ondemand\.s["']"#).unwrap());
+
+const ONDEMAND_URL_PREFIX: &str = "https://abs.twimg.com/responsive-web/client-web/ondemand.s.";
 
 #[derive(Debug, Error)]
 pub enum TxError {
@@ -97,6 +108,26 @@ pub fn compute_animation_key(
     row_index_key: usize,
     byte_indices: &[usize],
 ) -> Result<String, TxError> {
+    // The inputs come from live pages, so a shape change must surface as an
+    // error the caller can report rather than an index panic.
+    if key_bytes.len() <= 5
+        || byte_indices
+            .iter()
+            .chain([&row_index_key])
+            .any(|&i| i >= key_bytes.len())
+    {
+        return Err(TxError::Derivation(format!(
+            "verification key has {} bytes, too short for the indices the ondemand chunk asks for",
+            key_bytes.len()
+        )));
+    }
+    // With no byte indices the product below would be the empty product, 1,
+    // and a wrong animation key would be cached as if it were derived.
+    if byte_indices.is_empty() {
+        return Err(TxError::Derivation(
+            "the ondemand chunk gave a row index but no frame-time key-byte indices".into(),
+        ));
+    }
     let frame_idx = (key_bytes[5] as u32) % 4;
     let frame_paths = frames.get(&frame_idx).cloned().unwrap_or_default();
     if frame_paths.len() < 2 {
@@ -121,13 +152,61 @@ pub fn compute_animation_key(
         .collect();
 
     let row_index = (key_bytes[row_index_key] as usize) % 16;
+    // `animate` reads the first 11 numbers of the row (colors, rotation, curve).
+    let Some(row) = rows.get(row_index).filter(|r| r.len() >= 11) else {
+        return Err(TxError::Derivation(format!(
+            "loading-x-anim frame {frame_idx} has no usable row {row_index} ({} rows)",
+            rows.len()
+        )));
+    };
     let frame_time_product: i64 = byte_indices
         .iter()
         .map(|&i| (key_bytes[i] as i64) % 16)
         .product();
     let frame_time = math::js_round(frame_time_product as f64 / 10.0) * 10.0;
 
-    Ok(math::animate(&rows[row_index], frame_time / TOTAL_TIME))
+    Ok(math::animate(row, frame_time / TOTAL_TIME))
+}
+
+/// Find the `ondemand.s` chunk URL in the home page's webpack manifest: the
+/// chunk id is the number keyed to `"ondemand.s"`, and the same id keyed to a
+/// hex string elsewhere in the page is its content hash. Same two-step lookup
+/// as `x_client_transaction.utils.get_ondemand_file_url`.
+pub fn find_ondemand_url(html: &str) -> Result<String, TxError> {
+    let id = ONDEMAND_INDEX_RE
+        .captures(html)
+        .ok_or_else(|| TxError::Derivation("no ondemand.s chunk id found in the page".into()))?;
+    let hash_re = Regex::new(&format!(r#"[,{{]{}:"([0-9a-f]+)""#, &id[1])).unwrap();
+    let hash = hash_re.captures(html).ok_or_else(|| {
+        TxError::Derivation(format!(
+            "no content hash found for ondemand.s chunk {}",
+            &id[1]
+        ))
+    })?;
+    Ok(format!("{ONDEMAND_URL_PREFIX}{}a.js", &hash[1]))
+}
+
+/// Derive the cacheable ingredients from the two fetched documents: the home
+/// page and the `ondemand.s` chunk it points at.
+pub fn derive_ingredients(
+    home_html: &str,
+    ondemand_js: &str,
+    now_secs: u64,
+) -> Result<cache::CachedIngredients, TxError> {
+    let key_bytes = extract_verification_key(home_html)?;
+    let indices = extract_key_byte_indices(ondemand_js);
+    let Some((&row_index_key, byte_indices)) = indices.split_first() else {
+        return Err(TxError::Derivation(
+            "no key-byte indices found in the ondemand.s chunk".into(),
+        ));
+    };
+    let frames = extract_frame_paths(home_html);
+    let animation_key = compute_animation_key(&key_bytes, &frames, row_index_key, byte_indices)?;
+    Ok(cache::CachedIngredients::new(
+        &key_bytes,
+        &animation_key,
+        now_secs,
+    ))
 }
 
 /// Compute one transaction id given fully-resolved ingredients. Split out
@@ -251,7 +330,7 @@ mod tests {
             })
             .collect();
         format!(
-            r#"<html><head><meta name="twitter-site-verification" content="{key_b64}"/></head><body>{frames}<script>e={{,59924:"ondemand.s",59924:"deadbeef"}}</script></body></html>"#
+            r#"<html><head><meta name="twitter-site-verification" content="{key_b64}"/></head><body>{frames}<script>a={{59924:"ondemand.s",7:"other"}},b={{59924:"deadbeef",122:"aaaa"}}</script></body></html>"#
         )
     }
 
@@ -307,6 +386,101 @@ mod tests {
             key,
             "58595a0ee147ae147ae1805c28f5c28f5c2805c28f5c28f5c280ee147ae147ae1800"
         );
+    }
+
+    #[test]
+    fn find_ondemand_url_joins_the_chunk_hash_into_the_cdn_path() {
+        assert_eq!(
+            find_ondemand_url(&page()).unwrap(),
+            "https://abs.twimg.com/responsive-web/client-web/ondemand.s.deadbeefa.js"
+        );
+    }
+
+    #[test]
+    fn find_ondemand_url_takes_the_hash_keyed_to_the_ondemand_chunk_id() {
+        let html = r#"a={11:"abc123",5:"ondemand.sx",22:"ondemand.s",33:"ffff"},b={33:"eeee",122:"aaaa",22:"c0ffee"}"#;
+        assert_eq!(
+            find_ondemand_url(html).unwrap(),
+            "https://abs.twimg.com/responsive-web/client-web/ondemand.s.c0ffeea.js"
+        );
+    }
+
+    #[test]
+    fn find_ondemand_url_matches_entries_right_after_a_brace_and_after_a_comma() {
+        let after_brace = r#"a={22:"ondemand.s",1:"x"},b={22:"beef01",1:"aaaa"}"#;
+        let after_comma = r#"a={1:"x",22:"ondemand.s"},b={1:"aaaa",22:"beef01"}"#;
+        for html in [after_brace, after_comma] {
+            assert_eq!(
+                find_ondemand_url(html).unwrap(),
+                "https://abs.twimg.com/responsive-web/client-web/ondemand.s.beef01a.js"
+            );
+        }
+    }
+
+    #[test]
+    fn find_ondemand_url_does_not_take_a_longer_id_ending_in_the_chunk_id() {
+        let html = r#"a={122:"ondemand.s"},b={9122:"aaaa",122:"beef01"}"#;
+        assert_eq!(
+            find_ondemand_url(html).unwrap(),
+            "https://abs.twimg.com/responsive-web/client-web/ondemand.s.beef01a.js"
+        );
+    }
+
+    #[test]
+    fn find_ondemand_url_names_what_is_missing() {
+        let no_id = find_ondemand_url("<html>nothing</html>").unwrap_err();
+        assert!(matches!(no_id, TxError::Derivation(m) if m.contains("no ondemand.s chunk id")));
+        let no_hash = find_ondemand_url(r#"e={22:"ondemand.s",22:"NOT-HEX"}"#).unwrap_err();
+        assert!(matches!(no_hash, TxError::Derivation(m) if m.contains("no content hash")));
+    }
+
+    #[test]
+    fn derive_ingredients_matches_the_python_reference_values() {
+        let got = derive_ingredients(&page(), ondemand_js(), 1_800_000_000).unwrap();
+        assert_eq!(
+            got,
+            cache::CachedIngredients::new(
+                &key_bytes(),
+                "58595a0ee147ae147ae1805c28f5c28f5c2805c28f5c28f5c280ee147ae147ae1800",
+                1_800_000_000
+            )
+        );
+    }
+
+    #[test]
+    fn derive_ingredients_errors_instead_of_panicking_on_a_changed_chunk() {
+        let none = derive_ingredients(&page(), "no indices here", 0).unwrap_err();
+        assert!(matches!(none, TxError::Derivation(m) if m.contains("no key-byte indices")));
+        let tiny_key = r#"<meta name="twitter-site-verification" content="AQID"/>"#;
+        let only_row = derive_ingredients(&page(), "(a[24], 16)", 0).unwrap_err();
+        assert!(matches!(only_row, TxError::Derivation(m) if m.contains("no frame-time")));
+        let short = derive_ingredients(tiny_key, "(a[1], 16)(a[2], 16)", 0).unwrap_err();
+        assert!(matches!(short, TxError::Derivation(m) if m.contains("3 bytes")));
+        for js in ["(a[99], 16)(a[1], 16)", "(a[1], 16)(a[99], 16)"] {
+            let beyond = derive_ingredients(&page(), js, 0).unwrap_err();
+            assert!(matches!(beyond, TxError::Derivation(m) if m.contains("too short")));
+        }
+    }
+
+    #[test]
+    fn derive_ingredients_rejects_animation_rows_too_short_to_animate() {
+        let d = format!("M0 0 C 0 {}", vec!["1 2 3 4 5"; 16].join("C"));
+        let frames: String = (0..4)
+            .map(|i| {
+                format!(
+                    r#"<svg id="loading-x-anim-{i}"><g><path d="M1 1"/><path d="{d}"/></g></svg>"#
+                )
+            })
+            .collect();
+        let html = page().replace(&extract_frames_markup(&page()), &frames);
+        let err = derive_ingredients(&html, ondemand_js(), 0).unwrap_err();
+        assert!(matches!(err, TxError::Derivation(m) if m.contains("no usable row")));
+    }
+
+    fn extract_frames_markup(page: &str) -> String {
+        let start = page.find("<svg").unwrap();
+        let end = page.rfind("</svg>").unwrap() + "</svg>".len();
+        page[start..end].to_string()
     }
 
     #[test]
@@ -385,10 +559,16 @@ mod tests {
     }
 
     #[test]
-    fn gated_ops_are_exactly_the_three_probed_walls() {
+    fn gated_ops_are_exactly_the_probed_walls() {
         assert_eq!(
             GATED_OPS,
-            ["SearchTimeline", "UserTweetsAndReplies", "Followers"]
+            [
+                "SearchTimeline",
+                "UserTweetsAndReplies",
+                "Followers",
+                "CreateBookmark",
+                "DeleteBookmark",
+            ]
         );
     }
 
