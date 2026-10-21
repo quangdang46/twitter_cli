@@ -71,6 +71,37 @@ pub fn user_card(u: &twr_model::UserProfile) -> String {
     )
 }
 
+/// Human table for a list of user profiles (`followers`, `following`,
+/// `list-members`).
+///
+/// Renders from the same `UserProfile` structs the JSON envelope carries --
+/// human is a view, not a second data path. Counts are there so a person
+/// can scan a list; the profile blob in the JSON output is not something
+/// you read by eye.
+pub fn user_table(users: &[twr_model::UserProfile]) -> String {
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
+    table.set_header(vec![
+        "#",
+        "Handle",
+        "Name",
+        "Followers",
+        "Following",
+        "Tweets",
+    ]);
+    for (i, u) in users.iter().enumerate() {
+        table.add_row(vec![
+            i.to_string(),
+            format!("@{}", u.screen_name),
+            u.name.clone(),
+            u.followers_count.to_string(),
+            u.following_count.to_string(),
+            u.tweets_count.to_string(),
+        ]);
+    }
+    table.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +165,34 @@ mod tests {
         let t = tweet("hi");
         let out = tweet_table(std::slice::from_ref(&t), true, TimeMode::Absolute, false);
         assert!(out.contains("2026-03-08T12:00:00+00:00"));
+    }
+
+    fn user(screen_name: &str) -> twr_model::UserProfile {
+        twr_model::UserProfile {
+            id: "1".into(),
+            name: "A Name".into(),
+            screen_name: screen_name.into(),
+            bio: String::new(),
+            location: String::new(),
+            url: String::new(),
+            followers_count: 10,
+            following_count: 5,
+            tweets_count: 7,
+            likes_count: 0,
+            verified: false,
+            profile_image_url: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn user_table_renders_handles_and_counts() {
+        let out = user_table(&[user("spacex"), user("nasa")]);
+        assert!(out.contains("@spacex"));
+        assert!(out.contains("@nasa"));
+        assert!(out.contains("A Name"));
+        assert!(out.contains("Followers"));
+        // Windows-safe ASCII borders, like the tweet table.
+        assert!(!out.contains('─'));
     }
 }

@@ -85,12 +85,12 @@ pub fn tool_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "followers",
-            description: "Followers of user id",
+            description: "Followers of a user id or screen name",
             envelope_type: "user_list",
         },
         ToolDef {
             name: "following",
-            description: "Following of user id",
+            description: "Following of a user id or screen name",
             envelope_type: "user_list",
         },
         ToolDef {

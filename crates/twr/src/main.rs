@@ -562,21 +562,29 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
-    /// Followers of a user id.
+    /// Followers of a user id or screen name.
     Followers {
+        /// Numeric user id, or a screen name (resolved to an id).
         id: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
+        /// Resume from a previous call's `page.nextCursor`.
+        #[arg(long)]
+        cursor: Option<String>,
     },
-    /// Accounts a user id follows.
+    /// Accounts a user id or screen name follows.
     Following {
+        /// Numeric user id, or a screen name (resolved to an id).
         id: String,
         #[arg(long, short = 'n')]
         max: Option<usize>,
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
+        /// Resume from a previous call's `page.nextCursor`.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Today's headlines (trending-search fallback until the Search
     /// Navigation surface is reverse-engineered; issue #47).
@@ -1436,9 +1444,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             id,
             max,
             filter: _filter,
+            cursor,
         } => {
             kind = "user_list";
-            let (d, code) = run_followers(&opts, &config, id, max).await;
+            let (d, code) = run_followers(&opts, &config, id, max, cursor).await;
             data = d;
             exit_code = code;
         }
@@ -1452,9 +1461,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             id,
             max,
             filter: _filter,
+            cursor,
         } => {
             kind = "user_list";
-            let (d, code) = run_following(&opts, &config, id, max).await;
+            let (d, code) = run_following(&opts, &config, id, max, cursor).await;
             data = d;
             exit_code = code;
         }
@@ -2865,6 +2875,7 @@ async fn run_list_members(
     });
     if let Some(c) = cursor {
         data["page"]["nextCursor"] = serde_json::Value::String(c);
+        data["page"]["hasMore"] = serde_json::Value::Bool(true);
     }
     (data, 0)
 }
@@ -3222,8 +3233,9 @@ async fn run_followers(
     config: &twr_config::TwrConfig,
     id: String,
     max: Option<usize>,
+    cursor: Option<String>,
 ) -> (serde_json::Value, i32) {
-    run_user_list(opts, config, "Followers", id, max).await
+    run_user_list(opts, config, "Followers", id, max, cursor).await
 }
 
 async fn run_following(
@@ -3231,17 +3243,72 @@ async fn run_following(
     config: &twr_config::TwrConfig,
     id: String,
     max: Option<usize>,
+    cursor: Option<String>,
 ) -> (serde_json::Value, i32) {
-    run_user_list(opts, config, "Following", id, max).await
+    run_user_list(opts, config, "Following", id, max, cursor).await
+}
+
+/// Resolve a `followers`/`following` argument to a numeric X user id.
+///
+/// A bare numeric id is used as is. Anything else is a screen name and is
+/// resolved through `UserByScreenName` -- the same path `user`, `user-posts`
+/// and `likes` already use. Before this, a screen name went out as `userId`
+/// verbatim and X answered with an empty list, which the caller could not
+/// tell apart from "this account follows nobody" (issue #2).
+///
+/// Three outcomes, each with its own exit code so an agent can tell them
+/// apart: a numeric id (0), an argument that is neither an id nor a possible
+/// screen name (2, usage error), and a screen name that names nobody (3,
+/// not found).
+async fn resolve_user_id(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    arg: &str,
+) -> Result<String, (serde_json::Value, i32)> {
+    let trimmed = arg.trim();
+    if let Some(id) = cli::ids::numeric_user_id(trimmed) {
+        return Ok(id);
+    }
+    let handle = trimmed.trim_start_matches('@');
+    if !cli::ids::is_screen_name(handle) {
+        return Err((
+            serde_json::json!({
+                "error": format!("not a user id or screen name: {arg}"),
+                "suggestion": "pass the numeric user id, or the screen name without the leading '@'",
+            }),
+            2,
+        ));
+    }
+    let (udata, code) = run_user(opts, config, handle.to_string()).await;
+    if code != 0 {
+        return Err((udata, code));
+    }
+    match udata.get("id").and_then(|v| v.as_str()) {
+        Some(id) => Ok(id.to_string()),
+        None => Err((
+            serde_json::json!({
+                "error": format!("user @{handle} not found"),
+                "suggestion": "verify the screen name; `twr user @{handle}` must resolve first",
+            }),
+            3,
+        )),
+    }
 }
 
 async fn run_user_list(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     op: &str,
-    id: String,
+    arg: String,
     max: Option<usize>,
+    cursor: Option<String>,
 ) -> (serde_json::Value, i32) {
+    // The user id is resolved before the list is fetched: a screen name has
+    // to become a numeric id, or X answers with an empty list (issue #2).
+    let id = match resolve_user_id(opts, config, &arg).await {
+        Ok(uid) => uid,
+        Err((data, code)) => return (data, code),
+    };
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
@@ -3274,7 +3341,7 @@ async fn run_user_list(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let mut body = serde_json::Map::new();
-    body.insert("variables".into(), vars);
+    body.insert("variables".into(), user_list_vars(vars, cursor.as_ref()));
     body.insert(
         "features".into(),
         serde_json::Value::Object(twr_graphql::compact_features(op)),
@@ -3294,9 +3361,50 @@ async fn run_user_list(
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    if let Some((data, code)) = user_list_target_error(&payload) {
+        return (data, code);
+    }
     let _ = config;
     let _ = opts;
     (extract_user_list(&payload, max), 0)
+}
+
+/// Add the resume cursor to a user-list request's variables.
+///
+/// `--cursor` resumes where the previous page stopped, so the cursor the
+/// envelope hands out is something the caller can act on.
+fn user_list_vars(mut vars: serde_json::Value, cursor: Option<&String>) -> serde_json::Value {
+    if let Some(c) = cursor {
+        vars["cursor"] = serde_json::json!(c);
+    }
+    vars
+}
+
+/// Detect a payload that names no user.
+///
+/// X answers a `userId` it does not know without a `user.result` object (or
+/// with a `UserUnavailable` one). That used to reach the caller as an empty
+/// list -- the same thing a user with no followers produces -- so a typo in
+/// the id was indistinguishable from an empty account.
+fn user_list_target_error(payload: &serde_json::Value) -> Option<(serde_json::Value, i32)> {
+    let result = payload.pointer("/data/user/result");
+    let found = match result {
+        Some(r) => {
+            r.as_object().is_some_and(|o| !o.is_empty())
+                && r.get("__typename").and_then(|t| t.as_str()) != Some("UserUnavailable")
+        }
+        None => false,
+    };
+    if found {
+        return None;
+    }
+    Some((
+        serde_json::json!({
+            "error": "user not found or not visible",
+            "suggestion": "verify the user id or screen name; a protected account answers without a list",
+        }),
+        3,
+    ))
 }
 
 /// Pure extraction from a Followers/Following GraphQL payload -- split out
@@ -3332,10 +3440,13 @@ fn extract_user_list(payload: &serde_json::Value, max: Option<usize>) -> serde_j
         for entry in entries {
             let content = entry.get("content").unwrap_or(&serde_json::Value::Null);
             if content.get("cursorType").and_then(|c| c.as_str()) == Some("Bottom") {
-                next_cursor = content
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
+                // An empty cursor value means the list ended -- it is not a
+                // cursor the caller can resume from.
+                if let Some(v) = content.get("value").and_then(|v| v.as_str()) {
+                    if !v.is_empty() {
+                        next_cursor = Some(v.to_string());
+                    }
+                }
                 continue;
             }
             let Some(result) = content
@@ -3357,12 +3468,25 @@ fn extract_user_list(payload: &serde_json::Value, max: Option<usize>) -> serde_j
         users.truncate(m);
     }
     let returned = users.len();
+    // `truncated` keeps its documented meaning everywhere else in the
+    // envelope: partial data from a rate limit (SCHEMA.md). A rate limit
+    // never reaches here -- it returns its own `{"users": [], "truncated":
+    // true}` shape with exit 4 -- so it stays false. "There is more" is
+    // `hasMore` + `nextCursor`, the fields `tweet_list` and `list_list`
+    // already use. This page object used to carry a bare `nextCursor` with
+    // no `hasMore`, which read as "nothing more" next to a `returned` below
+    // `maxRequested` (issue #2).
     let mut data = serde_json::json!({
         "users": users,
-        "page": {"returned": returned, "maxRequested": max, "truncated": false},
+        "page": {
+            "returned": returned,
+            "maxRequested": max,
+            "truncated": false,
+        },
     });
     if let Some(cursor) = next_cursor {
         data["page"]["nextCursor"] = serde_json::Value::String(cursor);
+        data["page"]["hasMore"] = serde_json::Value::Bool(true);
     }
     data
 }
@@ -5300,6 +5424,29 @@ fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> S
             return cli::table::user_card(&u);
         }
     }
+    if kind == "user_list" {
+        let users: Vec<twr_model::UserProfile> = data
+            .get("users")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        // An empty list gets a line, not a bare table: a header over no rows
+        // reads like a rendering bug rather than "nothing came back".
+        let mut out = if users.is_empty() {
+            "no users returned".to_string()
+        } else {
+            cli::table::user_table(&users)
+        };
+        // Pagination the JSON envelope carries is worth carrying here too --
+        // the cursor is what makes the list continuable.
+        if let Some(cursor) = data
+            .pointer("/page/nextCursor")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+        {
+            out.push_str(&format!("\nmore available: --cursor {cursor}"));
+        }
+        return out;
+    }
     if kind == "tweet_detail" || kind == "article" {
         if let Ok(t) = serde_json::from_value::<twr_model::Tweet>(data.clone()) {
             return cli::table::tweet_table(std::slice::from_ref(&t), true, opts.time_mode, false);
@@ -6332,6 +6479,69 @@ mod user_list_tests {
         assert_eq!(data["users"].as_array().unwrap().len(), 1);
         assert_eq!(data["users"][0]["screen_name"], "SpaceX");
     }
+
+    /// Issue #2 (2026-10-18): a numeric id with `--max 100` returned 50
+    /// users for an account that follows 63, and the page object said
+    /// `truncated: false` next to a `nextCursor` -- which reads as "nothing
+    /// more" while `returned < maxRequested`. "There is more" is `hasMore`
+    /// everywhere else in the envelope; this shape never set it.
+    #[test]
+    fn a_cursor_below_max_requested_is_reported_as_has_more() {
+        let payload = payload_with(vec![spacex(), spacex()], "0|NEXT");
+        let data = extract_user_list(&payload, Some(100));
+        assert_eq!(data["page"]["returned"], 2);
+        assert_eq!(data["page"]["maxRequested"], 100);
+        assert_eq!(data["page"]["hasMore"], true);
+        assert_eq!(data["page"]["nextCursor"], "0|NEXT");
+        // `truncated` keeps its documented meaning: partial data from a
+        // rate limit, which never reaches this shape.
+        assert_eq!(data["page"]["truncated"], false);
+    }
+
+    #[test]
+    fn a_list_that_ends_has_no_cursor_and_no_has_more() {
+        // X either omits the Bottom cursor entry or sends an empty value;
+        // neither is a cursor the caller can resume from.
+        for payload in [
+            payload_with(vec![spacex()], ""),
+            json!({
+                "data": { "user": { "result": { "timeline": { "timeline": {
+                    "instructions": [
+                        { "type": "TimelineClearCache" },
+                        { "type": "TimelineAddEntries", "entries": [
+                            { "content": { "itemContent": { "user_results": { "result": spacex() } } } }
+                        ]}
+                    ]
+                }}}}}
+            }),
+        ] {
+            let data = extract_user_list(&payload, Some(100));
+            assert_eq!(data["page"]["truncated"], false);
+            assert!(data["page"].get("hasMore").is_none());
+            assert!(data["page"].get("nextCursor").is_none());
+        }
+    }
+
+    /// A payload that names no user used to reach the caller as an empty
+    /// list -- the same thing an account with no followers produces.
+    #[test]
+    fn a_payload_without_a_user_result_is_reported_as_not_found() {
+        for payload in [
+            json!({ "data": { "user": { "result": {} } } }),
+            json!({ "data": { "user": { "result": { "__typename": "UserUnavailable" } } } }),
+            json!({ "data": {} }),
+        ] {
+            let (data, code) = user_list_target_error(&payload).expect("should be an error");
+            assert_eq!(code, 3);
+            assert_eq!(data["error"], "user not found or not visible");
+        }
+    }
+
+    #[test]
+    fn a_payload_with_a_user_result_is_not_an_error() {
+        let payload = payload_with(vec![spacex()], "0|NEXT");
+        assert!(user_list_target_error(&payload).is_none());
+    }
 }
 
 /// Bead o1l.1.8 §3 — catalog parity anchor: every P6.1 command/type the
@@ -6447,6 +6657,70 @@ mod p65_catalog_tests {
         for name in ["dm-list", "dm-read", "dm-send"] {
             assert!(names.contains(&name), "{name} missing from commands_data");
         }
+    }
+}
+
+/// The human view of a user list (`followers`, `following`, `list-members`).
+/// A list of users is for scanning, not for reading as JSON, and an empty
+/// one has to say so rather than render a header over nothing.
+#[cfg(test)]
+mod human_user_list_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn profile() -> twr_model::UserProfile {
+        twr_model::UserProfile {
+            id: "34743251".into(),
+            name: "SpaceX".into(),
+            screen_name: "SpaceX".into(),
+            bio: String::new(),
+            location: String::new(),
+            url: String::new(),
+            followers_count: 41_929_264,
+            following_count: 127,
+            tweets_count: 11_902,
+            likes_count: 529,
+            verified: true,
+            profile_image_url: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    fn opts() -> OutputOptions {
+        OutputOptions::new(Some("t".into()))
+    }
+
+    #[test]
+    fn a_user_list_renders_as_a_table_not_a_json_dump() {
+        let data = json!({
+            "users": [profile()],
+            "page": {"returned": 1, "maxRequested": null, "truncated": false}
+        });
+        let out = render_human("user_list", &data, &opts());
+        assert!(out.contains("@SpaceX"));
+        assert!(out.contains("41929264"));
+        assert!(!out.contains("profile_image_url"));
+    }
+
+    #[test]
+    fn an_empty_user_list_says_so() {
+        let data =
+            json!({"users": [], "page": {"returned": 0, "maxRequested": null, "truncated": false}});
+        let out = render_human("user_list", &data, &opts());
+        assert_eq!(out, "no users returned");
+    }
+
+    #[test]
+    fn a_user_list_with_more_pages_says_how_to_get_them() {
+        let data = json!({
+            "users": [profile()],
+            "page": {
+                "returned": 1, "maxRequested": 1, "truncated": true,
+                "nextCursor": "0|NEXT", "hasMore": true
+            }
+        });
+        let out = render_human("user_list", &data, &opts());
+        assert!(out.contains("more available: --cursor 0|NEXT"));
     }
 }
 
