@@ -53,8 +53,12 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 - `mentions` vs `notifications`: SAME REST endpoint family (`/i/api/2/notifications/{mentions,all}.json`), server-side kind filter — `mentions` is not a client-side filter over `all`, and neither is `UserTweetsAndReplies`-on-self (that returns your own posts+replies, not others' mentions of you)
 - `tweet_detail`: a single `Tweet`
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
-- `user` / `user_list`: `UserProfile` / `{"users": [...]}` (list parsing
-  completes with fixture parity)
+- `user` / `user_list`: `UserProfile` / `{"users": [...], "page": {...}}` (list parsing
+  completes with fixture parity). `followers`/`following` take a numeric user id **or a
+  screen name** (resolved through `UserByScreenName`); an argument that is neither exits 2,
+  a name that resolves to nobody exits 3. `page` carries `returned`, `maxRequested`,
+  `truncated` (partial data from a rate limit, as elsewhere) and `nextCursor`/`hasMore`
+  when more exist — pass `nextCursor` back as `--cursor` to continue
 - `status`: `{"authenticated": bool, "source": "flags|env|file|browser"|null, ...}`
 - `auth`: login/logout results (`{"saved": bool, ...}`)
 - `write_result`: `{"id"|"ok"|"dry_run": ...}` or `{"error": ...}`. `post`/`quote`

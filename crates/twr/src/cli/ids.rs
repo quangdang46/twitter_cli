@@ -55,6 +55,31 @@ pub fn normalize_list_id(input: &str) -> Option<String> {
     }
 }
 
+/// A bare numeric X user id, if the argument is one.
+///
+/// X user ids are decimal digits; anything else is a screen name that still
+/// has to be resolved (`UserByScreenName`) before it can be used as a
+/// `userId`. Sending a screen name as `userId` used to come back as an
+/// empty list, which the caller could not tell apart from "this account
+/// follows nobody" (issue #2).
+pub fn numeric_user_id(input: &str) -> Option<String> {
+    let s = input.trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// Whether a string can be an X screen name: `[A-Za-z0-9_]{1,15}`.
+///
+/// A user argument outside that shape is neither an id nor a handle, so it
+/// is a usage error rather than a lookup that would come back empty.
+pub fn is_screen_name(input: &str) -> bool {
+    !input.is_empty()
+        && input.len() <= 15
+        && input.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Default last-list path: `~/.twr/last.json`.
 pub fn default_last_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
@@ -102,6 +127,23 @@ mod tests {
         assert_eq!(normalize_tweet_id("https://x.com/u/status/"), None);
         assert_eq!(normalize_tweet_id("not a url"), None);
         assert_eq!(normalize_tweet_id(""), None);
+    }
+
+    #[test]
+    fn user_id_and_screen_name_shapes_are_told_apart() {
+        assert_eq!(numeric_user_id("123"), Some("123".into()));
+        assert_eq!(numeric_user_id("  123  "), Some("123".into()));
+        assert_eq!(numeric_user_id("nasa"), None);
+        assert_eq!(numeric_user_id(""), None);
+        assert_eq!(numeric_user_id("12a"), None);
+
+        assert!(is_screen_name("nasa"));
+        assert!(is_screen_name("a_b_c"));
+        assert!(is_screen_name("User123"));
+        assert!(!is_screen_name(""));
+        assert!(!is_screen_name("has space"));
+        assert!(!is_screen_name("has-a-dash"));
+        assert!(!is_screen_name("sixteencharacters"));
     }
 
     #[test]
