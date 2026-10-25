@@ -129,7 +129,7 @@ mod tests {
             })
             .collect();
         format!(
-            r#"<html><head><meta name="twitter-site-verification" content="AAAA"/></head><body>{frames}<script>e={{,59924:"ondemand.s",59924:"deadbeef"}}</script></body></html>"#
+            r#"<html><head><meta name="twitter-site-verification" content="AAAA"/></head><body>{frames}<script>a={{59924:"ondemand.s",7:"other"}},b={{59924:"deadbeef",122:"aaaa"}}</script></body></html>"#
         )
     }
 
