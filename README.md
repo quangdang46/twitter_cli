@@ -17,7 +17,7 @@
 **A Rust CLI for X/Twitter, built for AI agents first and humans second — reading and posting through your own logged-in session, no developer API key required.**
 It talks to X's internal GraphQL surface the same way your browser does (cookie auth, browser-matched TLS, a real `x-client-transaction-id`), and wraps every command in a stable JSON/YAML/[TOON](https://github.com/toon-format/toon) envelope with frozen exit codes, so an agent can drive it without ever screen-scraping stdout.
 
-> **Status: v0.1.0 released and live-verified.** The full read surface (feed, bookmarks, search incl. the transaction-gated Latest path, tweet detail, user/timelines, followers/following, lists, articles, headlines) and the full write surface (post/reply/quote, like/retweet/bookmark/follow + reverses, media upload, idempotency, `--policy`, daily budget) are implemented across 11 crates, tested by 196 unit/integration tests, and verified end-to-end against real x.com — including real posts, replies, likes, and follows from a live session. See [Roadmap](#roadmap) for what's shipped vs. what's still future work (official API v2 extras, long-form posts, MCP extras).
+> **Status: v0.1.2 released and live-verified.** The full read surface (feed, bookmarks, search incl. the transaction-gated Latest path, tweet detail, user/timelines, followers/following, lists, articles, headlines) and the full write surface (post/reply/quote, like/retweet/bookmark/follow + reverses, media upload incl. MP4 video, idempotency, `--policy`, daily budget) are implemented across 11 crates, tested by 305 unit/integration tests, and verified end-to-end against real x.com — including real posts, replies, likes, follows and bookmarks from a live session. See [Roadmap](#roadmap) for what's shipped vs. what's still future work (official API v2 extras, long-form posts, MCP extras).
 
 ---
 
@@ -184,9 +184,9 @@ Full rationale — including the 15+ reference projects (Python `twitter-cli`, `
 | Phase | Scope | Status |
 |---|---|---|
 | P0 | Transport + cookie-extraction + transaction-ID viability spike | ✅ done (live-verified; P0-4 recorded as bead comments) |
-| P1 | Read commands (feed/search/tweet/user/...) + full agent contract | ✅ done (196 tests, fixture + semantic parity) |
+| P1 | Read commands (feed/search/tweet/user/...) + full agent contract | ✅ done (305 tests, fixture + semantic parity) |
 | P2 | Write commands + media upload + idempotency + policy gating | ✅ done (live post/reply/like/retweet/bookmark/follow round-trips) |
-| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers + `v0.1.0` tag) |
+| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers, `v0.1.0`–`v0.1.2` tags) |
 | P4 | Official API v2 backend (`--backend api-v2`, OAuth2 PKCE, dual routing) | ✅ code shipped; needs a human's X developer app to fully exercise |
 | P5 | SQLite cache, `twr mcp` server, headlines, guest tiers, `future` | ✅ code shipped; guest tier + MCP smoke-tested live |
 | P6 | Feature-completeness batch: reads + mute/block/pin + long-form/`EditTweet`/polls + DM (shipped, live-verified where accounts allow) | ✅ mostly done (shipped in `v0.1.1`) — list writes + `dm-send` live-gated, see `REMAINING.md` |
@@ -232,6 +232,6 @@ Shipped at repo root — the agent playbook (status gate first, `--json --max 20
 
 <div align="center">
 
-*Built contract-first from [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) — 196 tests green, live-verified against real x.com, released as `v0.1.0`.*
+*Built contract-first from [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) — 305 tests green, live-verified against real x.com, released as `v0.1.2`.*
 
 </div>
