@@ -628,13 +628,38 @@ async fn main() -> anyhow::Result<()> {
     // the main thread before the runtime spins up). Parse inside an
     // explicitly large-stack thread so debug --help works everywhere; the
     // rest of main stays unchanged below.
-    let cli = std::thread::Builder::new()
+    let parsed = std::thread::Builder::new()
         .name("twr-cli-parse".into())
         .stack_size(16 * 1024 * 1024)
-        .spawn(Cli::parse)
+        .spawn(Cli::try_parse)
         .expect("spawn cli-parse thread")
         .join()
         .expect("cli-parse thread");
+    let cli = match parsed {
+        Ok(cli) => cli,
+        Err(err) => {
+            // Usage errors are part of the envelope contract too (bead
+            // 0p9): clap's message goes to stderr for humans, and stdout
+            // still gets exactly one ok:false document.
+            let code = err.exit_code();
+            if code == 0 {
+                // --help/--version: clap already rendered to stdout.
+                let _ = err.print();
+                std::process::exit(0);
+            }
+            let _ = err.print();
+            let err_env: Envelope<serde_json::Value> = Envelope::err(twr_core::TwrError::new(
+                twr_core::ErrorKind::UsagePolicyDenied,
+                format!(
+                    "invalid invocation: {}",
+                    err.to_string().lines().next().unwrap_or("usage error")
+                ),
+            ))
+            .with_meta(Meta::new(twr_core::new_trace_id()));
+            emit(&err_env);
+            std::process::exit(code.max(2));
+        }
+    };
     run(cli).await
 }
 
@@ -1534,13 +1559,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // Human view: no explicit machine flag AND a real TTY → render the
     // table. Piped stdout with no flag resolves to YAML above (bead gtg —
     // the auto-YAML-when-piped contract was dead because this branch
-    // swallowed every flagless invocation).
-    if stdout_is_tty && !cli.json && !cli.yaml && !cli.toon {
+    // swallowed every flagless invocation). Failures NEVER take this path
+    // (bead 0p9): a non-zero exit must emit the ok:false envelope, not a
+    // bare pretty-printed {"error": ...} data blob.
+    if exit_code == 0 && stdout_is_tty && !cli.json && !cli.yaml && !cli.toon {
         let text = render_human(kind, &data, &opts);
         println!("{text}");
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
         return Ok(());
     }
 
@@ -1767,6 +1791,45 @@ fn catalog_entries() -> Vec<(String, &'static str, String)> {
     out
 }
 
+/// Field-level schemas for each envelope `type` (bead 0p9 — `twr schema`
+/// used to print only name→type pairs despite promising "the envelope
+/// schema"). Values are JSON-Schema-flavored descriptors; `?` marks
+/// optional fields, `[]` an array, `(cmd)` notes command-specific extras.
+fn schema_type_fields() -> serde_json::Value {
+    let tweet = "Tweet (see SCHEMA.md §Tweet/UserProfile)";
+    let page = "{returned:int, truncated?:bool, nextCursor?:string, hasMore?:bool, maxRequested?:int, filterApplied?:bool}";
+    serde_json::json!({
+        "tweet_list": {
+            "tweets": format!("{tweet}[]"),
+            "page": page,
+            "query": "string? (cache-search echoes the FTS query)"
+        },
+        "tweet_detail": tweet,
+        "article": {"title": "string", "markdown": "string"},
+        "user": "UserProfile (see SCHEMA.md §Tweet/UserProfile)",
+        "user_list": {"users": "UserProfile[]", "page": page},
+        "list_list": {"lists": "TwitterList[]", "page": page},
+        "notification_list": {
+            "events": "NotificationEvent[]",
+            "tweets": format!("{tweet}[]"),
+            "page": page
+        },
+        "headline_list": {"headlines": format!("{tweet}[]"), "query": "string", "fallback": "string"},
+        "bookmark_folder_list": {"folders": "[{id,name}]", "page": "{returned:int}"},
+        "watchlist": {"watchlist?": "string[]", "watched?": "bool", "unwatched?": "bool", "handle?": "string", "dry_run?": "bool"},
+        "write_result": {"id?": "string", "ok?": "bool", "operation?": "string", "dry_run?": "bool", "graphql_operation?": "CreateTweet|CreateNoteTweet", "idempotent_replay?": "bool", "error?": "string"},
+        "dm_list": {"conversations": "DmConversation[]", "page": page},
+        "dm_message_list": {"conversation_id": "string", "messages": "DmMessage[]", "page": page},
+        "status": {"authenticated": "bool", "source": "flags|env|file|browser|null", "hint?": "string", "browser_requested?": "bool", "chrome_profile_requested?": "bool", "trace_id": "string"},
+        "auth": {"saved?": "bool", "logged_out?": "bool", "guide?": "string", "api_v2?": "bool"},
+        "doctor": {"checks": "[{check:AUTH|CONFIG|QUERY_ID|TX_ID|TLS|CACHE, status:pass|warn|fail, suggestion?, detail?}]", "refresh_requested": "bool"},
+        "query-ids": {"operations": "[{operation, query_id, source?}]"},
+        "schema": "this document",
+        "commands": "[{name, type, desc}] inventory",
+        "error": {"code": "ErrorKind", "message": "string", "suggestion?": "string", "retryable": "bool", "retryAfterMs?": "int", "failingInput?": "{flag,value}"}
+    })
+}
+
 /// `twr schema`: envelope types per command.
 fn schema_data() -> serde_json::Value {
     let commands: Vec<serde_json::Value> = catalog_entries()
@@ -1776,6 +1839,7 @@ fn schema_data() -> serde_json::Value {
     serde_json::json!({
         "schema_version": "1",
         "commands": commands,
+        "types": schema_type_fields(),
     })
 }
 
@@ -2038,8 +2102,10 @@ fn read_auth(opts: &OutputOptions) -> Result<twr_auth::ResolvedAuth, (AuthFail, 
     // NOTE: single-print-owner — do NOT emit here. The caller emits one
     // Envelope::err and sets exit 77.
     resolved.ok_or_else(|| {
-        let err = twr_core::TwrError::auth_required("no X session — run `twr login --guide`")
-            .with_failing_input("--auth-token", "missing");
+        // No failing_input here (bead 0p9): FlagInput is always default in
+        // this path, so attaching "--auth-token: [REDACTED]" reported a
+        // flag the user never passed — phantom noise on every auth error.
+        let err = twr_core::TwrError::auth_required("no X session — run `twr login --guide`");
         let _ = opts;
         (AuthFail::Envelope(err), 77)
     })
@@ -3646,6 +3712,29 @@ async fn run_post_write(
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
+    // Client-side input validation (bead 0p9): empty/whitespace text and
+    // unparseable reply/quote targets are usage errors (exit 2) — they
+    // must fail even on --dry-run, before budgets or the apply gate.
+    if text.trim().is_empty() {
+        return (
+            serde_json::json!({"error": format!("{operation} text is empty or whitespace")}),
+            2,
+        );
+    }
+    for (label, target) in [
+        ("reply target", reply_to.as_deref()),
+        ("quote target", quote_id.as_deref()),
+        ("edit target", edit_target.as_deref()),
+    ] {
+        if let Some(t) = target {
+            if cli::ids::normalize_tweet_id(t).is_none() {
+                return (
+                    serde_json::json!({"error": format!("{label} is not a tweet ID or x.com URL: {t}")}),
+                    2,
+                );
+            }
+        }
+    }
     // Fail CLOSED when no state dir exists (bead nku): budgets/idempotency
     // cannot be enforced, so the write is refused before any side effect.
     if let Err(e) = require_write_state() {
@@ -5408,6 +5497,21 @@ async fn run_dm_send(
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    // Client-side input validation (bead 0p9): the recipient must be a
+    // numeric X user id and the text non-empty — usage errors (exit 2)
+    // that fail even on --dry-run, before budgets or the apply gate.
+    if user_id.trim().is_empty() || !user_id.trim().chars().all(|c| c.is_ascii_digit()) {
+        return (
+            serde_json::json!({"error": format!("dm-send recipient must be a numeric user id, got: {user_id}")}),
+            2,
+        );
+    }
+    if text.trim().is_empty() {
+        return (
+            serde_json::json!({"error": "dm-send text is empty or whitespace"}),
+            2,
+        );
+    }
     // Fail CLOSED when no state dir exists (bead nku): DM budgets and
     // idempotency cannot be enforced, so refuse before any side effect.
     if let Err(e) = require_write_state() {
@@ -5745,8 +5849,21 @@ fn run_cache_search(query: &str, max: usize) -> (serde_json::Value, i32) {
         Ok(c) => c,
         Err(e) => return (serde_json::json!({"error": e.to_string()}), 7),
     };
-    match twr_cache::search(&conn, query, max) {
-        Ok(ids) => (serde_json::json!({"ids": ids, "query": query}), 0),
+    match twr_cache::search_tweets(&conn, query, max) {
+        // SCHEMA.md tweet_list shape: {"tweets": Tweet[], "page": {...}}.
+        // `query` is echoed top-level for the caller's convenience (the
+        // cache stores no richer Tweet fields — see twr-cache::search_tweets).
+        Ok(tweets) => {
+            let returned = tweets.len();
+            (
+                serde_json::json!({
+                    "tweets": tweets,
+                    "query": query,
+                    "page": {"returned": returned},
+                }),
+                0,
+            )
+        }
         Err(e) => (serde_json::json!({"error": e.to_string()}), 2),
     }
 }

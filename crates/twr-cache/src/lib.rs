@@ -161,6 +161,49 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<String
     Ok(ids)
 }
 
+/// FTS5 search returning tweet-shaped JSON rows in rank order — the
+/// `tweet_list` payload for `twr cache-search` (bead 0p9: the command used
+/// to emit a bare `{ids, query}` shape that diverged from SCHEMA.md's
+/// `{"tweets": Tweet[], "page": {...}}`). Rows carry the fields the cache
+/// actually stores: id, text, author.screen_name, created_at, metrics.
+pub fn search_tweets(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, CacheError> {
+    use rusqlite::OptionalExtension;
+    let ids = search(conn, query, limit)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, author_screen_name, text, created_at, metrics_json FROM tweets WHERE id = ?1",
+    )?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let row = stmt
+            .query_row(params![id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .optional()?;
+        if let Some((id, author, text, created_at, metrics_json)) = row {
+            let metrics: serde_json::Value =
+                serde_json::from_str(&metrics_json).unwrap_or_else(|_| serde_json::json!({}));
+            out.push(serde_json::json!({
+                "id": id,
+                "text": text,
+                "author": {"screen_name": author},
+                "created_at": created_at,
+                "metrics": metrics,
+            }));
+        }
+    }
+    Ok(out)
+}
+
 /// Get one cached tweet's raw row (id, author, text, created_at).
 pub fn get(
     conn: &Connection,

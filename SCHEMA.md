@@ -10,7 +10,7 @@ Every machine invocation prints exactly one document on stdout
 {
   "ok": true,
   "schema_version": "1",
-  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dry_run|dm_list|dm_message_list",
+  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dm_list|dm_message_list|notification_list|list_list|headline_list|bookmark_folder_list|watchlist|error",
   "data": {},
   "pagination": {"nextCursor": "…", "hasMore": true},
   "meta": {"traceId": "…", "command": "search", "maxRequested": 20, "returned": 20, "filterApplied": false}
@@ -45,7 +45,17 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 
 ## Types
 
-- `tweet_list`: `{"tweets": Tweet[], "page": {...}}` (also used by `bookmarks --folder <id>`)
+- `tweet_list`: `{"tweets": Tweet[], "page": {...}}` (also used by `bookmarks --folder <id>`
+  and `cache-search`, which adds a top-level `"query"` echo and emits cache-partial
+  Tweet rows — `id/text/author.screen_name/created_at/metrics` only)
+- `watchlist`: `{"watchlist": string[]}` from `watch list`; gated `watch add/remove`
+  return `{"watched"|"unwatched": true, "handle": str}` on `--apply`, or the shared
+  dry-run shape `{"dry_run": true, "operation": "watch-add|watch-remove",
+  "validation": "passed", "handle": str, "local_only": true}` on `--dry-run`
+- `future`: emits the INNER command's envelope type (`tweet_list`/`tweet_detail`/`user`) —
+  `twr future -d <secs> feed|search|user|tweet` sleeps once, then really runs the read
+- `completions`/`mcp` are the only commands with NO envelope (`type: "none"` in
+  `twr commands`): completions prints a shell script, mcp serves JSON-RPC stdio
 - `bookmark_folder_list`: `{"folders": [{id, name}], "page": {"returned": n}}` (from `bookmarks --folders`)
 - `list_list`: `{"lists": TwitterList[], "page": {...}}` (from `lists [--member-of]`); `TwitterList{id,name,description,member_count,subscriber_count,is_private,created_at,owner?{id,screen_name,name}}`
 - `list-members` reuses the `user_list` shape verbatim (`{"users": [...], "page": {...}}`)

@@ -5,9 +5,19 @@
 //! after every list command — out-of-range is exit 3 (not-found, the index
 //! doesn't resolve to anything), never exit 1.
 
+/// Hosts accepted in a tweet/article URL. Anything else is rejected —
+/// `https://evil.com/i/status/123` must NOT parse as tweet 123 (bead 0p9).
+const TWEET_URL_HOSTS: &[&str] = &[
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "mobile.twitter.com",
+];
+
 /// Extract the numeric tweet ID from a raw ID or an x.com status URL.
 /// Accepts `123`, `https://x.com/u/status/123`, `.../status/123/photo/1`,
-/// trailing slashes and query strings.
+/// trailing slashes and query strings. URLs on non-X hosts return None.
 pub fn normalize_tweet_id(input: &str) -> Option<String> {
     let s = input.trim();
     if s.is_empty() {
@@ -15,6 +25,23 @@ pub fn normalize_tweet_id(input: &str) -> Option<String> {
     }
     if s.chars().all(|c| c.is_ascii_digit()) {
         return Some(s.to_string());
+    }
+    // URL form: require an http(s) URL on an X host BEFORE looking for the
+    // /status/ marker — a foreign host must never yield an ID.
+    if s.contains("://") {
+        let after_scheme = s.split("://").nth(1)?;
+        let authority = after_scheme.split('/').next()?;
+        // Strip a possible :port suffix before the host compare.
+        let host = authority
+            .rsplit('@')
+            .next()
+            .unwrap_or(authority)
+            .split(':')
+            .next()?
+            .to_lowercase();
+        if !TWEET_URL_HOSTS.contains(&host.as_str()) {
+            return None;
+        }
     }
     let marker = "/status/";
     let pos = s.find(marker)?;
@@ -127,6 +154,13 @@ mod tests {
         assert_eq!(normalize_tweet_id("https://x.com/u/status/"), None);
         assert_eq!(normalize_tweet_id("not a url"), None);
         assert_eq!(normalize_tweet_id(""), None);
+        // Foreign hosts never yield an ID (bead 0p9).
+        assert_eq!(normalize_tweet_id("https://evil.com/i/status/123"), None);
+        assert_eq!(normalize_tweet_id("https://notx.com/u/status/123"), None);
+        assert_eq!(
+            normalize_tweet_id("http://twitter.com/u/status/789"),
+            Some("789".into())
+        );
     }
 
     #[test]
