@@ -22,8 +22,16 @@ impl CacheEntry {
     }
 }
 
-/// Default cache location: `~/.twr/query-ids.json`.
+/// Default cache location: `<state_dir>/query-ids.json` — honors
+/// `TWR_STATE_DIR` like the safety budgets (bead nku) so a HOME-less
+/// sandbox can still resolve IDs.
 pub fn default_cache_path() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("TWR_STATE_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Some(dir.join("query-ids.json"));
+        }
+    }
     home_dir().map(|h| h.join(".twr").join("query-ids.json"))
 }
 
@@ -31,6 +39,32 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+/// Write `raw` to `path` atomically (sibling temp + rename) so a crash
+/// mid-write cannot leave a truncated cache that reads back empty.
+fn atomic_write(path: &Path, raw: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, raw)?;
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 pub type QueryIdCache = HashMap<String, CacheEntry>;
@@ -66,14 +100,16 @@ pub fn put(path: &Path, operation: &str, query_id: &str, now_secs: u64) -> std::
     }
     let raw = serde_json::to_string(&cache)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, raw)
+    atomic_write(path, &raw)
 }
 
 /// Drop one op (called on endpoint-404 before the single refresh+retry).
 pub fn invalidate(path: &Path, operation: &str) {
     if let Some(mut cache) = load(path) {
         if cache.remove(operation).is_some() {
-            let _ = std::fs::write(path, serde_json::to_string(&cache).unwrap_or_default());
+            let _ = serde_json::to_string(&cache)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                .and_then(|raw| atomic_write(path, &raw));
         }
     }
 }

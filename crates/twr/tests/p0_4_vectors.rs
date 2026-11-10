@@ -51,8 +51,9 @@ fn unavailable_user_maps_to_not_found() {
 fn request_shape_is_correct() {
     // qid resolution: baseline layer yields the known UserByScreenName ID.
     let disk = twr_graphql::cache::QueryIdCache::new();
-    let extra = twr_graphql::ExtraRotation::new();
-    let resolved = twr_graphql::resolve("UserByScreenName", |_| None, &disk, &extra, 0).unwrap();
+    let endpoints = twr_graphql::EndpointsMap::new();
+    let resolved =
+        twr_graphql::resolve("UserByScreenName", |_| None, &disk, &endpoints, 0).unwrap();
     assert_eq!(resolved.query_id, "1VOOyvKkiI3FMmkeDNxM9A");
 
     // Headers carry Bearer + Cookie + Csrf (synthetic creds only).

@@ -16,6 +16,12 @@ pub struct ExecCtx<'a> {
     pub throttle: Throttle,
     pub extra_rotation: ExtraRotation,
     pub disk_cache: twr_graphql::cache::QueryIdCache,
+    /// Parsed `endpoints.yaml` map — its `queryId` entries are resolution
+    /// layer 3 (operator hand-patch over the shipped baseline).
+    pub endpoints: twr_graphql::EndpointsMap,
+    /// Where `disk_cache` was loaded from; `Some` enables the 404
+    /// invalidate→rotate→retry→persist machinery (bead hoi).
+    pub disk_cache_path: Option<std::path::PathBuf>,
     pub now_secs: u64,
     pub max_count: usize,
     #[allow(dead_code)]
@@ -49,9 +55,38 @@ impl<'a> ExecCtx<'a> {
             operation,
             |name| std::env::var(name).ok(),
             &self.disk_cache,
-            &self.extra_rotation,
+            &self.endpoints,
             self.now_secs,
         )
+    }
+
+    /// 404 recovery (bead hoi): drop the op's cached ID, pop the next
+    /// EXTRA rotation candidate, and return it for a single retry. On a
+    /// successful retry the caller persists it via [`Self::note_qid_success`]
+    /// so layer 2 serves it for the next 24h. `None` = nothing left to try —
+    /// the caller surfaces exit 6 (contract drift).
+    pub fn qid_after_404(&mut self, operation: &str) -> Option<String> {
+        if let Some(path) = &self.disk_cache_path {
+            twr_graphql::invalidate_op(path, operation);
+        }
+        self.disk_cache.remove(operation);
+        twr_graphql::rotate_extra(&mut self.extra_rotation, operation)
+    }
+
+    /// Persist a query ID that just worked (post-404 rotation win or a
+    /// `doctor --refresh` discovery) into the 24h disk cache AND the
+    /// in-memory map, so later resolutions in this process see it too.
+    pub fn note_qid_success(&mut self, operation: &str, query_id: &str) {
+        if let Some(path) = &self.disk_cache_path {
+            let _ = twr_graphql::cache::put(path, operation, query_id, self.now_secs);
+        }
+        self.disk_cache.insert(
+            operation.to_string(),
+            twr_graphql::cache::CacheEntry {
+                query_id: query_id.to_string(),
+                updated_at_secs: self.now_secs,
+            },
+        );
     }
 
     /// Derive the transaction ingredients on first use of a gated op when the
@@ -236,54 +271,80 @@ pub async fn fetch_parsed_page_generic<T>(
     instructions: InstructionsFn,
     parse: PageParser<T>,
 ) -> Result<(Vec<T>, Option<String>), PageError> {
-    let qid = ctx
-        .query_id(operation)
-        .map(|r| r.query_id)
-        .unwrap_or_default();
     let use_post = twr_client::use_post(operation);
     let method = if use_post { "POST" } else { "GET" };
-    let path = format!("/i/api/graphql/{qid}/{operation}");
 
+    // Throttle per endpoints.yaml rps/burst (best-effort wait).
     let wait = ctx.throttle.wait_secs(operation, now_f64());
     if wait > 0.0 {
         tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
     }
 
     ctx.ensure_tx(operation).await;
-    let tid = ctx.proof_for(operation, method, &path);
-    let headers = twr_client::build_headers(&twr_client::HeaderInput {
-        creds: &ctx.creds,
-        method,
-        os: twr_client::Os::current(),
-        chrome_major: &ctx.chrome_major,
-        locale: &ctx.locale,
-        transaction_id: tid.as_deref(),
-    });
-    let header_refs: Vec<(&str, &str)> = headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
 
-    let resp = if use_post {
-        let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
-        let mut body = serde_json::Map::new();
-        body.insert("variables".into(), variables);
-        body.insert(
-            "features".into(),
-            serde_json::Value::Object(compact_features(operation)),
-        );
-        let raw = serde_json::to_vec(&body).unwrap_or_default();
-        ctx.transport
-            .post_json(&url, &header_refs, &raw)
-            .await
-            .map_err(|_| PageError::Fatal)?
-    } else {
-        let url = graphql_get_url(&qid, operation, &variables, None);
-        ctx.transport
-            .get(&url, &header_refs)
-            .await
-            .map_err(|_| PageError::Fatal)?
+    // 404 recovery (bead hoi): invalidate the cached ID, rotate to the next
+    // EXTRA candidate, retry ONCE. A second 404 is contract drift.
+    let mut retry_qid: Option<String> = None;
+    let mut used_qid: String;
+    let resp = loop {
+        let qid = retry_qid.clone().unwrap_or_else(|| {
+            ctx.query_id(operation)
+                .map(|r| r.query_id)
+                .unwrap_or_default()
+        });
+        used_qid = qid.clone();
+        let path = format!("/i/api/graphql/{qid}/{operation}");
+        let tid = ctx.proof_for(operation, method, &path);
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method,
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: tid.as_deref(),
+        });
+        let header_refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let resp = if use_post {
+            let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
+            let mut body = serde_json::Map::new();
+            body.insert("variables".into(), variables.clone());
+            body.insert(
+                "features".into(),
+                serde_json::Value::Object(compact_features(operation)),
+            );
+            let raw = serde_json::to_vec(&body).unwrap_or_default();
+            ctx.transport
+                .post_json(&url, &header_refs, &raw)
+                .await
+                .map_err(|_| PageError::Fatal)?
+        } else {
+            let url = graphql_get_url(&qid, operation, &variables, None);
+            ctx.transport
+                .get(&url, &header_refs)
+                .await
+                .map_err(|_| PageError::Fatal)?
+        };
+
+        if resp.status == 404 && retry_qid.is_none() {
+            if let Some(next) = ctx.qid_after_404(operation) {
+                retry_qid = Some(next);
+                // The retry is a second request — throttle it like the first.
+                let wait = ctx.throttle.wait_secs(operation, now_f64());
+                if wait > 0.0 {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+                }
+                continue;
+            }
+        }
+        break resp;
     };
+    if retry_qid.is_some() && (200..300).contains(&resp.status) {
+        ctx.note_qid_success(operation, &used_qid);
+    }
 
     if resp.status == 429 {
         return Err(PageError::RateLimited);
@@ -305,13 +366,8 @@ pub async fn fetch_parsed_page_with_toggles(
     instructions: fn(&serde_json::Value) -> Option<&Vec<serde_json::Value>>,
     field_toggles: Option<serde_json::Value>,
 ) -> Result<(Vec<twr_model::Tweet>, Option<String>), PageError> {
-    let qid = ctx
-        .query_id(operation)
-        .map(|r| r.query_id)
-        .unwrap_or_default();
     let use_post = twr_client::use_post(operation);
     let method = if use_post { "POST" } else { "GET" };
-    let path = format!("/i/api/graphql/{qid}/{operation}");
 
     // Throttle per endpoints.yaml rps/burst (best-effort wait).
     let wait = ctx.throttle.wait_secs(operation, now_f64());
@@ -320,40 +376,68 @@ pub async fn fetch_parsed_page_with_toggles(
     }
 
     ctx.ensure_tx(operation).await;
-    let tid = ctx.proof_for(operation, method, &path);
-    let headers = twr_client::build_headers(&twr_client::HeaderInput {
-        creds: &ctx.creds,
-        method,
-        os: twr_client::Os::current(),
-        chrome_major: &ctx.chrome_major,
-        locale: &ctx.locale,
-        transaction_id: tid.as_deref(),
-    });
-    let header_refs: Vec<(&str, &str)> = headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
 
-    let resp = if use_post {
-        let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
-        let mut body = serde_json::Map::new();
-        body.insert("variables".into(), variables);
-        body.insert(
-            "features".into(),
-            serde_json::Value::Object(compact_features(operation)),
-        );
-        let raw = serde_json::to_vec(&body).unwrap_or_default();
-        ctx.transport
-            .post_json(&url, &header_refs, &raw)
-            .await
-            .map_err(|_| PageError::Fatal)?
-    } else {
-        let url = graphql_get_url(&qid, operation, &variables, field_toggles.as_ref());
-        ctx.transport
-            .get(&url, &header_refs)
-            .await
-            .map_err(|_| PageError::Fatal)?
+    // 404 recovery (bead hoi): invalidate → rotate → retry once.
+    let mut retry_qid: Option<String> = None;
+    let mut used_qid: String;
+    let resp = loop {
+        let qid = retry_qid.clone().unwrap_or_else(|| {
+            ctx.query_id(operation)
+                .map(|r| r.query_id)
+                .unwrap_or_default()
+        });
+        used_qid = qid.clone();
+        let path = format!("/i/api/graphql/{qid}/{operation}");
+        let tid = ctx.proof_for(operation, method, &path);
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method,
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: tid.as_deref(),
+        });
+        let header_refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let resp = if use_post {
+            let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
+            let mut body = serde_json::Map::new();
+            body.insert("variables".into(), variables.clone());
+            body.insert(
+                "features".into(),
+                serde_json::Value::Object(compact_features(operation)),
+            );
+            let raw = serde_json::to_vec(&body).unwrap_or_default();
+            ctx.transport
+                .post_json(&url, &header_refs, &raw)
+                .await
+                .map_err(|_| PageError::Fatal)?
+        } else {
+            let url = graphql_get_url(&qid, operation, &variables, field_toggles.as_ref());
+            ctx.transport
+                .get(&url, &header_refs)
+                .await
+                .map_err(|_| PageError::Fatal)?
+        };
+
+        if resp.status == 404 && retry_qid.is_none() {
+            if let Some(next) = ctx.qid_after_404(operation) {
+                retry_qid = Some(next);
+                let wait = ctx.throttle.wait_secs(operation, now_f64());
+                if wait > 0.0 {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
+                }
+                continue;
+            }
+        }
+        break resp;
     };
+    if retry_qid.is_some() && (200..300).contains(&resp.status) {
+        ctx.note_qid_success(operation, &used_qid);
+    }
 
     if resp.status == 429 {
         return Err(PageError::RateLimited);
@@ -487,39 +571,63 @@ pub async fn post_engage_graphql(
 }
 
 async fn send_engage(
-    ctx: &ExecCtx<'_>,
+    ctx: &mut ExecCtx<'_>,
     op: &str,
     target_id: &str,
 ) -> Result<twr_client::TransportResponse, twr_client::TransportError> {
-    let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
-    let path = format!("/i/api/graphql/{qid}/{op}");
-    let headers = twr_client::build_headers(&twr_client::HeaderInput {
-        creds: &ctx.creds,
-        method: "POST",
-        os: twr_client::Os::current(),
-        chrome_major: &ctx.chrome_major,
-        locale: &ctx.locale,
-        transaction_id: ctx.proof_for(op, "POST", &path).as_deref(),
-    });
-    let refs: Vec<(&str, &str)> = headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
     let vars = if op == "PinTweet" || op == "UnpinTweet" {
         super::write::pin_vars(target_id)
     } else {
         super::write::tweet_id_vars(op, target_id)
     };
-    let mut body = serde_json::Map::new();
-    body.insert("variables".into(), vars);
-    body.insert(
-        "features".into(),
-        serde_json::Value::Object(compact_features(op)),
-    );
-    let raw = serde_json::to_vec(&body).unwrap_or_default();
-    ctx.transport
-        .post_json(&format!("https://x.com{path}"), &refs, &raw)
-        .await
+    // 404 recovery (bead hoi): a stale query ID also 404s — invalidate,
+    // rotate to the next EXTRA candidate, retry ONCE with the new ID
+    // (distinct from post_engage_graphql's tx-id resend, which handles a
+    // different 404 cause; both compose since this returns the final
+    // response either way).
+    let mut retry_qid: Option<String> = None;
+    let mut used_qid: String;
+    let resp = loop {
+        let qid = retry_qid
+            .clone()
+            .unwrap_or_else(|| ctx.query_id(op).map(|r| r.query_id).unwrap_or_default());
+        used_qid = qid.clone();
+        let path = format!("/i/api/graphql/{qid}/{op}");
+        let headers = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: ctx.proof_for(op, "POST", &path).as_deref(),
+        });
+        let refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let mut body = serde_json::Map::new();
+        body.insert("variables".into(), vars.clone());
+        body.insert(
+            "features".into(),
+            serde_json::Value::Object(compact_features(op)),
+        );
+        let raw = serde_json::to_vec(&body).unwrap_or_default();
+        let resp = ctx
+            .transport
+            .post_json(&format!("https://x.com{path}"), &refs, &raw)
+            .await?;
+        if resp.status == 404 && retry_qid.is_none() {
+            if let Some(next) = ctx.qid_after_404(op) {
+                retry_qid = Some(next);
+                continue;
+            }
+        }
+        break resp;
+    };
+    if retry_qid.is_some() && (200..300).contains(&resp.status) {
+        ctx.note_qid_success(op, &used_qid);
+    }
+    Ok(resp)
 }
 
 /// Error data for a non-2xx engagement response. A 404 on a gated op has two
@@ -799,6 +907,8 @@ mod tests {
             }),
             extra_rotation: twr_graphql::seeded_extra_rotation(),
             disk_cache: Default::default(),
+            endpoints: Default::default(),
+            disk_cache_path: None,
             now_secs: 1_800_000_000,
             max_count: 200,
             request_delay_secs: 0.0,

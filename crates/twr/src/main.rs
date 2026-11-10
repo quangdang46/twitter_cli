@@ -1777,17 +1777,17 @@ fn query_ids_data() -> serde_json::Value {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let cache_path = home_path().map(|h| h.join(".twr").join("query-ids.json"));
+    let cache_path = twr_graphql::cache::default_cache_path();
     let disk: twr_graphql::cache::QueryIdCache = cache_path
         .as_deref()
         .and_then(twr_graphql::cache::load)
         .unwrap_or_default();
-    let extra = twr_graphql::ExtraRotation::new();
+    let endpoints = load_endpoints();
     let ops: Vec<serde_json::Value> = twr_graphql::FALLBACK_QUERY_IDS
         .iter()
         .map(|(op, _)| {
             let resolved =
-                twr_graphql::resolve(op, |name| std::env::var(name).ok(), &disk, &extra, now);
+                twr_graphql::resolve(op, |name| std::env::var(name).ok(), &disk, &endpoints, now);
             match resolved {
                 Some(r) => serde_json::json!({
                     "operation": op,
@@ -1843,7 +1843,7 @@ fn doctor_data(refresh: bool, opts: &OutputOptions) -> (serde_json::Value, i32) 
     checks.push(serde_json::json!({
         "check": "QUERY_ID",
         "status": if missing.is_empty() { "pass" } else { "fail" },
-        "detail": if refresh { "refreshed from live rescrape: no (offline doctor never fetches)" } else { "baseline vs cache" },
+        "detail": "env pin → 24h disk cache → endpoints.yaml → baseline; EXTRA ids rotate only after a 404",
         "suggestion": if missing.is_empty() { serde_json::Value::Null } else { serde_json::Value::String("run `twr doctor --refresh` once, then retry once".into()) },
     }));
     if !missing.is_empty() {
@@ -2037,9 +2037,10 @@ fn build_ctx<'a>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let disk = home_path()
-        .map(|h| h.join(".twr").join("query-ids.json"))
-        .and_then(|p| twr_graphql::cache::load(&p))
+    let disk_cache_path = twr_graphql::cache::default_cache_path();
+    let disk = disk_cache_path
+        .as_deref()
+        .and_then(twr_graphql::cache::load)
         .unwrap_or_default();
     let tx = twr_tx::cache::default_cache_path()
         .and_then(|p| twr_tx::cache::load_fresh(&p, now))
@@ -2064,6 +2065,8 @@ fn build_ctx<'a>(
         throttle: configured_throttle(),
         extra_rotation: twr_graphql::seeded_extra_rotation(),
         disk_cache: disk,
+        endpoints: load_endpoints(),
+        disk_cache_path,
         now_secs: now,
         max_count: 200,
         request_delay_secs: config.rate_limit.request_delay_secs,
@@ -2079,28 +2082,34 @@ fn build_ctx<'a>(
     }
 }
 
+/// Parse `endpoints/endpoints.yaml` (or `./endpoints.yaml`) once — the
+/// single source for BOTH the per-op throttle buckets and the `queryId`
+/// hand-patch resolution layer (bead hoi: the queryId entries were dead
+/// config until wired here).
+fn load_endpoints() -> twr_graphql::EndpointsMap {
+    for base in [".", "endpoints"] {
+        let p = std::path::Path::new(base).join("endpoints.yaml");
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            return twr_graphql::load_yaml(Some(&raw));
+        }
+    }
+    twr_graphql::EndpointsMap::new()
+}
+
 fn configured_throttle() -> twr_client::Throttle {
     let mut t = twr_client::Throttle::new(twr_client::BucketConfig {
         rps: 1.0,
         burst: 4.0,
     });
-    // Runtime overrides from endpoints/endpoints.yaml when present.
-    for base in [".", "endpoints"] {
-        let p = std::path::Path::new(base).join("endpoints.yaml");
-        if let Ok(raw) = std::fs::read_to_string(&p) {
-            let map = twr_graphql::load_yaml(Some(&raw));
-            for (op, entry) in &map {
-                if let (Some(rps), Some(burst)) = (entry.rps, entry.burst) {
-                    t.set_endpoint(
-                        op,
-                        twr_client::BucketConfig {
-                            rps,
-                            burst: burst as f64,
-                        },
-                    );
-                }
-            }
-            break;
+    for (op, entry) in load_endpoints() {
+        if let (Some(rps), Some(burst)) = (entry.rps, entry.burst) {
+            t.set_endpoint(
+                &op,
+                twr_client::BucketConfig {
+                    rps,
+                    burst: burst as f64,
+                },
+            );
         }
     }
     t
@@ -3409,10 +3418,36 @@ async fn run_user_list(
         serde_json::Value::Object(twr_graphql::compact_features(op)),
     );
     let raw = serde_json::to_vec(&body).unwrap_or_default();
-    let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
+    let mut resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => return (serde_json::json!({"error": "user-list fetch failed"}), 5),
     };
+    // Stale queryId recovery (bead hoi): invalidate cache+memory, rotate
+    // to the next candidate, retry ONCE; persistent 404 → exit 6.
+    if resp.status == 404 {
+        ctx.qid_after_404(op);
+        let qid2 = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
+        let url2 = format!("https://x.com/i/api/graphql/{qid2}/{op}");
+        let headers2 = twr_client::build_headers(&twr_client::HeaderInput {
+            creds: &ctx.creds,
+            method: "POST",
+            os: twr_client::Os::current(),
+            chrome_major: &ctx.chrome_major,
+            locale: &ctx.locale,
+            transaction_id: ctx
+                .proof_for(op, "POST", &format!("/i/api/graphql/{qid2}/{op}"))
+                .as_deref(),
+        });
+        let refs2: Vec<(&str, &str)> = headers2
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        resp = match ctx.transport.post_json(&url2, &refs2, &raw).await {
+            Ok(r) => r,
+            Err(_) => return (serde_json::json!({"error": "user-list fetch failed"}), 5),
+        };
+        ctx.note_qid_success(op, &qid2);
+    }
     if resp.status == 429 {
         return (serde_json::json!({"users": [], "truncated": true}), 4);
     }
@@ -6084,6 +6119,62 @@ fn login_data_v2aware(
     )
 }
 
+/// Live query-ID rescrape for `doctor --refresh` (bead hoi): fetch the
+/// x.com homepage, extract `client-web` bundle URLs, fetch each bundle,
+/// scan for `queryId`/`operationName` pairs, and persist every hit into
+/// the 24h disk cache (`~/.twr/query-ids.json` or `TWR_STATE_DIR`).
+/// Returns `(ops_found, per-bundle error strings)`. Best-effort: a failed
+/// homepage or bundle fetch is reported, never fatal — the shipped
+/// baseline still resolves everything the rescrape missed.
+async fn rescrape_query_ids() -> (usize, Vec<String>) {
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (0, vec![format!("transport: {e}")]),
+    };
+    let headers = [
+        ("Accept", "text/html,application/xhtml+xml"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+    ];
+    let home = match transport.get("https://x.com/", &headers).await {
+        Ok(r) if (200..300).contains(&r.status) => r,
+        Ok(r) => return (0, vec![format!("homepage HTTP {}", r.status)]),
+        Err(e) => return (0, vec![format!("homepage fetch: {e}")]),
+    };
+    let html = String::from_utf8_lossy(&home.body).into_owned();
+    let urls = twr_graphql::scrape::bundle_urls(&html);
+    if urls.is_empty() {
+        return (0, vec!["homepage listed no client-web bundles".into()]);
+    }
+    // Fetch bundles (public static content — no cookies off x.com).
+    // Bounded by scrape::MAX_CHUNKS; sequential is fine for an explicit
+    // doctor invocation.
+    let mut bodies: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut errors = Vec::new();
+    for url in urls.into_iter().take(twr_graphql::MAX_CHUNKS) {
+        match transport.get(&url, &[]).await {
+            Ok(r) if (200..300).contains(&r.status) => {
+                bodies.insert(url, String::from_utf8_lossy(&r.body).into_owned());
+            }
+            Ok(r) => errors.push(format!("{url}: HTTP {}", r.status)),
+            Err(e) => errors.push(format!("{url}: {e}")),
+        }
+    }
+    let found = twr_graphql::scrape::rescrape(&html, |u| bodies.get(u).cloned());
+    if found.is_empty() {
+        return (0, errors);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(path) = twr_graphql::cache::default_cache_path() {
+        for (op, qid) in &found {
+            let _ = twr_graphql::cache::put(&path, op, qid, now);
+        }
+    }
+    (found.len(), errors)
+}
+
 /// doctor + optional live P0-4 probe: real UserByScreenName call for HANDLE.
 /// Opt-in only (touches x.com with the user's session). Returns the probe as
 /// an extra check entry; exit follows the worst check.
@@ -6093,7 +6184,27 @@ async fn doctor_data_probe(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
 ) -> (serde_json::Value, i32) {
+    // `doctor --refresh` (bead hoi): REAL live rescrape — fetch x.com's
+    // client-web bundles, extract queryId/operationName pairs, persist
+    // hits into the 24h disk cache. Previously this only changed a detail
+    // string while the documented recovery path did not exist.
+    let mut refresh_note: Option<serde_json::Value> = None;
+    if refresh {
+        let (found, errors) = rescrape_query_ids().await;
+        refresh_note = Some(serde_json::json!({
+            "check": "QUERY_ID_REFRESH",
+            "status": if errors.is_empty() { "pass" } else { "warn" },
+            "detail": {"ops_rescanned": found, "bundle_errors": errors.len()},
+            "suggestion": if errors.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(format!("{} bundle fetch(es) failed; partial refresh", errors.len())) },
+        }));
+    }
     let (mut data, mut code) = doctor_data(refresh, opts);
+    if let (Some(entry), Some(checks)) = (
+        refresh_note,
+        data.get_mut("checks").and_then(|c| c.as_array_mut()),
+    ) {
+        checks.push(entry);
+    }
     let Some(handle) = probe_user else {
         return (data, code);
     };

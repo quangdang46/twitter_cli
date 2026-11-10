@@ -7,7 +7,7 @@
 
 use twr_auth::{read_env, resolve, FlagInput};
 use twr_client::{build_headers, Credentials, HeaderInput, Os, WreqTransport};
-use twr_graphql::{compact_features, resolve as resolve_qid, ExtraRotation};
+use twr_graphql::{compact_features, resolve as resolve_qid};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,10 +30,16 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. Query ID through the 4 layers.
     let disk = std::collections::HashMap::new();
-    let extra = ExtraRotation::new();
-    let qid = resolve_qid("HomeTimeline", |n| std::env::var(n).ok(), &disk, &extra, 0)
-        .map(|r| r.query_id)
-        .unwrap_or_default();
+    let endpoints = twr_graphql::EndpointsMap::new();
+    let qid = resolve_qid(
+        "HomeTimeline",
+        |n| std::env::var(n).ok(),
+        &disk,
+        &endpoints,
+        0,
+    )
+    .map(|r| r.query_id)
+    .unwrap_or_default();
 
     // 3. One GET page over the impersonating transport.
     let transport = WreqTransport::new_chrome().expect("transport builds");
