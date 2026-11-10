@@ -18,20 +18,52 @@ pub const DEFAULT_DAILY_BUDGET: u32 = 200;
 pub const MIN_DAILY_BUDGET: u32 = 1;
 /// Env override name.
 pub const BUDGET_ENV_VAR: &str = "TWR_DAILY_BUDGET";
+/// Hard ceiling for every daily-count env override. The budget can be
+/// raised but never disabled — and never set to an absurd value either
+/// (a typo like `TWR_DAILY_BUDGET=999999999` must not silently uncap the
+/// safety policy).
+pub const MAX_DAILY_BUDGET: u32 = 10_000;
+/// Env override for the state directory (bead nku): points at the `.twr`
+/// state dir itself (the directory that holds `mutations.json`,
+/// `dm_budget.json`, `post_budget.json`, `idempotency.json`,
+/// `query-ids.json`). Lets sandboxed/container environments without HOME
+/// keep fail-closed budgets.
+pub const STATE_DIR_ENV_VAR: &str = "TWR_STATE_DIR";
 
-/// Effective budget: env override clamped to `[MIN, u32::MAX]`, else default.
+/// Effective budget: env override clamped to `[MIN, MAX]`, else default.
 pub fn effective_budget(read_env: impl FnOnce(&str) -> Option<String>) -> u32 {
     match read_env(BUDGET_ENV_VAR).and_then(|v| v.parse::<u32>().ok()) {
-        Some(n) => n.max(MIN_DAILY_BUDGET),
+        Some(n) => n.clamp(MIN_DAILY_BUDGET, MAX_DAILY_BUDGET),
         None => DEFAULT_DAILY_BUDGET,
     }
 }
 
 pub type MutationLog = HashMap<String, u32>;
 
-/// Default state path: `~/.twr/mutations.json`.
+/// The `.twr` state directory: `TWR_STATE_DIR` when set, else
+/// `$HOME/.twr` / `%USERPROFILE%\.twr`. `None` means NO writable state
+/// location exists — write paths MUST fail closed on this (a missing
+/// budget file must never silently mean "unlimited mutations").
+pub fn state_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(STATE_DIR_ENV_VAR) {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Some(dir);
+        }
+    }
+    home_dir().map(|h| h.join(".twr"))
+}
+
+/// Fail-closed variant for write paths: the state dir or a clear error.
+pub fn require_state_dir() -> Result<PathBuf, String> {
+    state_dir().ok_or_else(|| {
+        format!("no writable state dir (HOME/USERPROFILE and {STATE_DIR_ENV_VAR} are all unset) — refusing a write whose safety budget cannot be enforced; set {STATE_DIR_ENV_VAR} to a writable directory")
+    })
+}
+
+/// Default state path: `<state_dir>/mutations.json`.
 pub fn default_log_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".twr").join("mutations.json"))
+    state_dir().map(|d| d.join("mutations.json"))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -71,6 +103,107 @@ pub enum BudgetCheck {
     Deny { used: u32, limit: u32 },
 }
 
+/// Write `raw` to `path` atomically: a sibling temp file then rename, so a
+/// crash mid-write can never leave a truncated counter (which would read
+/// back as 0 and silently reopen the budget).
+pub fn atomic_write(path: &Path, raw: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&tmp, raw)?;
+    // Windows rename refuses to replace an existing file; removing first
+    // reopens a tiny gap there, but unix rename(2) is atomic-replace and
+    // this is the best std-only portable shape.
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(path);
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Cross-process mutex for state read-modify-write cycles. `twr` is a
+/// one-shot CLI: two concurrent invocations can otherwise both pass
+/// `check` at used=limit-1 and both `record`, exceeding the cap. The lock
+/// is a `create_new` lockfile beside the state file; a holder that dies
+/// leaves it behind, so entries older than [`LOCK_STALE_SECS`] are broken.
+const LOCK_STALE_SECS: u64 = 30;
+const LOCK_ATTEMPTS: u32 = 200;
+const LOCK_RETRY_MS: u64 = 25;
+
+pub struct StateLock {
+    path: PathBuf,
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn lock_path_for(path: &Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+/// Acquire the per-state-file lock. `Err` on timeout — callers of safety
+/// state MUST treat that as fail-closed, never proceed unlocked.
+pub fn acquire_state_lock(path: &Path) -> std::io::Result<StateLock> {
+    let lock = lock_path_for(path);
+    // The state dir may not exist yet on first use — create it like
+    // `atomic_write` does, or the lockfile open fails ENOENT and every
+    // guarded write silently no-ops (fail-open).
+    if let Some(parent) = lock.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    for attempt in 0..LOCK_ATTEMPTS {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => return Ok(StateLock { path: lock }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Stale-lock break: a crashed holder leaves the file behind.
+                let stale = std::fs::metadata(&lock)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() >= LOCK_STALE_SECS);
+                if stale {
+                    let _ = std::fs::remove_file(&lock);
+                    continue;
+                }
+                if attempt + 1 == LOCK_ATTEMPTS {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("timed out acquiring state lock {}", lock.display()),
+    ))
+}
+
+/// Run `f` while holding the state lock for `path`.
+pub fn with_state_lock<T>(path: &Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
+    let _guard = acquire_state_lock(path)?;
+    Ok(f())
+}
+
 /// Load today's count (missing/garbage = 0) and check against the budget.
 pub fn check(path: &Path, today: &str, limit: u32) -> BudgetCheck {
     let used = load_count(path, today);
@@ -91,21 +224,56 @@ fn load_count(path: &Path, today: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Record one successful mutation for today.
+/// Record one successful mutation for today. Atomic (tmp+rename) and
+/// locked against concurrent writers.
 pub fn record(path: &Path, today: &str) {
-    let mut log: MutationLog = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    // Prune stale days: keep only today.
-    log.retain(|k, _| k == today);
-    *log.entry(today.to_string()).or_insert(0) += 1;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(raw) = serde_json::to_string(&log) {
-        let _ = std::fs::write(path, raw);
-    }
+    let _ = with_state_lock(path, || {
+        let mut log: MutationLog = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        // Prune stale days: keep only today.
+        log.retain(|k, _| k == today);
+        *log.entry(today.to_string()).or_insert(0) += 1;
+        if let Ok(raw) = serde_json::to_string(&log) {
+            let _ = atomic_write(path, &raw);
+        }
+    });
+}
+
+/// Atomically check-and-RESERVE one mutation (bead nku): under the state
+/// lock, read today's count, deny at the cap, else increment and persist
+/// BEFORE the caller sends. This closes the check-then-record race two
+/// concurrent `twr` invocations had: both could pass `check` and both
+/// record, exceeding the cap.
+///
+/// A reservation counts an ATTEMPT that reached the send, not only a
+/// confirmed success — the unsafe direction is under-counting, so failed
+/// sends still consume budget (documented, deliberate).
+///
+/// `Err` = state failure (lock timeout / unwritable) — callers MUST fail
+/// closed (exit 2), never proceed unbudgeted.
+pub fn reserve(path: &Path, today: &str, limit: u32) -> Result<BudgetCheck, String> {
+    with_state_lock(path, || {
+        let mut log: MutationLog = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        log.retain(|k, _| k == today);
+        let used = log.get(today).copied().unwrap_or(0);
+        if used >= limit {
+            return Ok(BudgetCheck::Deny { used, limit });
+        }
+        *log.entry(today.to_string()).or_insert(0) += 1;
+        let raw = serde_json::to_string(&log)
+            .map_err(|e| format!("cannot serialize mutation budget: {e}"))?;
+        atomic_write(path, &raw).map_err(|e| format!("cannot write mutation budget: {e}"))?;
+        Ok(BudgetCheck::Allow {
+            used: used + 1,
+            limit,
+        })
+    })
+    .map_err(|e| format!("cannot lock mutation budget state: {e}"))?
 }
 
 /// Denial suggestion (exit 2).
@@ -123,17 +291,17 @@ pub const DEFAULT_DM_DAILY_BUDGET: u32 = 10;
 /// Env override name for the DM cap.
 pub const DM_BUDGET_ENV_VAR: &str = "TWR_DM_DAILY_BUDGET";
 
-/// Effective DM budget: env override clamped to `[MIN, u32::MAX]`, else default.
+/// Effective DM budget: env override clamped to `[MIN, MAX]`, else default.
 pub fn effective_dm_budget(read_env: impl FnOnce(&str) -> Option<String>) -> u32 {
     match read_env(DM_BUDGET_ENV_VAR).and_then(|v| v.parse::<u32>().ok()) {
-        Some(n) => n.max(MIN_DAILY_BUDGET),
+        Some(n) => n.clamp(MIN_DAILY_BUDGET, MAX_DAILY_BUDGET),
         None => DEFAULT_DM_DAILY_BUDGET,
     }
 }
 
-/// Default DM state path: `~/.twr/dm_budget.json` (sibling to mutations.json).
+/// Default DM state path: `<state_dir>/dm_budget.json`.
 pub fn default_dm_log_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".twr").join("dm_budget.json"))
+    state_dir().map(|d| d.join("dm_budget.json"))
 }
 
 /// DM denial suggestion (exit 2).
@@ -158,29 +326,35 @@ pub const DEFAULT_POST_MIN_INTERVAL_SECS: u64 = 900;
 /// Env override name for the post cooldown.
 pub const POST_INTERVAL_ENV_VAR: &str = "TWR_POST_MIN_INTERVAL_SECS";
 
-/// Effective post budget: env override clamped to `[MIN, u32::MAX]`, else default.
+/// Effective post budget: env override clamped to `[MIN, MAX]`, else default.
 pub fn effective_post_budget(read_env: impl FnOnce(&str) -> Option<String>) -> u32 {
     match read_env(POST_BUDGET_ENV_VAR).and_then(|v| v.parse::<u32>().ok()) {
-        Some(n) => n.max(MIN_DAILY_BUDGET),
+        Some(n) => n.clamp(MIN_DAILY_BUDGET, MAX_DAILY_BUDGET),
         None => DEFAULT_POST_DAILY_BUDGET,
     }
 }
 
-/// Effective post cooldown: env override in seconds, floor 0 (=disabled),
-/// else default 900s. A floor of 0 (not 1) is deliberate: the cooldown is
-/// a pacing aid, not a safety invariant — the daily cap above is the
-/// never-disableable gate.
+/// Floor for the post cooldown (bead nku): `TWR_POST_MIN_INTERVAL_SECS=0`
+/// must NOT disable pacing — the daily cap alone let burst posts through
+/// between midnight resets. 60s is the smallest honest gap; the ceiling
+/// stays 24h so an unbounded value can't freeze posting for weeks.
+pub const MIN_POST_MIN_INTERVAL_SECS: u64 = 60;
+/// Hard ceiling for the post cooldown (24h).
+pub const MAX_POST_MIN_INTERVAL_SECS: u64 = 24 * 3600;
+
+/// Effective post cooldown: env override in seconds, clamped to
+/// `[MIN_POST_MIN_INTERVAL_SECS, MAX_POST_MIN_INTERVAL_SECS]`, else
+/// default 900s. Zero is NOT honored — see the floor constant.
 pub fn effective_post_min_interval(read_env: impl FnOnce(&str) -> Option<String>) -> u64 {
     match read_env(POST_INTERVAL_ENV_VAR).and_then(|v| v.parse::<u64>().ok()) {
-        Some(n) => n,
+        Some(n) => n.clamp(MIN_POST_MIN_INTERVAL_SECS, MAX_POST_MIN_INTERVAL_SECS),
         None => DEFAULT_POST_MIN_INTERVAL_SECS,
     }
 }
 
-/// Default post state path: `~/.twr/post_budget.json` (sibling to
-/// mutations.json / dm_budget.json).
+/// Default post state path: `<state_dir>/post_budget.json`.
 pub fn default_post_log_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".twr").join("post_budget.json"))
+    state_dir().map(|d| d.join("post_budget.json"))
 }
 
 /// Post-budget state: per-day counters (pruned to today on write) plus the
@@ -201,11 +375,8 @@ fn load_post_log(path: &Path) -> PostLog {
 }
 
 fn save_post_log(path: &Path, log: &PostLog) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     if let Ok(raw) = serde_json::to_string(log) {
-        let _ = std::fs::write(path, raw);
+        let _ = atomic_write(path, &raw);
     }
 }
 
@@ -245,12 +416,57 @@ pub fn check_post(
 }
 
 /// Record one successful post-family write for today (prunes stale days).
+/// Atomic (tmp+rename) and locked against concurrent writers.
 pub fn record_post(path: &Path, today: &str, now_secs: u64) {
-    let mut log = load_post_log(path);
-    log.days.retain(|k, _| k == today);
-    *log.days.entry(today.to_string()).or_insert(0) += 1;
-    log.last_post_secs = now_secs;
-    save_post_log(path, &log);
+    let _ = with_state_lock(path, || {
+        let mut log = load_post_log(path);
+        log.days.retain(|k, _| k == today);
+        *log.days.entry(today.to_string()).or_insert(0) += 1;
+        log.last_post_secs = now_secs;
+        save_post_log(path, &log);
+    });
+}
+
+/// Atomically check-and-RESERVE one post-family write (bead nku): same
+/// contract as [`reserve`] — under the state lock, deny at the daily cap
+/// or inside the cooldown, else increment the day counter, stamp
+/// `last_post_secs`, and persist BEFORE the caller sends. A reservation
+/// counts an ATTEMPT (a failed send still consumes cap + starts the
+/// cooldown — the unsafe direction is under-counting).
+///
+/// `Err` = state failure — callers MUST fail closed (exit 2).
+pub fn reserve_post(
+    path: &Path,
+    today: &str,
+    limit: u32,
+    min_interval_secs: u64,
+    now_secs: u64,
+) -> Result<PostCheck, String> {
+    with_state_lock(path, || {
+        let mut log = load_post_log(path);
+        let used = log.days.get(today).copied().unwrap_or(0);
+        if used >= limit {
+            return Ok(PostCheck::DenyBudget { used, limit });
+        }
+        if min_interval_secs > 0 && log.last_post_secs > 0 {
+            if let Some(elapsed) = now_secs.checked_sub(log.last_post_secs) {
+                if elapsed < min_interval_secs {
+                    return Ok(PostCheck::DenyCooldown {
+                        wait_secs: min_interval_secs - elapsed,
+                    });
+                }
+            }
+        }
+        log.days.retain(|k, _| k == today);
+        *log.days.entry(today.to_string()).or_insert(0) += 1;
+        log.last_post_secs = now_secs;
+        save_post_log(path, &log);
+        Ok(PostCheck::Allow {
+            used: used + 1,
+            limit,
+        })
+    })
+    .map_err(|e| format!("cannot lock post budget state: {e}"))?
 }
 
 /// Post-cap denial suggestion (exit 2).
