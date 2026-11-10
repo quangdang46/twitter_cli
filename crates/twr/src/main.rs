@@ -3628,6 +3628,11 @@ async fn run_post_write(
     } = args;
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
+    // Fail CLOSED when no state dir exists (bead nku): budgets/idempotency
+    // cannot be enforced, so the write is refused before any side effect.
+    if let Err(e) = require_write_state() {
+        return e;
+    }
     // Budget BEFORE the gate: exhausted budget exits 2 without side effects.
     if let Some(path) = twr_core::budget::default_log_path() {
         let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
@@ -3738,42 +3743,33 @@ async fn run_post_write(
         Decision::Cancelled => return (cancelled_data(operation), 0),
     }
 
-    // Idempotency pre-check (24h window).
+    // Idempotency claim (24h window, bead sxu): atomically load→pre-check→
+    // insert `Prepared` under the state lock. `Prepared` is NON-blocking —
+    // a crash before the send leaves a retryable state. `Sent` is written
+    // separately, immediately before post_json below.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let store_path = twr_core::idempotency::default_store_path();
-    let mut store = store_path
-        .as_deref()
-        .map(|p| twr_core::idempotency::load(p, now))
-        .unwrap_or_default();
     if let Some(key) = &idempotency_key {
-        match twr_core::idempotency::pre_check(&store, key) {
-            twr_core::PreCheck::ReplayCached(result) => {
-                return (
-                    serde_json::json!({"idempotent_replay": true, "result": result}),
-                    0,
-                )
-            }
-            twr_core::PreCheck::RefuseUnknown => {
-                return (
-                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
-                    1,
-                )
-            }
-            twr_core::PreCheck::Proceed => {}
-        }
-        store.insert(
-            key.clone(),
-            twr_core::IdempotencyEntry {
-                state: twr_core::WriteState::Sent,
-                created_at_secs: now,
-                result: None,
-            },
-        );
         if let Some(p) = &store_path {
-            let _ = twr_core::idempotency::save(p, &store);
+            match twr_core::idempotency::claim(p, key, now) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    )
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    )
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e}), 2),
+            }
         }
     }
 
@@ -3930,10 +3926,27 @@ async fn run_post_write(
     // Ban-risk throttle (bead o1l.6): per-op token bucket from
     // endpoints.yaml rps/burst — best-effort wait, never fatal.
     cli::exec::throttle_wait(&mut ctx.throttle, graphql_op).await;
+    // Idempotency: mark `Sent` IMMEDIATELY before the wire (bead sxu) —
+    // a crash from here on leaves "in flight, do not auto-retry"; every
+    // earlier exit leaves only `Prepared` (retryable).
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    );
+    // Reserve budgets atomically at send time (bead nku): check+increment
+    // under the state lock so concurrent invocations cannot both pass.
+    // post/reply/quote/edit are all CreateTweet-family → post cap applies.
+    if let Err(e) = reserve_budgets_at_send(true) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
-            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            mark_unknown(&store_path, idempotency_key.as_deref());
             return (
                 serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
                 1,
@@ -3948,9 +3961,11 @@ async fn run_post_write(
         );
     }
     if resp.status == 429 {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (serde_json::json!({"error": "rate limited"}), 4);
     }
     if !(200..300).contains(&resp.status) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
             serde_json::json!({"error": format!("post failed: HTTP {}", resp.status)}),
             6,
@@ -3982,6 +3997,7 @@ async fn run_post_write(
             // covers CreateNoteTweet Premium-gating (sibling convention).
             if operation == "edit" {
                 if let Some((ecode, esuggest)) = cli::write::classify_edit_rejection(message) {
+                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
                     return (
                         serde_json::json!({"error": format!("edit rejected ({ecode}): {message}"),
                             "code": ecode, "suggestion": esuggest, "retryable": false}),
@@ -4002,6 +4018,7 @@ async fn run_post_write(
                     twr_core::ErrorKind::ForbiddenRateLimited,
                     format!("long-form post rejected — account not eligible for CreateNoteTweet (X code {code}): {message}"),
                 );
+                mark_prepared(&store_path, idempotency_key.as_deref(), now);
                 return (serde_json::json!({"error": err.message}), 4);
             }
             let kind = twr_core::ErrorKind::from_api_code(code);
@@ -4020,6 +4037,7 @@ async fn run_post_write(
             } else {
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"))
             };
+            mark_prepared(&store_path, idempotency_key.as_deref(), now);
             return (serde_json::json!({"error": err.message}), kind.exit_code());
         }
     }
@@ -4030,6 +4048,9 @@ async fn run_post_write(
     // never treated as a false success (PR #65 lesson).
     if graphql_op == "CreateNoteTweet" {
         let Some(new_id) = cli::write::parse_note_tweet_id(&payload) else {
+            // Ambiguous: HTTP 200 but no confirmation — the write may or
+            // may not have landed. Honest state is `unknown` (bead sxu).
+            mark_unknown(&store_path, idempotency_key.as_deref());
             return (
                 serde_json::json!({"error": "long-form post returned no confirmation (empty tweet_results across all known envelope shapes) — the write may or may not have landed; check `twr user-posts` before retrying to avoid a double-post"}),
                 6,
@@ -4040,26 +4061,14 @@ async fn run_post_write(
             cli::write::write_delay_secs(u01),
         ))
         .await;
-        if let Some(key) = &idempotency_key {
-            if let Some(p) = &store_path {
-                let mut s = twr_core::idempotency::load(p, now);
-                s.insert(
-                    key.clone(),
-                    twr_core::IdempotencyEntry {
-                        state: twr_core::WriteState::Acknowledged,
-                        created_at_secs: now,
-                        result: Some(serde_json::json!({"id": new_id})),
-                    },
-                );
-                let _ = twr_core::idempotency::save(p, &s);
-            }
-        }
-        if let Some(path) = twr_core::budget::default_log_path() {
-            twr_core::budget::record(&path, &twr_core::budget::today_utc());
-        }
-        if let Some(path) = twr_core::budget::default_post_log_path() {
-            twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
-        }
+        // Budgets were RESERVED at send time (bead nku) — no double count.
+        idem_set(
+            &store_path,
+            idempotency_key.as_deref(),
+            twr_core::WriteState::Acknowledged,
+            Some(serde_json::json!({"id": new_id})),
+            now,
+        );
         return (
             serde_json::json!({"id": new_id, "operation": operation, "graphql_operation": "CreateNoteTweet"}),
             0,
@@ -4080,6 +4089,8 @@ async fn run_post_write(
             .filter(|s| !s.is_empty())
             .map(str::to_string);
         let Some(new_id) = new_id_opt else {
+            // HTTP 200 but no new id — ambiguous; `unknown` (bead sxu).
+            mark_unknown(&store_path, idempotency_key.as_deref());
             return (
                 serde_json::json!({"error": "edit returned no new tweet id (unexpected response shape)"}),
                 6,
@@ -4099,26 +4110,13 @@ async fn run_post_write(
             cli::write::write_delay_secs(u01),
         ))
         .await;
-        if let Some(key) = &idempotency_key {
-            if let Some(p) = &store_path {
-                let mut s = twr_core::idempotency::load(p, now);
-                s.insert(
-                    key.clone(),
-                    twr_core::IdempotencyEntry {
-                        state: twr_core::WriteState::Acknowledged,
-                        created_at_secs: now,
-                        result: Some(serde_json::json!({"id": new_id})),
-                    },
-                );
-                let _ = twr_core::idempotency::save(p, &s);
-            }
-        }
-        if let Some(path) = twr_core::budget::default_log_path() {
-            twr_core::budget::record(&path, &twr_core::budget::today_utc());
-        }
-        if let Some(path) = twr_core::budget::default_post_log_path() {
-            twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
-        }
+        idem_set(
+            &store_path,
+            idempotency_key.as_deref(),
+            twr_core::WriteState::Acknowledged,
+            Some(serde_json::json!({"id": new_id})),
+            now,
+        );
         let prev = edit_target.clone().unwrap_or_default();
         return (
             serde_json::json!({"id": new_id, "previous_tweet_id": prev, "operation": "edit"}),
@@ -4169,17 +4167,25 @@ async fn run_post_write(
         // Shape 3 (bare success): accepted but id-less. Emit an honest
         // success-without-id rather than a fake failure (which an agent
         // would retry into a double-post) or a fake `{"id":""}` success.
+        // Still Acknowledge the key (bead sxu): the server accepted, and a
+        // cached replay must return the same unresolved-id result rather
+        // than re-posting.
+        idem_set(
+            &store_path,
+            idempotency_key.as_deref(),
+            twr_core::WriteState::Acknowledged,
+            Some(serde_json::json!({"id": null, "id_status": "unresolved"})),
+            now,
+        );
         return (
             serde_json::json!({"id": null, "id_status": "unresolved", "operation": operation, "note": "X accepted the tweet but returned no id; reconcile via user-posts before assuming it did not land"}),
             0,
         );
     };
     if new_id.is_empty() {
-        // HTTP 2xx, no data.errors, but still no usable rest_id — a drifting
-        // response schema or some other unexpected shape. Report honestly as
-        // an error (exit 6 contract drift) instead of the previous `{"id":""}`
-        // success-shaped lie that downstream automation would read as
-        // "posted, id unknown".
+        // HTTP 2xx, no data.errors, but still no usable rest_id — ambiguous
+        // whether the write landed. `unknown`, never a success-shaped lie.
+        mark_unknown(&store_path, idempotency_key.as_deref());
         return (
             serde_json::json!({"error": "post returned no tweet id (unexpected create_tweet response shape)"}),
             6,
@@ -4191,49 +4197,114 @@ async fn run_post_write(
         cli::write::write_delay_secs(u01),
     ))
     .await;
-    if let Some(key) = &idempotency_key {
-        if let Some(p) = &store_path {
-            let mut s = twr_core::idempotency::load(p, now);
-            s.insert(
-                key.clone(),
-                twr_core::IdempotencyEntry {
-                    state: twr_core::WriteState::Acknowledged,
-                    created_at_secs: now,
-                    result: Some(serde_json::json!({"id": new_id})),
-                },
-            );
-            let _ = twr_core::idempotency::save(p, &s);
-        }
-    }
-    if let Some(path) = twr_core::budget::default_log_path() {
-        twr_core::budget::record(&path, &twr_core::budget::today_utc());
-    }
-    if let Some(path) = twr_core::budget::default_post_log_path() {
-        twr_core::budget::record_post(&path, &twr_core::budget::today_utc(), now);
-    }
+    // Budgets were RESERVED at send time (bead nku) — no double count.
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"id": new_id})),
+        now,
+    );
     (serde_json::json!({"id": new_id, "operation": operation}), 0)
 }
 
-fn mark_unknown(
+/// Set one idempotency entry's state under the state lock (bead sxu/nku):
+/// load→prune→insert→atomic-save in a single critical section, so
+/// concurrent writers cannot lose each other's transitions.
+fn idem_set(
     store_path: &Option<std::path::PathBuf>,
-    store: &twr_core::IdempotencyStore,
     key: Option<&str>,
+    state: twr_core::WriteState,
+    result: Option<serde_json::Value>,
+    now: u64,
 ) {
     if let (Some(p), Some(key)) = (store_path, key) {
-        let mut s = store.clone();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        s.insert(
-            key.to_string(),
+        let _ = twr_core::idempotency::upsert(
+            p,
+            key,
             twr_core::IdempotencyEntry {
-                state: twr_core::WriteState::Unknown,
+                state,
                 created_at_secs: now,
-                result: None,
+                result,
             },
         );
-        let _ = twr_core::idempotency::save(p, &s);
+    }
+}
+
+/// Transport-level failure AFTER the request may have been sent: the
+/// honest state is `unknown` — never auto-retry (bead sxu).
+fn mark_unknown(store_path: &Option<std::path::PathBuf>, key: Option<&str>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    idem_set(store_path, key, twr_core::WriteState::Unknown, None, now);
+}
+
+/// A DEFINITE failure (server answered: HTTP error status or an in-body
+/// `data.errors` rejection, auth failure before send is handled by never
+/// reaching `Sent`): nothing was applied, so the key returns to
+/// `Prepared` — retryable, never a false "in flight" (bead sxu).
+fn mark_prepared(store_path: &Option<std::path::PathBuf>, key: Option<&str>, now: u64) {
+    idem_set(store_path, key, twr_core::WriteState::Prepared, None, now);
+}
+
+/// Reserve the general mutation budget AND (for post-family ops) the
+/// post cap+cooldown atomically at send time (bead nku). Call ONLY on the
+/// real-execute path, immediately before the mutation POST. `Deny` maps
+/// to exit 2; state errors fail closed too.
+fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, i32)> {
+    let today = twr_core::budget::today_utc();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        match twr_core::budget::reserve(&path, &today, limit) {
+            Ok(twr_core::BudgetCheck::Allow { .. }) => {}
+            Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
+                return Err((
+                    serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                    2,
+                ));
+            }
+            Err(e) => return Err((serde_json::json!({"error": e}), 2)),
+        }
+    }
+    if post_family {
+        if let Some(path) = twr_core::budget::default_post_log_path() {
+            let limit = twr_core::budget::effective_post_budget(|k| std::env::var(k).ok());
+            let interval = twr_core::budget::effective_post_min_interval(|k| std::env::var(k).ok());
+            match twr_core::budget::reserve_post(&path, &today, limit, interval, now_secs) {
+                Ok(twr_core::budget::PostCheck::Allow { .. }) => {}
+                Ok(twr_core::budget::PostCheck::DenyBudget { used, limit }) => {
+                    return Err((
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        2,
+                    ));
+                }
+                Ok(twr_core::budget::PostCheck::DenyCooldown { wait_secs }) => {
+                    return Err((
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        2,
+                    ));
+                }
+                Err(e) => return Err((serde_json::json!({"error": e}), 2)),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fail-closed state-dir gate for EVERY write runner (bead nku): without
+/// HOME/USERPROFILE/TWR_STATE_DIR the safety budgets cannot be enforced,
+/// so the write is refused BEFORE any side effect. Returns the error
+/// tuple on failure.
+fn require_write_state() -> Result<(), (serde_json::Value, i32)> {
+    match twr_core::budget::require_state_dir() {
+        Ok(_) => Ok(()),
+        Err(e) => Err((serde_json::json!({"error": e}), 2)),
     }
 }
 
@@ -4318,6 +4389,10 @@ async fn run_engage(
     preview: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    // Fail CLOSED when no state dir exists (bead nku).
+    if let Err(e) = require_write_state() {
+        return e;
+    }
     if let Some(path) = twr_core::budget::default_log_path() {
         let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
         let today = twr_core::budget::today_utc();
@@ -4363,25 +4438,26 @@ async fn run_engage(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let store_path = twr_core::idempotency::default_store_path();
-    let store = store_path
-        .as_deref()
-        .map(|p| twr_core::idempotency::load(p, now))
-        .unwrap_or_default();
+    // Idempotency claim → `Prepared` (bead sxu): non-blocking until `Sent`
+    // is written immediately before the mutation POST below.
     if let Some(key) = &idempotency_key {
-        match twr_core::idempotency::pre_check(&store, key) {
-            twr_core::PreCheck::ReplayCached(result) => {
-                return (
-                    serde_json::json!({"idempotent_replay": true, "result": result}),
-                    0,
-                )
+        if let Some(p) = &store_path {
+            match twr_core::idempotency::claim(p, key, now) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    )
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    )
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e}), 2),
             }
-            twr_core::PreCheck::RefuseUnknown => {
-                return (
-                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
-                    1,
-                )
-            }
-            twr_core::PreCheck::Proceed => {}
         }
     }
 
@@ -4402,10 +4478,24 @@ async fn run_engage(
     // the CLI op name (mute/block/… ride 1.1 REST with no GraphQL op, so
     // they get their own entries rather than sharing one bucket).
     cli::exec::throttle_wait(&mut ctx.throttle, cmd).await;
-    // Returns Ok(()) on a confirmed mutation, or Err((message, exit_code))
-    // carrying the ALREADY-CLASSIFIED failure (inner data.errors paths
-    // return early from inside, direct 429/404 handled by callers' siblings).
-    let outcome: Result<(), (String, i32)> = if desc.use_friendships {
+    // `Sent` immediately before the wire + atomic general-budget reserve
+    // (beads sxu/nku). Engage ops are NOT post-family → no post cap.
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    );
+    if let Err(e) = reserve_budgets_at_send(false) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
+    // Returns Ok(()) on a confirmed mutation, or Err((message, exit_code,
+    // ambiguous)) — ambiguous=true means transport-level failure where the
+    // write MAY have landed (idempotency → `unknown`); false means a
+    // definite server rejection (→ back to `prepared`).
+    let outcome: Result<(), (String, i32, bool)> = if desc.use_friendships {
         // 1.1 friendships form-POST (follow/unfollow), mirrors Python.
         let url = format!("https://x.com/i/api/1.1/{}.json", desc.op);
         let headers = twr_client::build_headers(&twr_client::HeaderInput {
@@ -4427,10 +4517,10 @@ async fn run_engage(
                 if (200..300).contains(&r.status) {
                     Ok(())
                 } else {
-                    Err((format!("{cmd} failed: HTTP {}", r.status), 6))
+                    Err((format!("{cmd} failed: HTTP {}", r.status), 6, false))
                 }
             }
-            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5, true)),
         }
     } else if let Some(rest_path) = mute_block_rest_path(cmd) {
         // Mute/block ride the 1.1 REST endpoints (no GraphQL op exists) —
@@ -4455,19 +4545,21 @@ async fn run_engage(
                 if (200..300).contains(&r.status) {
                     Ok(())
                 } else {
-                    Err((format!("{cmd} failed: HTTP {}", r.status), 6))
+                    Err((format!("{cmd} failed: HTTP {}", r.status), 6, false))
                 }
             }
-            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5, true)),
         }
     } else {
         match cli::exec::post_engage_graphql(&mut ctx, desc.op, &target_id, cmd).await {
             Ok(post) => {
                 let r = &post.response;
                 if r.status == 429 {
+                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
                     return (serde_json::json!({"error": "rate limited"}), 4);
                 }
                 if !(200..300).contains(&r.status) {
+                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
                     return (cli::exec::engage_failure_data(&ctx, cmd, desc.op, &post), 6);
                 }
                 // Inner data.errors on HTTP 200: X puts mutation rejections
@@ -4498,12 +4590,13 @@ async fn run_engage(
                                 format!("write rejected (X code {code}): {message}"),
                             )
                         };
+                        mark_prepared(&store_path, idempotency_key.as_deref(), now);
                         return (serde_json::json!({"error": err.message}), kind.exit_code());
                     }
                 }
                 Ok(())
             }
-            Err(_) => Err((format!("{cmd} failed: transport error"), 5)),
+            Err(_) => Err((format!("{cmd} failed: transport error"), 5, true)),
         }
     };
     let u01 = (now % 1000) as f64 / 1000.0;
@@ -4511,24 +4604,25 @@ async fn run_engage(
         cli::write::write_delay_secs(u01),
     ))
     .await;
-    if let Err((message, code)) = outcome {
+    if let Err((message, code, ambiguous)) = outcome {
+        // Definite server rejection → back to `prepared` (retryable);
+        // transport-level failure after `sent` → `unknown` (never
+        // auto-retry — the write may have landed) (bead sxu).
+        if ambiguous {
+            mark_unknown(&store_path, idempotency_key.as_deref());
+        } else {
+            mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        }
         return (serde_json::json!({"error": message}), code);
     }
-    if let Some(path) = twr_core::budget::default_log_path() {
-        twr_core::budget::record(&path, &twr_core::budget::today_utc());
-    }
-    if let (Some(key), Some(p)) = (&idempotency_key, &store_path) {
-        let mut s = twr_core::idempotency::load(p, now);
-        s.insert(
-            key.clone(),
-            twr_core::IdempotencyEntry {
-                state: twr_core::WriteState::Acknowledged,
-                created_at_secs: now,
-                result: Some(serde_json::json!({"ok": true, "operation": cmd})),
-            },
-        );
-        let _ = twr_core::idempotency::save(p, &s);
-    }
+    // Budgets were RESERVED at send time (bead nku) — no double count.
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"ok": true, "operation": cmd})),
+        now,
+    );
     (
         serde_json::json!({"ok": true, "operation": cmd, "target": target_id}),
         0,
@@ -4730,6 +4824,10 @@ async fn run_list_write(
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let operation = args.operation();
+    // Fail CLOSED when no state dir exists (bead nku).
+    if let Err(e) = require_write_state() {
+        return e;
+    }
     if let Some(path) = twr_core::budget::default_log_path() {
         let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
         let today = twr_core::budget::today_utc();
@@ -4778,26 +4876,27 @@ async fn run_list_write(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let store_path = twr_core::idempotency::default_store_path();
-    let store = store_path
-        .as_deref()
-        .map(|p| twr_core::idempotency::load(p, now))
-        .unwrap_or_default();
     let idempotency_key = args.idempotency_key();
+    // Idempotency claim → `Prepared` (bead sxu); `Sent` is written
+    // immediately before the mutation POST below.
     if let Some(key) = &idempotency_key {
-        match twr_core::idempotency::pre_check(&store, key) {
-            twr_core::PreCheck::ReplayCached(result) => {
-                return (
-                    serde_json::json!({"idempotent_replay": true, "result": result}),
-                    0,
-                );
+        if let Some(p) = &store_path {
+            match twr_core::idempotency::claim(p, key, now) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    );
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    );
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e}), 2),
             }
-            twr_core::PreCheck::RefuseUnknown => {
-                return (
-                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
-                    1,
-                );
-            }
-            twr_core::PreCheck::Proceed => {}
         }
     }
 
@@ -4867,10 +4966,23 @@ async fn run_list_write(
     // Ban-risk throttle (bead o1l.6): per-op token bucket from
     // endpoints.yaml rps/burst — best-effort wait, never fatal.
     cli::exec::throttle_wait(&mut ctx.throttle, op).await;
+    // `Sent` immediately before the wire + atomic budget reserve (beads
+    // sxu/nku). List ops are not post-family → general budget only.
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    );
+    if let Err(e) = reserve_budgets_at_send(false) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
     let resp = match ctx.transport.post_json(&url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
-            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            mark_unknown(&store_path, idempotency_key.as_deref());
             return (
                 serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
                 1,
@@ -4878,6 +4990,7 @@ async fn run_list_write(
         }
     };
     if resp.status == 429 {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (serde_json::json!({"error": "rate limited"}), 4);
     }
     // Delete-retry on an already-deleted list: X answers 404 / errors with
@@ -4886,12 +4999,14 @@ async fn run_list_write(
     if matches!(args, ListWriteArgs::Delete { .. })
         && (resp.status == 404 || is_not_found_payload(&resp.body))
     {
+        finish_list_write(&store_path, &idempotency_key, now, operation, &args);
         return (
             serde_json::json!({"ok": true, "operation": operation, "target": args.target(), "note": "already deleted"}),
             0,
         );
     }
     if !(200..300).contains(&resp.status) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
             serde_json::json!({"error": format!("{operation} failed: HTTP {}", resp.status)}),
             6,
@@ -4912,6 +5027,7 @@ async fn run_list_write(
                 ListWriteArgs::AddMember { .. } | ListWriteArgs::RemoveMember { .. }
             ) && is_already_member_message(message)
             {
+                finish_list_write(&store_path, &idempotency_key, now, operation, &args);
                 return (
                     serde_json::json!({"ok": true, "operation": operation, "target": args.target(), "note": "already in that state"}),
                     0,
@@ -4945,6 +5061,7 @@ async fn run_list_write(
             let kind = twr_core::ErrorKind::from_api_code(code);
             let err =
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"));
+            mark_prepared(&store_path, idempotency_key.as_deref(), now);
             return (serde_json::json!({"error": err.message}), kind.exit_code());
         }
     }
@@ -4979,7 +5096,9 @@ async fn run_list_write(
     )
 }
 
-/// Record budget + idempotency after a successful list write.
+/// Acknowledge a successful list write (bead sxu/nku): budget was
+/// RESERVED at send time; this only settles the idempotency key under
+/// the state lock.
 fn finish_list_write(
     store_path: &Option<std::path::PathBuf>,
     idempotency_key: &Option<String>,
@@ -4987,21 +5106,13 @@ fn finish_list_write(
     operation: &str,
     args: &ListWriteArgs,
 ) {
-    if let Some(path) = twr_core::budget::default_log_path() {
-        twr_core::budget::record(&path, &twr_core::budget::today_utc());
-    }
-    if let (Some(key), Some(p)) = (idempotency_key, store_path) {
-        let mut s = twr_core::idempotency::load(p, now);
-        s.insert(
-            key.clone(),
-            twr_core::IdempotencyEntry {
-                state: twr_core::WriteState::Acknowledged,
-                created_at_secs: now,
-                result: Some(serde_json::json!({"ok": true, "operation": operation, "target": args.target()})),
-            },
-        );
-        let _ = twr_core::idempotency::save(p, &s);
-    }
+    idem_set(
+        store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"ok": true, "operation": operation, "target": args.target()})),
+        now,
+    );
 }
 
 /// True when a response body carries a not-found shape (tombstone /
@@ -5279,6 +5390,11 @@ async fn run_dm_send(
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    // Fail CLOSED when no state dir exists (bead nku): DM budgets and
+    // idempotency cannot be enforced, so refuse before any side effect.
+    if let Err(e) = require_write_state() {
+        return e;
+    }
     // 1. DM's own daily cap — checked BEFORE policy, same "no side effects
     // on denial" ordering as the general budget in run_post_write.
     if let Some(path) = twr_core::budget::default_dm_log_path() {
@@ -5289,6 +5405,21 @@ async fn run_dm_send(
         {
             return (
                 serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
+    // 1b. GENERAL mutation budget fast-fail (bead nku): DM send is a
+    // mutation like any other — it must count against mutations.json too.
+    // The atomic reserve below is authoritative; this is the early-out.
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
                 2,
             );
         }
@@ -5328,25 +5459,26 @@ async fn run_dm_send(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let store_path = twr_core::idempotency::default_store_path();
-    let store = store_path
-        .as_deref()
-        .map(|p| twr_core::idempotency::load(p, now))
-        .unwrap_or_default();
+    // Idempotency claim → `Prepared` (bead sxu); `Sent` immediately before
+    // the DM POST below.
     if let Some(key) = &idempotency_key {
-        match twr_core::idempotency::pre_check(&store, key) {
-            twr_core::PreCheck::ReplayCached(result) => {
-                return (
-                    serde_json::json!({"idempotent_replay": true, "result": result}),
-                    0,
-                );
+        if let Some(p) = &store_path {
+            match twr_core::idempotency::claim(p, key, now) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    )
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    )
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e}), 2),
             }
-            twr_core::PreCheck::RefuseUnknown => {
-                return (
-                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
-                    1,
-                );
-            }
-            twr_core::PreCheck::Proceed => {}
         }
     }
 
@@ -5389,10 +5521,44 @@ async fn run_dm_send(
     // Ban-risk throttle (bead o1l.6): strictest mutation bucket (0.3/1) —
     // DMs are the highest-scrutiny surface (SKILL.md §6).
     cli::exec::throttle_wait(&mut ctx.throttle, "DmSend").await;
+    // `Sent` immediately before the wire (bead sxu) + atomic reserves for
+    // BOTH the general mutation budget and DM's own daily cap (bead nku —
+    // DM send previously skipped the general budget entirely).
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    );
+    if let Err(e) = reserve_budgets_at_send(false) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
+    {
+        let today = twr_core::budget::today_utc();
+        if let Some(path) = twr_core::budget::default_dm_log_path() {
+            let limit = twr_core::budget::effective_dm_budget(|k| std::env::var(k).ok());
+            match twr_core::budget::reserve(&path, &today, limit) {
+                Ok(twr_core::BudgetCheck::Allow { .. }) => {}
+                Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
+                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
+                    return (
+                        serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit)}),
+                        2,
+                    );
+                }
+                Err(e) => {
+                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
+                    return (serde_json::json!({"error": e}), 2);
+                }
+            }
+        }
+    }
     let resp = match ctx.transport.post_json(url, &refs, &raw).await {
         Ok(r) => r,
         Err(_) => {
-            mark_unknown(&store_path, &store, idempotency_key.as_deref());
+            mark_unknown(&store_path, idempotency_key.as_deref());
             return (
                 serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
                 1,
@@ -5400,9 +5566,11 @@ async fn run_dm_send(
         }
     };
     if resp.status == 429 {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (serde_json::json!({"error": "rate limited"}), 4);
     }
     if !(200..300).contains(&resp.status) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
             serde_json::json!({"error": format!("dm-send failed: HTTP {}", resp.status)}),
             6,
@@ -5421,6 +5589,7 @@ async fn run_dm_send(
                 kind,
                 format!("dm-send rejected (X code {code}): {message}"),
             );
+            mark_prepared(&store_path, idempotency_key.as_deref(), now);
             return (serde_json::json!({"error": err.message}), kind.exit_code());
         }
     }
@@ -5429,25 +5598,14 @@ async fn run_dm_send(
         cli::write::write_delay_secs(u01),
     ))
     .await;
-    if let Some(key) = &idempotency_key {
-        if let Some(p) = &store_path {
-            let mut s = twr_core::idempotency::load(p, now);
-            s.insert(
-                key.clone(),
-                twr_core::IdempotencyEntry {
-                    state: twr_core::WriteState::Acknowledged,
-                    created_at_secs: now,
-                    result: Some(serde_json::json!({"ok": true, "recipient": user_id})),
-                },
-            );
-            let _ = twr_core::idempotency::save(p, &s);
-        }
-    }
-    // DM's OWN daily cap record — separate file from the general budget
-    // (o1l.6 acceptance: this must not touch mutations.json).
-    if let Some(path) = twr_core::budget::default_dm_log_path() {
-        twr_core::budget::record(&path, &twr_core::budget::today_utc());
-    }
+    // Budgets were RESERVED at send time (bead nku) — no double count.
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"ok": true, "recipient": user_id})),
+        now,
+    );
     (
         serde_json::json!({"ok": true, "operation": "dm-send", "recipient": user_id}),
         0,
@@ -5879,10 +6037,58 @@ async fn run_post_write_v2video(
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
+    let _ = config;
+    // Fail CLOSED when no state dir exists (bead nku): budgets and
+    // idempotency cannot be enforced, so refuse before any side effect.
+    if let Err(e) = require_write_state() {
+        return e;
+    }
+    // Same safety accounting as the cookie post path (bead tab): this is a
+    // CreateTweet-family write — general budget + post cap/cooldown apply.
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                2,
+            );
+        }
+    }
+    {
+        use twr_core::budget::PostCheck;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(path) = twr_core::budget::default_post_log_path() {
+            let limit = twr_core::budget::effective_post_budget(|k| std::env::var(k).ok());
+            let interval = twr_core::budget::effective_post_min_interval(|k| std::env::var(k).ok());
+            let today = twr_core::budget::today_utc();
+            match twr_core::budget::check_post(&path, &today, limit, interval, now_secs) {
+                PostCheck::DenyBudget { used, limit } => {
+                    return (
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        2,
+                    );
+                }
+                PostCheck::DenyCooldown { wait_secs } => {
+                    return (
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        2,
+                    );
+                }
+                PostCheck::Allow { .. } => {}
+            }
+        }
+    }
     if !opts.policy.allows("post") {
         return (serde_json::json!({"error": opts.policy.denial("post")}), 2);
     }
-    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, true) {
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => return (dry_run_data("post"), 0),
         Decision::Prompt => {
@@ -5896,28 +6102,32 @@ async fn run_post_write_v2video(
         Decision::Execute => {}
         Decision::Cancelled => return (cancelled_data("post"), 0),
     }
+    // Idempotency claim → `Prepared` (bead sxu). `Sent` is written
+    // immediately before the POST /2/tweets create call below — upload
+    // failures before that point are definite and leave `prepared`.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
     if let Some(key) = &idempotency_key {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let store = twr_core::idempotency::default_store_path()
-            .map(|p| twr_core::idempotency::load(&p, now))
-            .unwrap_or_default();
-        match twr_core::idempotency::pre_check(&store, key) {
-            twr_core::PreCheck::ReplayCached(result) => {
-                return (
-                    serde_json::json!({"idempotent_replay": true, "result": result}),
-                    0,
-                )
+        if let Some(p) = &store_path {
+            match twr_core::idempotency::claim(p, key, now) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    )
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    )
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e}), 2),
             }
-            twr_core::PreCheck::RefuseUnknown => {
-                return (
-                    serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
-                    1,
-                )
-            }
-            twr_core::PreCheck::Proceed => {}
         }
     }
     let path = std::path::Path::new(&video_path);
@@ -6047,12 +6257,78 @@ async fn run_post_write_v2video(
             }
         }
     }
-    // Post the tweet referencing the uploaded media (cookie CreateTweet shape
-    // reused; v2 tweets/create is equivalent for text+media).
+    // CREATE the tweet (bead tab): the upload above only stages media —
+    // without this POST the old code returned a fake success with
+    // `"id": ""` and NO tweet was ever created. Now a real
+    // `POST /2/tweets` with `media.media_ids` (+ optional reply target).
+    // `Sent` + atomic budget reserve happen immediately before the wire,
+    // same contract as the cookie path.
+    let reply_to = reply_to.filter(|s| !s.is_empty());
+    let body = twr_v2::backend::create_tweet_body(
+        &text,
+        std::slice::from_ref(&media_id),
+        reply_to.as_deref(),
+    );
+    let raw = serde_json::to_vec(&body).unwrap_or_default();
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    );
+    if let Err(e) = reserve_budgets_at_send(true) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
+    let resp = match transport
+        .post_json(twr_v2::backend::TWEETS_CREATE_URL, &base, &raw)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            mark_unknown(&store_path, idempotency_key.as_deref());
+            return (
+                serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                1,
+            );
+        }
+    };
+    if resp.status == 429 {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return (serde_json::json!({"error": "rate limited"}), 4);
+    }
+    if !(200..300).contains(&resp.status) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return (
+            serde_json::json!({"error": format!("v2 tweet create failed: HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let Some(new_id) = twr_v2::backend::parse_created_tweet_id(&resp.body) else {
+        // HTTP 2xx but no data.id — ambiguous (may have landed); honest
+        // `unknown`, never a fake empty-id success (bead tab/sxu).
+        mark_unknown(&store_path, idempotency_key.as_deref());
+        return (
+            serde_json::json!({"error": "v2 tweet create returned no id (unexpected response shape) — the tweet may or may not have landed; check your timeline before retrying"}),
+            6,
+        );
+    };
+    let u01 = (now % 1000) as f64 / 1000.0;
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        cli::write::write_delay_secs(u01),
+    ))
+    .await;
     let alt_recorded = alt_text.is_some();
-    let _ = (config, reply_to, alt_text);
+    idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"id": new_id})),
+        now,
+    );
     (
-        serde_json::json!({"id": "", "operation": "post", "backend": "api-v2", "media_id": media_id, "alt_text_recorded": alt_recorded}),
+        serde_json::json!({"id": new_id, "operation": "post", "backend": "api-v2", "media_id": media_id, "alt_text_recorded": alt_recorded}),
         0,
     )
 }
