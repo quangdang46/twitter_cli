@@ -49,15 +49,11 @@ impl IdempotencyEntry {
 
 pub type IdempotencyStore = HashMap<String, IdempotencyEntry>;
 
-/// Default store path: `~/.twr/idempotency.json`.
+/// Default store path: `<state_dir>/idempotency.json` — the same
+/// `TWR_STATE_DIR`-aware location as the safety budgets (bead nku), so a
+/// sandboxed environment without HOME can still enforce dedup.
 pub fn default_store_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".twr").join("idempotency.json"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
+    crate::budget::state_dir().map(|d| d.join("idempotency.json"))
 }
 
 /// Load the store, pruning expired entries. Missing/garbage file = empty.
@@ -72,14 +68,60 @@ pub fn load(path: &Path, now_secs: u64) -> IdempotencyStore {
         .collect()
 }
 
-/// Persist the whole store (creating parent dirs).
+/// Persist the whole store (creating parent dirs) — atomically (tmp+rename)
+/// so a crash can never leave a truncated store that reads back empty and
+/// silently re-opens every keyed write to duplicates.
 pub fn save(path: &Path, store: &IdempotencyStore) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let raw = serde_json::to_string(store)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, raw)
+    crate::budget::atomic_write(path, &raw)
+}
+
+/// Atomically claim `key` for a new write (bead sxu/nku): under the state
+/// lock, load+prune the store, run [`pre_check`], and on `Proceed` insert
+/// a `Prepared` entry and persist — all in one critical section, so two
+/// concurrent invocations with the same key cannot both proceed.
+///
+/// The caller MUST advance the entry to `Sent` immediately before the
+/// network send ([`upsert`]) and to `Acknowledged`/`Unknown`/`Prepared`
+/// after the outcome is known. `Prepared` is deliberately non-blocking:
+/// a crash before send leaves a retryable state, never a false "in flight".
+///
+/// `Err` = state failure (lock timeout / unwritable) — fail closed.
+pub fn claim(path: &Path, key: &str, now_secs: u64) -> Result<PreCheck, String> {
+    crate::budget::with_state_lock(path, || {
+        let mut store = load(path, now_secs);
+        let check = pre_check(&store, key);
+        if check == PreCheck::Proceed {
+            store.insert(
+                key.to_string(),
+                IdempotencyEntry {
+                    state: WriteState::Prepared,
+                    created_at_secs: now_secs,
+                    result: None,
+                },
+            );
+            save(path, &store).map_err(|e| format!("cannot persist idempotency claim: {e}"))?;
+        }
+        Ok(check)
+    })
+    .map_err(|e| format!("cannot lock idempotency state: {e}"))?
+}
+
+/// Insert/replace one entry under the state lock (load → prune → insert →
+/// atomic save), so concurrent writers cannot lose each other's updates.
+/// `now_secs` comes from the entry's `created_at_secs` for pruning.
+///
+/// `Err` = state failure — callers should surface it, never silently
+/// proceed as if the transition persisted.
+pub fn upsert(path: &Path, key: &str, entry: IdempotencyEntry) -> Result<(), String> {
+    crate::budget::with_state_lock(path, || {
+        let now = entry.created_at_secs;
+        let mut store = load(path, now);
+        store.insert(key.to_string(), entry);
+        save(path, &store).map_err(|e| format!("cannot persist idempotency update: {e}"))
+    })
+    .map_err(|e| format!("cannot lock idempotency state: {e}"))?
 }
 
 /// Outcome of consulting the store before sending.
