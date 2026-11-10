@@ -5,6 +5,7 @@
 //! stderr.
 
 use clap::{CommandFactory, Parser, Subcommand};
+use std::io::IsTerminal;
 use twr_client::HttpTransport;
 use twr_core::{decide, emit, ApplyInput, Envelope, Meta, OutputFormat, OutputOptions};
 
@@ -639,7 +640,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Former `main` body: everything after CLI parsing.
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let format = OutputFormat::resolve_full(cli.json, cli.yaml, cli.toon, true);
+    // REAL terminal detection (bead gtg): piped stdin must never count as
+    // a TTY confirm, and piped stdout must auto-select the machine format.
+    // Hardcoding `true` here made every write gate prompt-able through a
+    // pipe (`echo yes | twr post x` executed) and kept YAML unreachable.
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let format = OutputFormat::resolve_full(cli.json, cli.yaml, cli.toon, stdout_is_tty);
     let mut opts = OutputOptions::new(cli.trace_id);
     opts.format = format;
     opts.compact = cli.compact;
@@ -656,8 +663,37 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     opts.apply = cli.apply;
     opts.dry_run = cli.dry_run;
     opts.no_interactive = cli.no_interactive;
-    opts.policy = twr_core::Policy::parse(&cli.policy).unwrap_or_default();
-    opts.time_mode = twr_core::TimeMode::parse(&cli.time).unwrap_or_default();
+    // Fail CLOSED on unparseable values (bead gtg): `unwrap_or_default()`
+    // mapped ANY invalid --policy to Policy::Write (the #[default]) —
+    // `--policy bogus --apply` was a silent write. Same for --time.
+    opts.policy = match twr_core::Policy::parse(&cli.policy) {
+        Some(p) => p,
+        None => {
+            let err = twr_core::TwrError::new(
+                twr_core::ErrorKind::UsagePolicyDenied,
+                format!(
+                    "invalid --policy {:?} (expected read_only|engagement|write)",
+                    cli.policy
+                ),
+            );
+            emit_fail(&opts, err, 2);
+            unreachable!("emit_fail exits the process")
+        }
+    };
+    opts.time_mode = match twr_core::TimeMode::parse(&cli.time) {
+        Some(t) => t,
+        None => {
+            let err = twr_core::TwrError::new(
+                twr_core::ErrorKind::UsagePolicyDenied,
+                format!(
+                    "invalid --time {:?} (expected relative|absolute|both)",
+                    cli.time
+                ),
+            );
+            emit_fail(&opts, err, 2);
+            unreachable!("emit_fail exits the process")
+        }
+    };
     opts.full_text = cli.full_text;
     opts.tier = cli.tier.clone();
     opts.backend = cli.backend.clone();
@@ -669,7 +705,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         apply: opts.apply,
         dry_run: opts.dry_run,
         no_interactive: opts.no_interactive,
-        stdin_is_tty: true,
+        stdin_is_tty,
     });
 
     if opts.verbosity() >= 1 {
@@ -1478,8 +1514,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         data = twr_core::apply_fields(&data, &opts.fields);
     }
 
-    // Human view: no explicit machine flag → render the table from the same data.
-    if !cli.json && !cli.yaml && !cli.toon {
+    // Human view: no explicit machine flag AND a real TTY → render the
+    // table. Piped stdout with no flag resolves to YAML above (bead gtg —
+    // the auto-YAML-when-piped contract was dead because this branch
+    // swallowed every flagless invocation).
+    if stdout_is_tty && !cli.json && !cli.yaml && !cli.toon {
         let text = render_human(kind, &data, &opts);
         println!("{text}");
         if exit_code != 0 {
@@ -3622,7 +3661,9 @@ async fn run_post_write(
             return (serde_json::json!({"error": e}), 2);
         }
     }
-    let stdin_is_tty = true; // TTY prompt path handled below via rpassword-free read
+    // Real TTY check (bead gtg): a pipe must NOT count as a confirm —
+    // `echo yes | twr post x` without --apply/--dry-run exits 2.
+    let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => {
@@ -4257,7 +4298,7 @@ async fn run_engage(
     if !opts.policy.allows(cmd) {
         return (serde_json::json!({"error": opts.policy.denial(cmd)}), 2);
     }
-    let stdin_is_tty = true;
+    let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => return (dry_run_data(cmd), 0),
@@ -4672,7 +4713,7 @@ async fn run_list_write(
             2,
         );
     }
-    let stdin_is_tty = true;
+    let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => return (dry_run_data(operation), 0),
@@ -5225,7 +5266,7 @@ async fn run_dm_send(
             2,
         );
     }
-    let stdin_is_tty = true;
+    let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => return (dry_run_data("dm-send"), 0),
