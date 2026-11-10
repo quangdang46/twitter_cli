@@ -112,10 +112,12 @@ pub fn tool_catalog() -> Vec<ToolDef> {
 }
 
 /// Dispatch one parsed request object → optional response object.
-/// `invoke` runs the tool and returns the envelope JSON string.
+/// `invoke` runs the tool and returns `(envelope JSON, exit code)`; a
+/// non-zero code marks the call `isError` (bead mew — tool failures must
+/// not masquerade as success).
 pub fn handle_request(
     req: &serde_json::Value,
-    invoke: &dyn Fn(&str, &serde_json::Value) -> String,
+    invoke: &dyn Fn(&str, &serde_json::Value) -> (String, i32),
 ) -> Option<serde_json::Value> {
     let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let method = req.get("method")?.as_str()?;
@@ -149,10 +151,13 @@ pub fn handle_request(
                     "error": {"code": -32602, "message": format!("unknown tool: {name}")},
                 }));
             }
-            let text = invoke(name, &args);
+            let (text, code) = invoke(name, &args);
             Some(serde_json::json!({
                 "jsonrpc": "2.0", "id": id,
-                "result": {"content": [{"type": "text", "text": text}]},
+                "result": {
+                    "content": [{"type": "text", "text": text}],
+                    "isError": code != 0,
+                },
             }))
         }
         _ => Some(serde_json::json!({
@@ -164,7 +169,7 @@ pub fn handle_request(
 
 /// Run the stdio loop: read lines on stdin, write responses on stdout.
 /// `invoke` dispatches tool calls (wired to the real runners in main.rs).
-pub fn serve_stdio(invoke: &dyn Fn(&str, &serde_json::Value) -> String) {
+pub fn serve_stdio(invoke: &dyn Fn(&str, &serde_json::Value) -> (String, i32)) {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -192,8 +197,8 @@ pub fn serve_stdio(invoke: &dyn Fn(&str, &serde_json::Value) -> String) {
 mod tests {
     use super::*;
 
-    fn echo_invoke(name: &str, _args: &serde_json::Value) -> String {
-        serde_json::json!({"tool": name}).to_string()
+    fn echo_invoke(name: &str, _args: &serde_json::Value) -> (String, i32) {
+        (serde_json::json!({"tool": name}).to_string(), 0)
     }
 
     #[test]

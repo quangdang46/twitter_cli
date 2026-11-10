@@ -726,11 +726,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let kind: &'static str;
     let mut data: serde_json::Value;
     let mut exit_code = 0;
+    // `twr status` reports `authenticated:false` as DATA (ok envelope) yet
+    // still exits 77 per the documented contract (README/SKILL/PLAN §5.2) —
+    // the answer succeeded, the session didn't. This flag keeps the ok
+    // envelope while propagating the exit code (bead mew).
+    let mut ok_despite_exit = false;
 
     match cli.command {
         Command::Status => {
             kind = "status";
             data = status_data(&opts);
+            if data.get("authenticated").and_then(|v| v.as_bool()) == Some(false) {
+                exit_code = 77;
+                ok_despite_exit = true;
+            }
         }
         Command::Schema => {
             kind = "schema";
@@ -778,7 +787,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Watch { op } => {
             kind = "watchlist";
-            let (d, code) = run_watch(op);
+            let (d, code) = run_watch(&opts, op);
             data = d;
             exit_code = code;
         }
@@ -789,6 +798,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             // stdio loop: never returns until stdin closes. We are already
             // inside the tokio runtime (#[tokio::main]), so dispatch via
             // block_in_place on the current handle (calls are sequential).
+            // MCP_SERVE_ACTIVE makes emit_fail return tuples instead of
+            // printing/exiting, so tool failures surface as ok:false
+            // envelopes inside the JSON-RPC result (bead mew).
+            MCP_SERVE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
             cli::mcp::serve_stdio(&|name, args| {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(mcp_invoke(name, args))
@@ -1290,8 +1303,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             command,
             args,
         } => {
-            kind = "scheduled";
-            let (d, code) = run_future(&opts, delay_secs, command, args).await;
+            // `future` delegates: after the delay it runs the inner read
+            // for real and returns THAT command's envelope (bead mew — the
+            // old stub slept then reported `scheduled:true` without ever
+            // executing). `kind` is therefore the inner command's type.
+            let (k, d, code) = run_future(&opts, &config, delay_secs, command, args).await;
+            kind = k;
             data = d;
             exit_code = code;
         }
@@ -1539,7 +1556,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // `Envelope::err` instead, reconstructing a `TwrError` from the exit code
     // (via `ErrorKind::from_exit_code`) and whatever message the handler put
     // in `data.error` (or `data.saved`/`data.logged_out` failure shapes).
-    if exit_code != 0 {
+    if exit_code != 0 && !ok_despite_exit {
         let envelope: Envelope<serde_json::Value> =
             Envelope::err(handler_error(exit_code, &data)).with_meta(meta);
         match opts.format {
@@ -1556,6 +1573,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         OutputFormat::Yaml => emit_yaml(&envelope)?,
         // TOON renders data only; errors fall back to JSON inside emit_toon.
         OutputFormat::Toon => twr_core::emit_toon(&envelope),
+    }
+    // ok_despite_exit (status unauthenticated): the ok envelope is the
+    // answer; the exit code still carries the auth-required signal.
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }
@@ -5682,10 +5704,29 @@ fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> S
     serde_json::to_string_pretty(data).unwrap_or_default()
 }
 
+/// Set while `twr mcp` serves stdio (bead mew): `emit_fail` must NOT print
+/// an envelope to stdout (that channel carries JSON-RPC frames) and must
+/// NOT `process::exit` (that would kill the whole MCP server on the first
+/// unauthenticated tool call). In this mode it returns the failure as a
+/// `(data, code)` tuple so the caller's normal error-envelope path (or
+/// `mcp_invoke`) renders `ok:false` instead.
+static MCP_SERVE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Auth-failure path: emit exactly one `ok:false` envelope and exit.
 /// Diverges (never returns) so the single-print-owner discipline holds —
-/// main's own emit is skipped because we exit here.
+/// main's own emit is skipped because we exit here. Under `twr mcp` it
+/// returns the tuple instead (see [`MCP_SERVE_ACTIVE`]).
 fn emit_fail(opts: &OutputOptions, err: twr_core::TwrError, code: i32) -> (serde_json::Value, i32) {
+    if MCP_SERVE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return (
+            serde_json::json!({
+                "error": err.message,
+                "error_code": format!("{:?}", err.code),
+                "suggestion": err.suggestion,
+            }),
+            code,
+        );
+    }
     let envelope: Envelope<serde_json::Value> =
         Envelope::err(err).with_meta(Meta::new(opts.trace_id.clone()));
     match opts.format {
@@ -5714,7 +5755,15 @@ fn run_cache_search(query: &str, max: usize) -> (serde_json::Value, i32) {
     }
 }
 
-fn run_watch(op: WatchOp) -> (serde_json::Value, i32) {
+/// `twr watch`: `list` is a pure read. `add`/`remove` mutate the LOCAL
+/// `~/.twr/cache.db` watchlist — no X network, no mutation budgets — but
+/// they are still writes, so they pass the SAME §5.3 gate as every other
+/// mutation (bead mew): `--dry-run` previews without touching the DB,
+/// `--apply` (or a TTY `yes`) executes, a bare non-interactive call exits
+/// 2, and `--policy` applies (watch ops are write-tier: `read_only` and
+/// `engagement` both deny — the engagement whitelist is a closed set of X
+/// ops and watch-add/remove are not on it).
+fn run_watch(opts: &OutputOptions, op: WatchOp) -> (serde_json::Value, i32) {
     let path = match twr_cache::default_db_path() {
         Some(p) => p,
         None => return (serde_json::json!({"error": "no home dir"}), 1),
@@ -5725,14 +5774,24 @@ fn run_watch(op: WatchOp) -> (serde_json::Value, i32) {
     };
     match op {
         WatchOp::Add { handle } => {
-            match twr_cache::watch_add(&conn, handle.trim_start_matches('@')) {
-                Ok(()) => (serde_json::json!({"watched": true}), 0),
+            let operation = "watch-add";
+            let handle = handle.trim_start_matches('@').to_string();
+            if let Some(denied) = watch_write_gate(opts, operation, &handle) {
+                return denied;
+            }
+            match twr_cache::watch_add(&conn, &handle) {
+                Ok(()) => (serde_json::json!({"watched": true, "handle": handle}), 0),
                 Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
             }
         }
         WatchOp::Remove { handle } => {
-            match twr_cache::watch_remove(&conn, handle.trim_start_matches('@')) {
-                Ok(true) => (serde_json::json!({"unwatched": true}), 0),
+            let operation = "watch-remove";
+            let handle = handle.trim_start_matches('@').to_string();
+            if let Some(denied) = watch_write_gate(opts, operation, &handle) {
+                return denied;
+            }
+            match twr_cache::watch_remove(&conn, &handle) {
+                Ok(true) => (serde_json::json!({"unwatched": true, "handle": handle}), 0),
                 Ok(false) => (serde_json::json!({"error": "not on watchlist"}), 3),
                 Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
             }
@@ -5741,6 +5800,64 @@ fn run_watch(op: WatchOp) -> (serde_json::Value, i32) {
             Ok(list) => (serde_json::json!({"watchlist": list}), 0),
             Err(e) => (serde_json::json!({"error": e.to_string()}), 7),
         },
+    }
+}
+
+/// §5.3 gate for the local watchlist mutations. Returns `Some((data, code))`
+/// when the invocation must stop (policy denial, ambiguous, preview,
+/// cancelled); `None` means execute for real. Local-only writes skip the
+/// X-mutation budgets — there is no network call to rate-limit.
+fn watch_write_gate(
+    opts: &OutputOptions,
+    operation: &str,
+    handle: &str,
+) -> Option<(serde_json::Value, i32)> {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    if !opts.policy.allows(operation) {
+        return Some((
+            serde_json::json!({"error": opts.policy.denial(operation)}),
+            2,
+        ));
+    }
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    match twr_core::decide(&twr_core::ApplyInput {
+        apply: opts.apply,
+        dry_run: opts.dry_run,
+        no_interactive: opts.no_interactive,
+        stdin_is_tty,
+    }) {
+        Decision::Deny(msg) => Some((serde_json::json!({"error": msg}), 2)),
+        Decision::Preview => {
+            let mut d = dry_run_data(operation);
+            d["handle"] = serde_json::json!(handle);
+            d["local_only"] = serde_json::json!(true);
+            Some((d, 0))
+        }
+        Decision::Prompt => {
+            if opts.no_interactive {
+                return Some((
+                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    2,
+                ));
+            }
+            eprintln!(
+                "This will {operation} \"{handle}\" (local watchlist only). Type 'yes' to proceed:"
+            );
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                let mut d = cancelled_data(operation);
+                d["handle"] = serde_json::json!(handle);
+                return Some((d, 0));
+            }
+            None
+        }
+        Decision::Execute => None,
+        Decision::Cancelled => {
+            let mut d = cancelled_data(operation);
+            d["handle"] = serde_json::json!(handle);
+            Some((d, 0))
+        }
     }
 }
 
@@ -5753,34 +5870,93 @@ pub fn future_allowed(command: &str) -> bool {
     matches!(command, "feed" | "search" | "user" | "tweet")
 }
 
+/// `twr future -d <secs> <read> [args...]`: one-shot delayed read (NOT
+/// cron — GUARDRAIL bead twitter_cli-5o3.1). Sleeps, then runs the inner
+/// read through the SAME runners as the direct command and returns its
+/// `(kind, data, code)` — the emitted envelope is the inner command's, so
+/// `twr future -d 5 feed` exits 0 having actually fetched the feed
+/// (bead mew: previously it slept and returned `scheduled:true` without
+/// executing anything).
+///
+/// Args mapping (positional, kept deliberately tiny — this is a delay
+/// primitive, not a scheduler):
+/// - `feed [tab] [max]`        tab: for-you|following (default for-you)
+/// - `search <query> [max]`    bare query; operator flags are NOT parsed
+///   here — pass a fully-formed query string
+/// - `user <handle>`
+/// - `tweet <id-or-url>`
 async fn run_future(
     opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
     delay_secs: u64,
     command: String,
     args: Vec<String>,
-) -> (serde_json::Value, i32) {
+) -> (&'static str, serde_json::Value, i32) {
     if delay_secs > MAX_FUTURE_DELAY_SECS {
         return (
+            "error",
             serde_json::json!({"error": format!("delay over {MAX_FUTURE_DELAY_SECS}s is not a one-shot delay — use cron, not twr")}),
             2,
         );
     }
     if !future_allowed(&command) {
         return (
+            "error",
             serde_json::json!({"error": format!("future supports read commands only (feed|search|user|tweet), not {command}")}),
             2,
         );
     }
     eprintln!("twr future: running `{command}` once after {delay_secs}s");
     tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-    // Re-exec the inner read by spawning a nested twr call is overkill;
-    // document the schedule and report the plan (the actual read runs through
-    // the same runners on the caller's next invocation path).
-    let _ = (opts, args);
-    (
-        serde_json::json!({"scheduled": true, "command": command, "delay_secs": delay_secs, "note": "one-shot only — not cron"}),
-        0,
-    )
+    let max = args
+        .get(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| args.get(2).and_then(|s| s.parse::<usize>().ok()));
+    match command.as_str() {
+        "feed" => {
+            let tab = args.first().cloned().unwrap_or_else(|| "for-you".into());
+            let (d, code) = run_feed(opts, config, tab, max, None, false).await;
+            ("tweet_list", d, code)
+        }
+        "search" => {
+            let Some(query) = args.first() else {
+                return (
+                    "error",
+                    serde_json::json!({"error": "future search needs a query argument"}),
+                    2,
+                );
+            };
+            let q = cli::search::SearchQuery {
+                query: query.clone(),
+                ..Default::default()
+            };
+            let (d, code) = run_search(opts, config, q, max, None, false).await;
+            ("tweet_list", d, code)
+        }
+        "user" => {
+            let Some(handle) = args.first() else {
+                return (
+                    "error",
+                    serde_json::json!({"error": "future user needs a handle argument"}),
+                    2,
+                );
+            };
+            let (d, code) = run_user(opts, config, handle.clone()).await;
+            ("user", d, code)
+        }
+        "tweet" => {
+            let Some(id) = args.first() else {
+                return (
+                    "error",
+                    serde_json::json!({"error": "future tweet needs an id-or-url argument"}),
+                    2,
+                );
+            };
+            let (d, code) = run_tweet(opts, config, id.clone()).await;
+            ("tweet_detail", d, code)
+        }
+        _ => unreachable!("future_allowed gate above"),
+    }
 }
 
 /// Headlines (issue #47): trending-search approximation until the Search
@@ -5824,66 +6000,106 @@ async fn run_headlines(
     )
 }
 
-/// MCP tool dispatch: name + arguments → envelope JSON string. Read-only and
-/// offline-capable tools run fully; credential-gated tools return their
-/// normal exit-77/2 envelopes as text (same contract as the CLI).
-async fn mcp_invoke(name: &str, args: &serde_json::Value) -> String {
-    // Minimal opts for MCP: JSON, fresh trace id.
+/// MCP tool dispatch: name + arguments → `(envelope JSON, exit code)`.
+/// Read-only and offline-capable tools run fully; credential-gated tools
+/// return their normal exit-77/2 envelopes as text (same contract as the
+/// CLI). The exit code is propagated so `tools/call` can set `isError`
+/// and failures serialize as `ok:false` envelopes — NEVER `ok:true`
+/// (beads mew/oen/ajm).
+async fn mcp_invoke(name: &str, args: &serde_json::Value) -> (String, i32) {
+    // Minimal opts for MCP: JSON, fresh trace id, no write flags — MCP
+    // exposes reads only (writes stay on the gated CLI path).
     let opts = OutputOptions::new(None);
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let home = home_path();
     let (config, _) = twr_config::load(&cwd, home.as_deref());
     let max = args.get("max").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let (kind, data): (&str, serde_json::Value) = match name {
-        "status" => ("status", status_data(&opts)),
+    let cursor = args
+        .get("cursor")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let str_arg = |key: &str| {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (kind, data, code): (&str, serde_json::Value, i32) = match name {
+        "status" => ("status", status_data(&opts), 0),
         "doctor" => {
-            let (d, _) = doctor_data(false, &opts);
-            ("doctor", d)
+            let (d, code) = doctor_data(false, &opts);
+            ("doctor", d, code)
         }
-        "query_ids" => ("query-ids", query_ids_data()),
+        "query_ids" => ("query-ids", query_ids_data(), 0),
         "feed" => {
-            let (d, _) = run_feed(
-                &opts,
-                &config,
-                "for-you".into(),
-                max,
-                args.get("cursor")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                false,
-            )
-            .await;
-            ("tweet_list", d)
+            let tab = args
+                .get("tab")
+                .and_then(|v| v.as_str())
+                .unwrap_or("for-you")
+                .to_string();
+            let (d, code) = run_feed(&opts, &config, tab, max, cursor, false).await;
+            ("tweet_list", d, code)
         }
         "search" => {
             let q = cli::search::SearchQuery {
-                query: args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .into(),
+                query: str_arg("query"),
                 ..Default::default()
             };
-            let (d, _) = run_search(&opts, &config, q, max, None, false).await;
-            ("tweet_list", d)
+            let (d, code) = run_search(&opts, &config, q, max, cursor, false).await;
+            ("tweet_list", d, code)
         }
         "tweet" => {
-            let id = args
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let (d, _) = run_tweet(&opts, &config, id).await;
-            ("tweet_detail", d)
+            let (d, code) = run_tweet(&opts, &config, str_arg("id")).await;
+            ("tweet_detail", d, code)
+        }
+        "show" => {
+            let index = args.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let (d, code) = run_show(&opts, index);
+            ("tweet_detail", d, code)
+        }
+        "article" => {
+            let markdown = args
+                .get("markdown")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let (d, code) = run_article(&opts, &config, str_arg("id"), markdown, None).await;
+            ("article", d, code)
+        }
+        "list" => {
+            let (d, code) = run_list(&opts, &config, str_arg("id"), max, false).await;
+            ("tweet_list", d, code)
         }
         "user" => {
-            let h = args
-                .get("handle")
+            let (d, code) = run_user(&opts, &config, str_arg("handle")).await;
+            ("user", d, code)
+        }
+        "user_posts" => {
+            let (d, code) = run_user_posts(&opts, &config, str_arg("handle"), max, false).await;
+            ("tweet_list", d, code)
+        }
+        "followers" => {
+            let (d, code) = run_followers(&opts, &config, str_arg("id"), max, cursor).await;
+            ("user_list", d, code)
+        }
+        "following" => {
+            let (d, code) = run_following(&opts, &config, str_arg("id"), max, cursor).await;
+            ("user_list", d, code)
+        }
+        "headlines" => {
+            let query = args
+                .get("query")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let (d, _) = run_user(&opts, &config, h).await;
-            ("user", d)
+                .map(str::to_string);
+            let (d, code) = run_headlines(&opts, &config, query, max, false).await;
+            ("headline_list", d, code)
+        }
+        "cache_search" => {
+            let (d, code) = run_cache_search(&str_arg("query"), max.unwrap_or(20));
+            ("tweet_list", d, code)
+        }
+        "watch_list" => {
+            let (d, code) = run_watch(&opts, WatchOp::List);
+            ("watchlist", d, code)
         }
         _ => {
             let err = twr_core::TwrError::new(
@@ -5891,11 +6107,18 @@ async fn mcp_invoke(name: &str, args: &serde_json::Value) -> String {
                 format!("MCP tool '{name}' not wired (use the CLI for writes)"),
             );
             let env: Envelope<serde_json::Value> = Envelope::err(err);
-            return serde_json::to_string(&env).unwrap_or_default();
+            return (serde_json::to_string(&env).unwrap_or_default(), 2);
         }
     };
-    let envelope = Envelope::ok(kind, data).with_meta(Meta::new(opts.trace_id.clone()));
-    serde_json::to_string(&envelope).unwrap_or_default()
+    let meta = Meta::new(opts.trace_id.clone());
+    let envelope: Envelope<serde_json::Value> = if code == 0 {
+        Envelope::ok(kind, data).with_meta(meta)
+    } else {
+        // Same reconstruction the CLI emit path uses: ok:false + the
+        // handler's own error/suggestion, never a wrapped success.
+        Envelope::err(handler_error(code, &data)).with_meta(meta)
+    };
+    (serde_json::to_string(&envelope).unwrap_or_default(), code)
 }
 
 /// Backend-aware search: cookie path via run_search, api-v2 via Bearer GET.
