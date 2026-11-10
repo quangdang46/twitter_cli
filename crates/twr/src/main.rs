@@ -1686,111 +1686,107 @@ fn status_data(opts: &OutputOptions) -> serde_json::Value {
     }
 }
 
+/// Envelope `type` for each top-level subcommand (bead oen). Every clap
+/// subcommand MUST appear here — the `catalog_covers_every_clap_subcommand`
+/// test enforces it, so `twr commands`/`twr schema` can never silently omit
+/// a live command again.
+fn envelope_type_of(command: &str) -> &'static str {
+    match command {
+        "status" => "status",
+        "schema" => "schema",
+        "commands" => "commands",
+        "query-ids" => "query-ids",
+        "doctor" => "doctor",
+        "login" | "logout" => "auth",
+        "cache-search" => "tweet_list",
+        "watch" | "watch-add" | "watch-remove" | "watch-list" => "watchlist",
+        // completions prints a shell script and mcp serves JSON-RPC stdio —
+        // neither emits an envelope; "none" says so explicitly.
+        "completions" => "none",
+        "mcp" => "none",
+        "post" | "reply" | "quote" | "edit" | "delete" | "like" | "unlike" | "retweet"
+        | "unretweet" | "bookmark" | "unbookmark" | "follow" | "unfollow" | "mute" | "unmute"
+        | "block" | "unblock" | "pin" | "unpin" | "list-create" | "list-edit" | "list-delete"
+        | "list-add-member" | "list-remove-member" | "list-follow" | "list-unfollow"
+        | "list-pin" | "list-unpin" | "dm-send" => "write_result",
+        "dm-list" => "dm_list",
+        "dm-read" => "dm_message_list",
+        "feed" | "bookmarks" | "bookmarks-folders" | "bookmarks-folder" | "search" | "list"
+        | "user-posts" | "user-replies" | "user-media" | "likes" => "tweet_list",
+        "tweet" | "show" => "tweet_detail",
+        "article" => "article",
+        "lists" => "list_list",
+        "list-members" | "followers" | "following" => "user_list",
+        "mentions" | "notifications" => "notification_list",
+        "user" => "user",
+        "headlines" => "headline_list",
+        // `future` delegates: the emitted envelope is the INNER command's
+        // type (tweet_list|tweet_detail|user) — see run_future.
+        "future" => "delegated",
+        _ => "unknown",
+    }
+}
+
+/// `(name, type, desc)` rows for `twr commands`/`twr schema`, generated
+/// from the clap `Command` enum so the catalogs track the real CLI
+/// surface (bead oen). Pseudo-entries that clap cannot express as
+/// top-level subcommands (flag variants of `bookmarks`, the `watch`
+/// sub-ops) are appended explicitly.
+fn catalog_entries() -> Vec<(String, &'static str, String)> {
+    let mut out: Vec<(String, &'static str, String)> = Vec::new();
+    for sub in Cli::command().get_subcommands() {
+        let name = sub.get_name().to_string();
+        let ty = envelope_type_of(&name);
+        let desc = sub.get_about().map(|s| s.to_string()).unwrap_or_default();
+        out.push((name, ty, desc));
+    }
+    // `watch` is one clap subcommand with nested ops — list each op so an
+    // agent can discover them (the bare `watch` entry above covers the
+    // parent).
+    for (suffix, desc) in [
+        (
+            "add <handle>",
+            "Add a handle to the watchlist (gated write)",
+        ),
+        ("remove <handle>", "Remove a handle (gated write)"),
+        ("list", "List watched handles (free read)"),
+    ] {
+        out.push((format!("watch {suffix}"), "watchlist", desc.to_string()));
+    }
+    // `bookmarks` flag variants are distinct envelope types.
+    out.push((
+        "bookmarks --folders".to_string(),
+        "bookmark_folder_list",
+        "List bookmark folders".to_string(),
+    ));
+    out.push((
+        "bookmarks --folder".to_string(),
+        "tweet_list",
+        "Tweets in one bookmark folder: bookmarks --folder <id> [--since YYYY-MM-DD]".to_string(),
+    ));
+    out
+}
+
 /// `twr schema`: envelope types per command.
 fn schema_data() -> serde_json::Value {
+    let commands: Vec<serde_json::Value> = catalog_entries()
+        .iter()
+        .map(|(name, ty, _)| serde_json::json!({"name": name, "type": ty}))
+        .collect();
     serde_json::json!({
         "schema_version": "1",
-        "commands": [
-            {"name": "status", "type": "status"},
-            {"name": "schema", "type": "schema"},
-            {"name": "commands", "type": "commands"},
-            {"name": "query-ids", "type": "query-ids"},
-            {"name": "doctor", "type": "doctor"},
-            {"name": "login", "type": "auth"},
-            {"name": "logout", "type": "auth"},
-            {"name": "feed", "type": "tweet_list"},
-            {"name": "bookmarks", "type": "tweet_list"},
-            {"name": "bookmarks --folders", "type": "bookmark_folder_list"},
-            {"name": "bookmarks --folder", "type": "tweet_list"},
-            {"name": "search", "type": "tweet_list"},
-            {"name": "tweet", "type": "tweet_detail"},
-            {"name": "show", "type": "tweet_detail"},
-            {"name": "article", "type": "article"},
-            {"name": "list", "type": "tweet_list"},
-            {"name": "lists", "type": "list_list"},
-            {"name": "list-members", "type": "user_list"},
-            {"name": "user", "type": "user"},
-            {"name": "user-posts", "type": "tweet_list"},
-            {"name": "user-replies", "type": "tweet_list"},
-            {"name": "user-media", "type": "tweet_list"},
-            {"name": "mentions", "type": "notification_list"},
-            {"name": "notifications", "type": "notification_list"},
-            {"name": "likes", "type": "tweet_list"},
-            {"name": "followers", "type": "user_list"},
-            {"name": "following", "type": "user_list"},
-            {"name": "mute", "type": "write_result"},
-            {"name": "unmute", "type": "write_result"},
-            {"name": "block", "type": "write_result"},
-            {"name": "unblock", "type": "write_result"},
-            {"name": "pin", "type": "write_result"},
-            {"name": "unpin", "type": "write_result"},
-            {"name": "list-create", "type": "write_result"},
-            {"name": "list-edit", "type": "write_result"},
-            {"name": "list-delete", "type": "write_result"},
-            {"name": "list-add-member", "type": "write_result"},
-            {"name": "list-remove-member", "type": "write_result"},
-            {"name": "list-follow", "type": "write_result"},
-            {"name": "list-unfollow", "type": "write_result"},
-            {"name": "list-pin", "type": "write_result"},
-            {"name": "list-unpin", "type": "write_result"},
-            {"name": "edit", "type": "write_result"},
-            {"name": "dm-list", "type": "dm_list"},
-            {"name": "dm-read", "type": "dm_message_list"},
-            {"name": "dm-send", "type": "write_result"},
-        ]
+        "commands": commands,
     })
 }
 
 /// `twr commands`: machine-readable command inventory.
 fn commands_data() -> serde_json::Value {
-    serde_json::json!([
-        {"name": "status", "type": "status", "desc": "Auth gate — call first"},
-        {"name": "schema", "type": "schema", "desc": "Envelope schema per type"},
-        {"name": "commands", "type": "commands", "desc": "This inventory"},
-        {"name": "query-ids", "type": "query-ids", "desc": "Resolved query IDs per op"},
-        {"name": "doctor", "type": "doctor", "desc": "Health checks (--refresh re-anchors)"},
-        {"name": "login", "type": "auth", "desc": "Login (--cookie/--guide)"},
-        {"name": "logout", "type": "auth", "desc": "Clear saved session"},
-        {"name": "feed", "type": "tweet_list", "desc": "Home/feed timeline"},
-        {"name": "bookmarks", "type": "tweet_list", "desc": "Own bookmarks"},
-        {"name": "bookmarks --folders", "type": "bookmark_folder_list", "desc": "List bookmark folders"},
-        {"name": "bookmarks --folder <id> [--since YYYY-MM-DD]", "type": "tweet_list", "desc": "Tweets in one bookmark folder"},
-        {"name": "search", "type": "tweet_list", "desc": "Search with operator flags"},
-        {"name": "tweet", "type": "tweet_detail", "desc": "Single tweet by ID/URL"},
-        {"name": "show", "type": "tweet_detail", "desc": "Nth item of last list"},
-        {"name": "article", "type": "article", "desc": "Long-form article"},
-        {"name": "list", "type": "tweet_list", "desc": "List timeline"},
-        {"name": "lists", "type": "list_list", "desc": "Lists owned (or --member-of memberships)"},
-        {"name": "list-members", "type": "user_list", "desc": "Members of a list"},
-        {"name": "user", "type": "user", "desc": "Profile by handle"},
-        {"name": "user-posts", "type": "tweet_list", "desc": "Posts by handle"},
-        {"name": "user-replies", "type": "tweet_list", "desc": "Posts + replies by handle (ungated tab)"},
-        {"name": "user-media", "type": "tweet_list", "desc": "Photo/video posts by handle"},
-        {"name": "mentions", "type": "notification_list", "desc": "Tweets mentioning you"},
-        {"name": "notifications", "type": "notification_list", "desc": "Likes/retweets/follows/quotes on your content"},
-        {"name": "likes", "type": "tweet_list", "desc": "Own-account likes"},
-        {"name": "followers", "type": "user_list", "desc": "Followers of user id"},
-        {"name": "following", "type": "user_list", "desc": "Following of user id"},
-        {"name": "mute", "type": "write_result", "desc": "Mute a user id (invisible to target)"},
-        {"name": "unmute", "type": "write_result", "desc": "Unmute a user id"},
-        {"name": "block", "type": "write_result", "desc": "Block a user id (target-visible)"},
-        {"name": "unblock", "type": "write_result", "desc": "Unblock a user id"},
-        {"name": "pin", "type": "write_result", "desc": "Pin a tweet to your profile (replaces previous)"},
-        {"name": "unpin", "type": "write_result", "desc": "Unpin your profile tweet"},
-        {"name": "list-create", "type": "write_result", "desc": "Create a list (surfaces list_id)"},
-        {"name": "list-edit", "type": "write_result", "desc": "Rename/redescribe/toggle-private a list"},
-        {"name": "list-delete", "type": "write_result", "desc": "Delete a list (always previews, destructive)"},
-        {"name": "list-add-member", "type": "write_result", "desc": "Add ONE user to a list (no batch flag)"},
-        {"name": "list-remove-member", "type": "write_result", "desc": "Remove ONE user from a list"},
-        {"name": "list-follow", "type": "write_result", "desc": "Subscribe to someone else's list"},
-        {"name": "list-unfollow", "type": "write_result", "desc": "Unsubscribe from a list"},
-        {"name": "list-pin", "type": "write_result", "desc": "Pin a list to your sidebar"},
-        {"name": "list-unpin", "type": "write_result", "desc": "Unpin a list from your sidebar"},
-        {"name": "edit", "type": "write_result", "desc": "Edit a tweet's text (Premium-gated, same CreateTweet op)"},
-        {"name": "dm-list", "type": "dm_list", "desc": "List your DM conversations (private, never logged)"},
-        {"name": "dm-read", "type": "dm_message_list", "desc": "Read one DM conversation's message history"},
-        {"name": "dm-send", "type": "write_result", "desc": "Send a DM (write-policy only, own daily cap, no batch)"},
-    ])
+    serde_json::Value::Array(
+        catalog_entries()
+            .iter()
+            .map(|(name, ty, desc)| serde_json::json!({"name": name, "type": ty, "desc": desc}))
+            .collect(),
+    )
 }
 
 /// `twr query-ids`: resolved ID + source layer per known op.
@@ -7236,6 +7232,25 @@ mod p61_catalog_tests {
             assert!(
                 commands.contains(name) || commands.iter().any(|c| c.starts_with(name)),
                 "{name} missing from commands_data"
+            );
+        }
+    }
+
+    /// Bead oen: `twr commands`/`twr schema` are generated from the clap
+    /// enum — this test is the parity anchor that keeps them complete.
+    /// Every top-level subcommand must appear in the catalog with a real
+    /// envelope type (never "unknown").
+    #[test]
+    fn catalog_covers_every_clap_subcommand() {
+        let entries = catalog_entries();
+        let names: HashSet<&str> = entries.iter().map(|(n, _, _)| n.as_str()).collect();
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            assert!(names.contains(name), "{name} missing from catalog");
+            assert_ne!(
+                envelope_type_of(name),
+                "unknown",
+                "{name} has no envelope type"
             );
         }
     }

@@ -18,13 +18,20 @@
 
 use std::io::BufRead;
 
-/// Tool descriptor: name + description + envelope type. Mirrors `twr commands`.
+/// Tool descriptor: name + description + envelope type + JSON-Schema
+/// input contract. Mirrors `twr commands`; every catalog tool is wired in
+/// `mcp_invoke` (bead oen — no advertised-but-unimplemented tools).
 #[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
     pub envelope_type: &'static str,
+    /// JSON-Schema object emitted verbatim as `inputSchema` in tools/list.
+    pub input_schema: &'static str,
 }
+
+/// `{}`-properties schema shorthand for no-arg tools.
+const NO_ARGS: &str = r#"{"type":"object","properties":{}}"#;
 
 pub fn tool_catalog() -> Vec<ToolDef> {
     vec![
@@ -32,81 +39,97 @@ pub fn tool_catalog() -> Vec<ToolDef> {
             name: "status",
             description: "Auth gate — call first",
             envelope_type: "status",
+            input_schema: NO_ARGS,
         },
         ToolDef {
             name: "doctor",
             description: "Health checks",
             envelope_type: "doctor",
+            input_schema: r#"{"type":"object","properties":{"refresh":{"type":"boolean","description":"Re-anchor query IDs + transaction key from a live rescrape"}}}"#,
         },
         ToolDef {
             name: "query_ids",
             description: "Resolved query IDs per op",
             envelope_type: "query-ids",
+            input_schema: NO_ARGS,
         },
         ToolDef {
             name: "feed",
             description: "Home/feed timeline",
             envelope_type: "tweet_list",
+            input_schema: r#"{"type":"object","properties":{"tab":{"type":"string","enum":["for-you","following"],"default":"for-you"},"max":{"type":"integer","minimum":1},"cursor":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "search",
             description: "Search with operator flags",
             envelope_type: "tweet_list",
+            input_schema: r#"{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"max":{"type":"integer","minimum":1},"cursor":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "tweet",
             description: "Single tweet by ID/URL",
             envelope_type: "tweet_detail",
+            input_schema: r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"Numeric tweet ID or x.com/twitter.com status URL"}}}"#,
         },
         ToolDef {
             name: "show",
             description: "Nth item of last list",
             envelope_type: "tweet_detail",
+            input_schema: r#"{"type":"object","required":["index"],"properties":{"index":{"type":"integer","minimum":0}}}"#,
         },
         ToolDef {
             name: "article",
             description: "Long-form article",
             envelope_type: "article",
+            input_schema: r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"markdown":{"type":"boolean","default":false}}}"#,
         },
         ToolDef {
             name: "list",
             description: "List timeline",
             envelope_type: "tweet_list",
+            input_schema: r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string","description":"List ID or URL"},"max":{"type":"integer","minimum":1}}}"#,
         },
         ToolDef {
             name: "user",
             description: "Profile by handle",
             envelope_type: "user",
+            input_schema: r#"{"type":"object","required":["handle"],"properties":{"handle":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "user_posts",
             description: "Posts by handle",
             envelope_type: "tweet_list",
+            input_schema: r#"{"type":"object","required":["handle"],"properties":{"handle":{"type":"string"},"max":{"type":"integer","minimum":1}}}"#,
         },
         ToolDef {
             name: "followers",
             description: "Followers of a user id or screen name",
             envelope_type: "user_list",
+            input_schema: r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"max":{"type":"integer","minimum":1},"cursor":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "following",
             description: "Following of a user id or screen name",
             envelope_type: "user_list",
+            input_schema: r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string"},"max":{"type":"integer","minimum":1},"cursor":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "headlines",
             description: "Today's headlines (fallback)",
             envelope_type: "headline_list",
+            input_schema: r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer","minimum":1}}}"#,
         },
         ToolDef {
             name: "cache_search",
-            description: "Local SQLite cache search",
+            description: "Local SQLite cache search (offline, FTS5)",
             envelope_type: "tweet_list",
+            input_schema: r#"{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"max":{"type":"integer","minimum":1,"default":20}}}"#,
         },
         ToolDef {
             name: "watch_list",
             description: "List watched handles",
             envelope_type: "watchlist",
+            input_schema: NO_ARGS,
         },
     ]
 }
@@ -137,7 +160,8 @@ pub fn handle_request(
                 "tools": tool_catalog().iter().map(|t| serde_json::json!({
                     "name": t.name,
                     "description": format!("{} (envelope: {})", t.description, t.envelope_type),
-                    "inputSchema": {"type": "object"},
+                    "inputSchema": serde_json::from_str::<serde_json::Value>(t.input_schema)
+                        .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
                 })).collect::<Vec<_>>(),
             },
         })),
