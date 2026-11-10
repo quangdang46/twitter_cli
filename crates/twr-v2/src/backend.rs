@@ -119,6 +119,38 @@ impl ReplyScope {
     }
 }
 
+/// v2 tweet create endpoint (POST /2/tweets).
+pub const TWEETS_CREATE_URL: &str = "https://api.twitter.com/2/tweets";
+
+/// Body for `POST /2/tweets` (bead tab): text + optional uploaded-media
+/// ids + optional reply target. `media_ids` attaches already-uploaded
+/// media (see [`crate::video`]); empty slice → no `media` key.
+pub fn create_tweet_body(
+    text: &str,
+    media_ids: &[String],
+    reply_to: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "text": text });
+    if !media_ids.is_empty() {
+        body["media"] = serde_json::json!({ "media_ids": media_ids });
+    }
+    if let Some(id) = reply_to.filter(|s| !s.is_empty()) {
+        body["reply"] = serde_json::json!({ "in_reply_to_tweet_id": id });
+    }
+    body
+}
+
+/// Extract the created tweet id from a `POST /2/tweets` response
+/// (`data.id`). Returns None on any other shape — callers must fail
+/// closed rather than report a fake success.
+pub fn parse_created_tweet_id(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.pointer("/data/id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

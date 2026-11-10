@@ -9,6 +9,9 @@ pub mod backend;
 pub mod oauth;
 pub mod video;
 
-pub use backend::{route, search_url, tweet_url, Backend, ReplyScope, SearchScope, V2_API_ROOT};
+pub use backend::{
+    create_tweet_body, parse_created_tweet_id, route, search_url, tweet_url, Backend, ReplyScope,
+    SearchScope, TWEETS_CREATE_URL, V2_API_ROOT,
+};
 pub use oauth::{OAuth2Tokens, DEFAULT_REDIRECT_URI, DEFAULT_SCOPES};
 pub use video::{UploadStatus, MAX_VIDEO_BYTES, VIDEO_CHUNK_BYTES};
