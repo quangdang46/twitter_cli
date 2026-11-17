@@ -395,6 +395,16 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
         article_text: article.text,
         is_subscriber_only,
         is_promoted: false,
+        conversation_id: actual_legacy
+            .get("conversation_id_str")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        in_reply_to_status_id: actual_legacy
+            .get("in_reply_to_status_id_str")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -765,6 +775,16 @@ pub fn parse_notifications_response(
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            conversation_id: t
+                .get("conversation_id_str")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            in_reply_to_status_id: t
+                .get("in_reply_to_status_id_str")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         });
     }
     // Newest-first, mirroring xfetch's createdAt sort.

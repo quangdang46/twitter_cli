@@ -61,7 +61,9 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 - `list-members` reuses the `user_list` shape verbatim (`{"users": [...], "page": {...}}`)
 - `notification_list`: `{"events": NotificationEvent[], "tweets": Tweet[], "page": {...}}` (from `mentions`/`notifications`); `NotificationEvent{event_type, actors[{id,screen_name,name}], tweet_ids[], timestamp_ms, message?}` — events are NOT Tweets, the `tweets` array holds the referenced bodies (globalObjects-resolved) so an agent needs no second call
 - `mentions` vs `notifications`: SAME REST endpoint family (`/i/api/2/notifications/{mentions,all}.json`), server-side kind filter — `mentions` is not a client-side filter over `all`, and neither is `UserTweetsAndReplies`-on-self (that returns your own posts+replies, not others' mentions of you)
-- `tweet_detail`: a single `Tweet`
+- `tweet_detail`: a single `Tweet`; `tweet --conversation` returns the whole parsed
+  TweetDetail page instead: `{"tweets": Tweet[], "page": {"nextCursor"?, "hasMore"}}`
+  (focal tweet included; pass `page.nextCursor` back as `--cursor` to continue)
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
 - `user` / `user_list`: `UserProfile` / `{"users": [...], "page": {...}}` (list parsing
   completes with fixture parity). `followers`/`following` take a numeric user id **or a
@@ -87,5 +89,6 @@ Field names mirror the Python original for fixture parity:
 `Tweet{id,text,author{name,screen_name,profile_image_url,verified},
 metrics{likes,retweets,replies,quotes,views,bookmarks},created_at,
 media[{type,url,width,height}],urls,is_retweet,lang,retweeted_by,
-quoted_tweet,score,article_title,article_text,is_subscriber_only,is_promoted}`.
+quoted_tweet,score,article_title,article_text,is_subscriber_only,is_promoted,
+conversation_id?,in_reply_to_status_id?}`.
 `--compact` strips `profile_image_url`, media dims, `urls`.

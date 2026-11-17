@@ -76,6 +76,10 @@ pub struct Tweet {
     pub is_subscriber_only: bool,
     #[serde(default)]
     pub is_promoted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to_status_id: Option<String>,
 }
 
 /// A Twitter List (owned or followed). NOT a Tweet — its own type, mirroring
