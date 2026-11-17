@@ -166,6 +166,7 @@ mod tests {
             is_promoted: false,
             conversation_id: None,
             in_reply_to_status_id: None,
+            grok_translated_post_with_availability: None,
         }
     }
 

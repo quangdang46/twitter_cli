@@ -405,6 +405,10 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        grok_translated_post_with_availability: actual_data
+            .get("grok_translated_post_with_availability")
+            .filter(|v| v.is_object())
+            .cloned(),
     })
 }
 
@@ -785,6 +789,8 @@ pub fn parse_notifications_response(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            // URT legacy tweets don't carry the GraphQL grok field.
+            grok_translated_post_with_availability: None,
         });
     }
     // Newest-first, mirroring xfetch's createdAt sort.

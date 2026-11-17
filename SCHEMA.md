@@ -90,5 +90,9 @@ Field names mirror the Python original for fixture parity:
 metrics{likes,retweets,replies,quotes,views,bookmarks},created_at,
 media[{type,url,width,height}],urls,is_retweet,lang,retweeted_by,
 quoted_tweet,score,article_title,article_text,is_subscriber_only,is_promoted,
-conversation_id?,in_reply_to_status_id?}`.
+conversation_id?,in_reply_to_status_id?,
+grok_translated_post_with_availability?}` — the last is the raw X
+`grok_translated_post_with_availability` object, present only when the
+server supplies it (tweet-read ops send the
+`responsive_web_grok_show_grok_translated_post` feature flag; issue #7).
 `--compact` strips `profile_image_url`, media dims, `urls`.

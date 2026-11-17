@@ -67,6 +67,7 @@ fn request_shape_is_correct() {
         method: "GET",
         os: Os::Linux,
         chrome_major: "133",
+        user_agent: None,
         locale: "en-US",
         transaction_id: None, // UserByScreenName is NOT gated — must be absent
     });

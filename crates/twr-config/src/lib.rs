@@ -35,6 +35,7 @@ pub fn default_config() -> TwrConfig {
             retries: 3,
             backoff_secs: 5.0,
         },
+        browser: BrowserConfig::default(),
     }
 }
 
@@ -46,6 +47,8 @@ pub struct TwrConfig {
     pub filter: FilterConfig,
     #[serde(default, rename = "rateLimit")]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 impl Default for TwrConfig {
@@ -126,6 +129,23 @@ fn default_retries() -> u32 {
 }
 fn default_backoff() -> f64 {
     5.0
+}
+
+/// Browser-fingerprint knobs (issue #6): the User-Agent string and the
+/// Chrome major version baked into `User-Agent`/`sec-ch-ua*`, plus the
+/// TLS/HTTP2 emulation profile name. All optional — unset keeps the
+/// built-in Chrome defaults. Env overrides: `TWITTER_BROWSER__CHROME_MAJOR`,
+/// `TWITTER_BROWSER__USER_AGENT` (the TLS profile itself is selected by
+/// `TWITTER_EMULATION` inside twr-client, e.g. `chrome_133`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BrowserConfig {
+    /// Chrome major version for the generated UA + client hints
+    /// (default `"133"`).
+    #[serde(default, rename = "chromeMajor", alias = "chrome_major")]
+    pub chrome_major: Option<String>,
+    /// Full `User-Agent` override, used verbatim when set (non-empty).
+    #[serde(default, rename = "userAgent", alias = "user_agent")]
+    pub user_agent: Option<String>,
 }
 
 impl Default for RateLimitConfig {
@@ -314,6 +334,25 @@ mod tests {
         assert_eq!(c.fetch.count, 50);
         assert_eq!(errors.len(), 1);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_section_accepts_camel_and_snake_keys() {
+        // YAML files use the camelCase names (rateLimit convention); the
+        // snake_case aliases cover figment's lowercased TWITTER_BROWSER__*
+        // env keys.
+        let yaml = "browser:\n  chromeMajor: \"135\"\n  userAgent: \"EnvUA/9.9\"\n";
+        let c: TwrConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.browser.chrome_major.as_deref(), Some("135"));
+        assert_eq!(c.browser.user_agent.as_deref(), Some("EnvUA/9.9"));
+        let snake: TwrConfig = serde_json::from_value(serde_json::json!({
+            "browser": {"chrome_major": "136", "user_agent": "SnakeUA/1.0"}
+        }))
+        .unwrap();
+        assert_eq!(snake.browser.chrome_major.as_deref(), Some("136"));
+        assert_eq!(snake.browser.user_agent.as_deref(), Some("SnakeUA/1.0"));
+        // Absent section → all-None (built-in defaults apply downstream).
+        assert_eq!(default_config().browser, BrowserConfig::default());
     }
 
     #[test]

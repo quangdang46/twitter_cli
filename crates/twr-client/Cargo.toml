@@ -14,7 +14,7 @@ async-trait = { workspace = true }
 # `time` for the async video-processing STATUS poll (issue #1).
 tokio = { workspace = true, features = ["time"] }
 wreq = { version = "0.15.3", features = ["cookies", "gzip"] }
-wreq-util = { version = "0.1", features = ["emulation"] }
+wreq-util = { version = "0.1", features = ["emulation", "emulation-serde"] }
 
 [dev-dependencies]
 # `test-util` backs `#[tokio::test(start_paused = true)]`, so the processing
