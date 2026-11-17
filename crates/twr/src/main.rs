@@ -473,6 +473,13 @@ enum Command {
         /// v2 reply scope: auto|recent|all (api-v2 backend only).
         #[arg(long, env = "TWR_REPLY_SCOPE", default_value = "auto")]
         reply_scope: String,
+        /// Return the whole parsed TweetDetail page (all conversation posts +
+        /// next cursor) instead of only the focal tweet. Cookie backend only.
+        #[arg(long)]
+        conversation: bool,
+        /// Resume the conversation timeline at this cursor (--conversation).
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Show the Nth item of the last list (`~/.twr/last.json`).
     Show {
@@ -1419,9 +1426,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
-        Command::Tweet { id, reply_scope } => {
+        Command::Tweet {
+            id,
+            reply_scope,
+            conversation,
+            cursor,
+        } => {
             kind = "tweet_detail";
-            let (d, code) = run_tweet_v2aware(&opts, &config, id, reply_scope).await;
+            let (d, code) =
+                run_tweet_v2aware(&opts, &config, id, reply_scope, conversation, cursor).await;
             data = d;
             exit_code = code;
         }
@@ -1804,7 +1817,9 @@ fn schema_type_fields() -> serde_json::Value {
             "page": page,
             "query": "string? (cache-search echoes the FTS query)"
         },
-        "tweet_detail": tweet,
+        "tweet_detail": {
+            "note": "data is the Tweet object itself; `tweet --conversation` instead returns {tweets: Tweet[], page: {nextCursor?, hasMore}}"
+        },
         "article": {"title": "string", "markdown": "string"},
         "user": "UserProfile (see SCHEMA.md §Tweet/UserProfile)",
         "user_list": {"users": "UserProfile[]", "page": page},
@@ -2590,6 +2605,8 @@ async fn run_tweet(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     id: String,
+    conversation: bool,
+    cursor: Option<String>,
 ) -> (serde_json::Value, i32) {
     let Some(tweet_id) = cli::ids::normalize_tweet_id(&id) else {
         return (
@@ -2611,7 +2628,7 @@ async fn run_tweet(
     // Full variable set mirrors Python fetch_tweet_detail (focal + ranking
     // + community/voice/birdwatch toggles); the detail endpoint rejects
     // sparse variable sets.
-    let vars = serde_json::json!({
+    let mut vars = serde_json::json!({
         "focalTweetId": tweet_id,
         "referrer": "tweet",
         "with_rux_injections": false,
@@ -2622,6 +2639,11 @@ async fn run_tweet(
         "withBirdwatchNotes": true,
         "withVoice": true,
     });
+    if conversation {
+        if let Some(c) = &cursor {
+            vars["cursor"] = serde_json::json!(c);
+        }
+    }
     let toggles = serde_json::json!({
         "withArticleRichContentState": true,
         "withArticlePlainText": false,
@@ -2637,11 +2659,26 @@ async fn run_tweet(
     )
     .await
     {
-        Ok((tweets, _)) => {
+        Ok((tweets, next_cursor)) => {
             if tweets.is_empty() {
                 return (
                     serde_json::json!({"error": "tweet not found (tombstone/unavailable)"}),
                     3,
+                );
+            }
+            // --conversation: ship the whole parsed page (ancestors/context +
+            // focal + replies) with its cursor so threaded readers need no
+            // separate search request.
+            if conversation {
+                return (
+                    serde_json::json!({
+                        "tweets": tweets,
+                        "page": {
+                            "hasMore": next_cursor.is_some(),
+                            "nextCursor": next_cursor,
+                        },
+                    }),
+                    0,
                 );
             }
             // Focal-first: for a reply tweet's detail page, X returns the
@@ -2687,7 +2724,7 @@ async fn run_article(
     markdown: bool,
     output: Option<String>,
 ) -> (serde_json::Value, i32) {
-    let (data, code) = run_tweet(opts, config, id).await;
+    let (data, code) = run_tweet(opts, config, id, false, None).await;
     if code != 0 {
         return (data, code);
     }
@@ -6089,7 +6126,7 @@ async fn run_future(
                     2,
                 );
             };
-            let (d, code) = run_tweet(opts, config, id.clone()).await;
+            let (d, code) = run_tweet(opts, config, id.clone(), false, None).await;
             ("tweet_detail", d, code)
         }
         _ => unreachable!("future_allowed gate above"),
@@ -6186,7 +6223,7 @@ async fn mcp_invoke(name: &str, args: &serde_json::Value) -> (String, i32) {
             ("tweet_list", d, code)
         }
         "tweet" => {
-            let (d, code) = run_tweet(&opts, &config, str_arg("id")).await;
+            let (d, code) = run_tweet(&opts, &config, str_arg("id"), false, None).await;
             ("tweet_detail", d, code)
         }
         "show" => {
@@ -6336,6 +6373,8 @@ async fn run_tweet_v2aware(
     config: &twr_config::TwrConfig,
     id: String,
     reply_scope: String,
+    conversation: bool,
+    cursor: Option<String>,
 ) -> (serde_json::Value, i32) {
     let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
     let (routed, why) = twr_v2::route("tweet", backend);
@@ -6380,7 +6419,9 @@ async fn run_tweet_v2aware(
             0,
         );
     }
-    run_tweet(opts, config, id).await
+    // --conversation/--cursor are cookie-backend only; the v2 path above
+    // uses reply_scope instead.
+    run_tweet(opts, config, id, conversation, cursor).await
 }
 
 /// v2 video post: validate → chunked upload w/ STATUS poll → CreateTweet w/ media.
@@ -7102,6 +7143,8 @@ mod bookmark_folder_tests {
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            conversation_id: None,
+            in_reply_to_status_id: None,
             grok_translated_post_with_availability: None,
         };
         let tweets = vec![
@@ -7146,6 +7189,8 @@ mod bookmark_folder_tests {
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            conversation_id: None,
+            in_reply_to_status_id: None,
             grok_translated_post_with_availability: None,
         };
         let tweets = vec![mk("Mon Jan 01 00:00:00 +0000 2024")];
