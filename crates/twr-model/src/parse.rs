@@ -395,6 +395,10 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
         article_text: article.text,
         is_subscriber_only,
         is_promoted: false,
+        grok_translated_post_with_availability: actual_data
+            .get("grok_translated_post_with_availability")
+            .filter(|v| v.is_object())
+            .cloned(),
     })
 }
 
@@ -765,6 +769,8 @@ pub fn parse_notifications_response(
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            // URT legacy tweets don't carry the GraphQL grok field.
+            grok_translated_post_with_availability: None,
         });
     }
     // Newest-first, mirroring xfetch's createdAt sort.

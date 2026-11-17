@@ -76,6 +76,11 @@ pub struct Tweet {
     pub is_subscriber_only: bool,
     #[serde(default)]
     pub is_promoted: bool,
+    /// Raw `grok_translated_post_with_availability` object when X supplies
+    /// it (issue #7) — kept verbatim, never flattened; `text`/`lang` stay
+    /// the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_translated_post_with_availability: Option<serde_json::Value>,
 }
 
 /// A Twitter List (owned or followed). NOT a Tweet — its own type, mirroring

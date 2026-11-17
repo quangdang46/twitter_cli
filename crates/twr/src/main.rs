@@ -7078,6 +7078,7 @@ mod bookmark_folder_tests {
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            grok_translated_post_with_availability: None,
         };
         let tweets = vec![
             mk("Mon Jan 01 00:00:00 +0000 2024"),
@@ -7121,6 +7122,7 @@ mod bookmark_folder_tests {
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            grok_translated_post_with_availability: None,
         };
         let tweets = vec![mk("Mon Jan 01 00:00:00 +0000 2024")];
         assert_eq!(filter_tweets_since(tweets, "not-a-date").len(), 1);

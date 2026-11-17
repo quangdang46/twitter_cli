@@ -351,8 +351,22 @@ pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
             ("articles_preview_enabled", true),
             ("responsive_web_article_rich_content_enabled", true),
         ],
-        // tweet_detail extras.
-        "TweetDetail" => &[("withArticleRichContentState", true)],
+        // tweet_detail extras + grok translated-post read (issue #7).
+        "TweetDetail" => &[
+            ("withArticleRichContentState", true),
+            ("responsive_web_grok_show_grok_translated_post", true),
+        ],
+        // Tweet-read ops: ask X to include
+        // `grok_translated_post_with_availability` on each TweetResult
+        // (issue #7). Op set = exactly the ops `cli::instructions::
+        // for_operation` parses tweets from — NOT mutations, NOT the
+        // user/list ops (Followers/Following/ListMembers/ListOwnerships/
+        // ListMemberships return users/lists, not tweets).
+        "HomeTimeline" | "HomeLatestTimeline" | "UserTweets" | "Likes"
+        | "SearchTimeline" | "Bookmarks" | "BookmarkFolderTimeline"
+        | "ListLatestTweetsTimeline" | "UserRepliesTimeline" | "UserMedia" => {
+            &[("responsive_web_grok_show_grok_translated_post", true)]
+        }
         _ => &[],
     }
 }
@@ -511,11 +525,60 @@ mod tests {
 
     #[test]
     fn extras_apply_per_op() {
-        assert!(!extra_features("SearchTimeline").iter().any(|_| true));
+        // SearchTimeline's only extra is the issue-#7 grok flag.
+        assert_eq!(
+            extra_features("SearchTimeline"),
+            &[("responsive_web_grok_show_grok_translated_post", true)]
+        );
         let user = compact_features("UserByScreenName");
         assert!(user.contains_key("hidden_profile_subscriptions_enabled"));
         let detail = compact_features("TweetDetail");
         assert!(detail.contains_key("withArticleRichContentState"));
+    }
+
+    #[test]
+    fn grok_translated_post_flag_lands_on_tweet_reads_only() {
+        // Issue #7: every op `for_operation` parses tweets from gets the
+        // show_grok_translated_post flag; mutations and user/list ops
+        // (which return users/lists, not tweets) must NOT.
+        for op in [
+            "HomeTimeline",
+            "HomeLatestTimeline",
+            "UserTweets",
+            "UserRepliesTimeline",
+            "UserMedia",
+            "Likes",
+            "SearchTimeline",
+            "Bookmarks",
+            "BookmarkFolderTimeline",
+            "ListLatestTweetsTimeline",
+            "TweetDetail",
+        ] {
+            assert!(
+                compact_features(op)
+                    .contains_key("responsive_web_grok_show_grok_translated_post"),
+                "{op}"
+            );
+        }
+        for op in [
+            "Followers",
+            "Following",
+            "ListMembers",
+            "ListOwnerships",
+            "ListMemberships",
+            "CreateTweet",
+            "TweetResultByRestId",
+        ] {
+            assert!(
+                !compact_features(op)
+                    .contains_key("responsive_web_grok_show_grok_translated_post"),
+                "{op}"
+            );
+        }
+        // The community-note auto-translation flag stays OFF (unverified).
+        assert!(!compact_features("HomeTimeline").contains_key(
+            "responsive_web_grok_community_note_auto_translation_is_enabled"
+        ));
     }
 
     #[test]
