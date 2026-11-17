@@ -362,11 +362,16 @@ pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
         // for_operation` parses tweets from — NOT mutations, NOT the
         // user/list ops (Followers/Following/ListMembers/ListOwnerships/
         // ListMemberships return users/lists, not tweets).
-        "HomeTimeline" | "HomeLatestTimeline" | "UserTweets" | "Likes"
-        | "SearchTimeline" | "Bookmarks" | "BookmarkFolderTimeline"
-        | "ListLatestTweetsTimeline" | "UserRepliesTimeline" | "UserMedia" => {
-            &[("responsive_web_grok_show_grok_translated_post", true)]
-        }
+        "HomeTimeline"
+        | "HomeLatestTimeline"
+        | "UserTweets"
+        | "Likes"
+        | "SearchTimeline"
+        | "Bookmarks"
+        | "BookmarkFolderTimeline"
+        | "ListLatestTweetsTimeline"
+        | "UserRepliesTimeline"
+        | "UserMedia" => &[("responsive_web_grok_show_grok_translated_post", true)],
         _ => &[],
     }
 }
@@ -555,8 +560,7 @@ mod tests {
             "TweetDetail",
         ] {
             assert!(
-                compact_features(op)
-                    .contains_key("responsive_web_grok_show_grok_translated_post"),
+                compact_features(op).contains_key("responsive_web_grok_show_grok_translated_post"),
                 "{op}"
             );
         }
@@ -570,15 +574,13 @@ mod tests {
             "TweetResultByRestId",
         ] {
             assert!(
-                !compact_features(op)
-                    .contains_key("responsive_web_grok_show_grok_translated_post"),
+                !compact_features(op).contains_key("responsive_web_grok_show_grok_translated_post"),
                 "{op}"
             );
         }
         // The community-note auto-translation flag stays OFF (unverified).
-        assert!(!compact_features("HomeTimeline").contains_key(
-            "responsive_web_grok_community_note_auto_translation_is_enabled"
-        ));
+        assert!(!compact_features("HomeTimeline")
+            .contains_key("responsive_web_grok_community_note_auto_translation_is_enabled"));
     }
 
     #[test]
