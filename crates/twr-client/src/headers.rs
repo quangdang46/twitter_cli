@@ -130,6 +130,12 @@ pub struct HeaderInput<'a> {
     pub method: &'a str,
     pub os: Os,
     pub chrome_major: &'a str,
+    /// Full `User-Agent` override (config `browser.userAgent` /
+    /// `TWITTER_BROWSER__USER_AGENT`). When set and non-empty it is sent
+    /// verbatim instead of the generated Chrome UA; the `sec-ch-ua*`
+    /// client hints still reflect `chrome_major`/`os`, so keep them
+    /// consistent if you override.
+    pub user_agent: Option<&'a str>,
     pub locale: &'a str,
     /// Fresh transaction id for gated ops; `None` for ungated ones (the
     /// caller decides via `twr-tx`'s `RequestProof::prepare`).
@@ -148,14 +154,18 @@ pub fn build_headers(input: &HeaderInput) -> HashMap<String, String> {
         "X-Twitter-Client-Language".into(),
         client_language(input.locale),
     );
-    h.insert(
-        "User-Agent".into(),
-        format!(
-            "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{}.0.0.0 Safari/537.36",
-            input.os.ua_platform(),
-            input.chrome_major,
-        ),
-    );
+    let user_agent = input
+        .user_agent
+        .filter(|u| !u.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{}.0.0.0 Safari/537.36",
+                input.os.ua_platform(),
+                input.chrome_major,
+            )
+        });
+    h.insert("User-Agent".into(), user_agent);
     h.insert("Origin".into(), "https://x.com".into());
     h.insert("Referer".into(), "https://x.com/".into());
     h.insert("Accept".into(), "*/*".into());
@@ -297,6 +307,7 @@ mod tests {
             method,
             os: Os::Linux,
             chrome_major: "133",
+            user_agent: None,
             locale: "en-US",
             transaction_id: tid,
         }
@@ -386,5 +397,11 @@ mod tests {
         };
         assert!(build_headers(&mac)["User-Agent"].contains("Macintosh"));
         assert_eq!(build_headers(&mac)["sec-ch-ua-platform"], "\"macOS\"");
+        // A configured UA wins verbatim over the generated Chrome string.
+        let custom = HeaderInput {
+            user_agent: Some("CustomUA/1.0"),
+            ..input(&c, "GET", None)
+        };
+        assert_eq!(build_headers(&custom)["User-Agent"], "CustomUA/1.0");
     }
 }

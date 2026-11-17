@@ -27,6 +27,8 @@ pub struct ExecCtx<'a> {
     #[allow(dead_code)]
     pub request_delay_secs: f64,
     pub chrome_major: String,
+    /// `browser.userAgent` override; `None` generates the Chrome UA.
+    pub user_agent: Option<String>,
     pub locale: String,
     pub tx: Option<TxState>,
     /// Where freshly derived ingredients are persisted; `None` skips caching.
@@ -300,6 +302,7 @@ pub async fn fetch_parsed_page_generic<T>(
             method,
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: tid.as_deref(),
         });
@@ -394,6 +397,7 @@ pub async fn fetch_parsed_page_with_toggles(
             method,
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: tid.as_deref(),
         });
@@ -598,6 +602,7 @@ async fn send_engage(
             method: "POST",
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: ctx.proof_for(op, "POST", &path).as_deref(),
         });
@@ -913,6 +918,7 @@ mod tests {
             max_count: 200,
             request_delay_secs: 0.0,
             chrome_major: "133".into(),
+            user_agent: None,
             locale: "en-US".into(),
             tx: None,
             tx_cache_path: Some(tmp.cache_path()),

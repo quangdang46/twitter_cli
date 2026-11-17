@@ -14,7 +14,7 @@ pub mod throttle;
 pub mod timeline;
 pub mod upload;
 mod wreq_transport;
-pub use wreq_transport::WreqTransport;
+pub use wreq_transport::{emulation_from_env, WreqTransport};
 
 pub use headers::{
     build_headers, notification_params, notifications_url, Credentials, HeaderInput, Os,
