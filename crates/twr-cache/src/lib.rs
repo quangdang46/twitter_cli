@@ -337,6 +337,7 @@ mod tests {
             article_text: None,
             is_subscriber_only: false,
             is_promoted: false,
+            grok_translated_post_with_availability: None,
         }
     }
 

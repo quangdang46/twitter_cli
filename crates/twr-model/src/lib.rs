@@ -138,6 +138,65 @@ mod tests {
     }
 
     #[test]
+    fn grok_translated_post_is_preserved_verbatim() {
+        // Issue #7: the raw availability object (translations, source/
+        // destination langs, entities) is stored untouched; text/lang
+        // keep the ORIGINAL values.
+        let mut result = plain_tweet_result("700", "hola mundo");
+        result["legacy"]["lang"] = json!("es");
+        let grok = json!({
+            "is_available": true,
+            "translated_post": { "text": "hello world", "entities": {"urls": []} },
+            "source_lang": "es",
+            "destination_lang": "en"
+        });
+        result["grok_translated_post_with_availability"] = grok.clone();
+        let tweet = parse_tweet_result(&result, 0).unwrap();
+        assert_eq!(
+            tweet.grok_translated_post_with_availability.as_ref(),
+            Some(&grok)
+        );
+        assert_eq!(tweet.text, "hola mundo");
+        assert_eq!(tweet.lang, "es");
+    }
+
+    #[test]
+    fn grok_translated_post_absent_or_non_object_is_none() {
+        let tweet = parse_tweet_result(&plain_tweet_result("701", "no grok"), 0).unwrap();
+        assert!(tweet.grok_translated_post_with_availability.is_none());
+        // Absent must serialize as absent (not null) — skip_serializing_if.
+        let v = serde_json::to_value(&tweet).unwrap();
+        assert!(v.get("grok_translated_post_with_availability").is_none());
+
+        for bad in [json!(null), json!("yes"), json!([1, 2])] {
+            let mut result = plain_tweet_result("702", "bad grok");
+            result["grok_translated_post_with_availability"] = bad;
+            let tweet = parse_tweet_result(&result, 0).unwrap();
+            assert!(tweet.grok_translated_post_with_availability.is_none());
+        }
+    }
+
+    #[test]
+    fn grok_translated_post_on_quoted_tweet_recurses() {
+        let mut quoted = plain_tweet_result("800", "quoted body");
+        quoted["grok_translated_post_with_availability"] =
+            json!({"is_available": true, "destination_lang": "en"});
+        let mut quoting = plain_tweet_result("801", "outer body");
+        quoting["quoted_status_result"] = json!({ "result": quoted });
+        let tweet = parse_tweet_result(&quoting, 0).unwrap();
+        assert!(tweet.grok_translated_post_with_availability.is_none());
+        let inner = tweet.quoted_tweet.unwrap();
+        assert_eq!(
+            inner
+                .grok_translated_post_with_availability
+                .as_ref()
+                .and_then(|v| v.get("destination_lang"))
+                .and_then(serde_json::Value::as_str),
+            Some("en")
+        );
+    }
+
+    #[test]
     fn recursion_guard_stops_after_depth_two() {
         let inner = plain_tweet_result("1", "innermost");
         assert!(
