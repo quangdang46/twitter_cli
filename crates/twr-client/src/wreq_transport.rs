@@ -29,10 +29,10 @@ pub struct WreqTransport {
 /// Unset or unrecognized values keep the Chrome131 default.
 pub fn emulation_from_env() -> Emulation {
     match std::env::var("TWITTER_EMULATION") {
-        Ok(name) if !name.trim().is_empty() => serde_json::from_value(
-            serde_json::Value::String(name.trim().to_string()),
-        )
-        .unwrap_or(Emulation::Chrome131),
+        Ok(name) if !name.trim().is_empty() => {
+            serde_json::from_value(serde_json::Value::String(name.trim().to_string()))
+                .unwrap_or(Emulation::Chrome131)
+        }
         _ => Emulation::Chrome131,
     }
 }
