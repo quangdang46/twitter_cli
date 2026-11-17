@@ -126,6 +126,25 @@ mod tests {
     }
 
     #[test]
+    fn reply_relationship_ids_are_preserved_as_strings() {
+        // Issue #8: conversation_id + direct-parent id survive parsing,
+        // kept as strings; absent values stay absent (not null).
+        let mut reply = plain_tweet_result("600", "a reply");
+        reply["legacy"]["conversation_id_str"] = json!("599");
+        reply["legacy"]["in_reply_to_status_id_str"] = json!("599");
+        let tweet = parse_tweet_result(&reply, 0).unwrap();
+        assert_eq!(tweet.conversation_id.as_deref(), Some("599"));
+        assert_eq!(tweet.in_reply_to_status_id.as_deref(), Some("599"));
+
+        let top = parse_tweet_result(&plain_tweet_result("601", "top level"), 0).unwrap();
+        assert!(top.conversation_id.is_none());
+        assert!(top.in_reply_to_status_id.is_none());
+        let v = serde_json::to_value(&top).unwrap();
+        assert!(v.get("conversation_id").is_none());
+        assert!(v.get("in_reply_to_status_id").is_none());
+    }
+
+    #[test]
     fn parses_a_quote_tweet_recursively() {
         let quoted = plain_tweet_result("500", "the quoted tweet");
         let mut quoting = plain_tweet_result("501", "check this out");

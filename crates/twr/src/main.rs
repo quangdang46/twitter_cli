@@ -1818,8 +1818,7 @@ fn schema_type_fields() -> serde_json::Value {
             "query": "string? (cache-search echoes the FTS query)"
         },
         "tweet_detail": {
-            "tweet": tweet,
-            "note": "tweet --conversation returns {tweets: Tweet[], page: {nextCursor?, hasMore}} instead"
+            "note": "data is the Tweet object itself; `tweet --conversation` instead returns {tweets: Tweet[], page: {nextCursor?, hasMore}}"
         },
         "article": {"title": "string", "markdown": "string"},
         "user": "UserProfile (see SCHEMA.md §Tweet/UserProfile)",
