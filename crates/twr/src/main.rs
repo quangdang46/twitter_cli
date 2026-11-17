@@ -2154,7 +2154,17 @@ fn build_ctx<'a>(
         now_secs: now,
         max_count: 200,
         request_delay_secs: config.rate_limit.request_delay_secs,
-        chrome_major: "133".into(),
+        chrome_major: config
+            .browser
+            .chrome_major
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "133".into()),
+        user_agent: config
+            .browser
+            .user_agent
+            .clone()
+            .filter(|v| !v.trim().is_empty()),
         locale,
         tx,
         tx_cache_path: twr_tx::cache::default_cache_path(),
@@ -2363,6 +2373,7 @@ async fn run_bookmark_folders(opts: &OutputOptions) -> (serde_json::Value, i32) 
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -2799,6 +2810,7 @@ async fn resolve_self_user_id(
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -3062,6 +3074,7 @@ async fn run_user(
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -3259,6 +3272,7 @@ async fn run_notifications(
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: ctx
             .tx
@@ -3486,6 +3500,7 @@ async fn run_user_list(
         method: "POST",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: ctx
             .proof_for(op, "POST", &format!("/i/api/graphql/{qid}/{op}"))
@@ -3517,6 +3532,7 @@ async fn run_user_list(
             method: "POST",
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: ctx
                 .proof_for(op, "POST", &format!("/i/api/graphql/{qid2}/{op}"))
@@ -3938,6 +3954,7 @@ async fn run_post_write(
             method: "POST",
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: None,
         });
@@ -4016,6 +4033,7 @@ async fn run_post_write(
         method: "POST",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -4610,6 +4628,7 @@ async fn run_engage(
             method: "POST",
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: None,
         });
@@ -4638,6 +4657,7 @@ async fn run_engage(
             method: "POST",
             os: twr_client::Os::current(),
             chrome_major: &ctx.chrome_major,
+            user_agent: ctx.user_agent.as_deref(),
             locale: &ctx.locale,
             transaction_id: None,
         });
@@ -5043,6 +5063,7 @@ async fn run_list_write(
         method: "POST",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -5332,6 +5353,7 @@ async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_jso
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -5407,6 +5429,7 @@ async fn run_dm_read(
         method: "GET",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });
@@ -5622,6 +5645,7 @@ async fn run_dm_send(
         method: "POST",
         os: twr_client::Os::current(),
         chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
         locale: &ctx.locale,
         transaction_id: None,
     });

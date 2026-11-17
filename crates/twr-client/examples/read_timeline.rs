@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         method: "GET",
         os: Os::current(),
         chrome_major: "133",
+        user_agent: None,
         locale: &locale,
         transaction_id: None,
     });

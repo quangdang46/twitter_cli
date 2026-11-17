@@ -23,15 +23,37 @@ pub struct WreqTransport {
     client: Client,
 }
 
+/// Resolve the TLS/HTTP2 emulation profile named by `TWITTER_EMULATION`
+/// (issue #6). Accepts the serde names of [`Emulation`] variants
+/// (`"chrome_131"`, `"chrome_133"`, `"firefox_135"`, `"safari_18"`, …).
+/// Unset or unrecognized values keep the Chrome131 default.
+pub fn emulation_from_env() -> Emulation {
+    match std::env::var("TWITTER_EMULATION") {
+        Ok(name) if !name.trim().is_empty() => serde_json::from_value(
+            serde_json::Value::String(name.trim().to_string()),
+        )
+        .unwrap_or(Emulation::Chrome131),
+        _ => Emulation::Chrome131,
+    }
+}
+
 impl WreqTransport {
-    /// Build a transport impersonating a fixed, recent Chrome release.
+    /// Build a transport impersonating a recent Chrome release.
     ///
-    /// Note: which exact `Emulation::ChromeNNN` variant exists depends on the
-    /// `wreq-util` version this workspace resolves to (older Rust toolchains
-    /// here pin an older wreq/wreq-util pair than the crates' latest docs
-    /// show) — if this fails to compile after a dependency bump, check
-    /// `wreq_util::Emulation`'s available variants and adjust.
+    /// The profile defaults to `Emulation::Chrome131` and can be overridden
+    /// with `TWITTER_EMULATION` (e.g. `chrome_133`) — see
+    /// [`emulation_from_env`]. Note: which exact `Emulation::ChromeNNN`
+    /// variant exists depends on the `wreq-util` version this workspace
+    /// resolves to (older Rust toolchains here pin an older wreq/wreq-util
+    /// pair than the crates' latest docs show) — if this fails to compile
+    /// after a dependency bump, check `wreq_util::Emulation`'s available
+    /// variants and adjust.
     pub fn new_chrome() -> Result<Self, TransportError> {
+        Self::with_emulation(emulation_from_env())
+    }
+
+    /// Build a transport with an explicit emulation profile.
+    pub fn with_emulation(emulation: Emulation) -> Result<Self, TransportError> {
         // cookie_store(false): twr sends a full explicit `Cookie:` header
         // on every request (Method C paste, code-226 gate). Letting wreq
         // ALSO jar cookies means Set-Cookie responses (e.g. rotated guest
@@ -43,7 +65,7 @@ impl WreqTransport {
         // while succeeding via curl with byte-identical vars/features —
         // cookie-jar interference is the prime suspect.)
         let client = Client::builder()
-            .emulation(Emulation::Chrome131)
+            .emulation(emulation)
             .cookie_store(false)
             .build()
             .map_err(|e| TransportError::Io(format!("failed to build wreq client: {e}")))?;
@@ -140,5 +162,21 @@ mod tests {
         // No network — just confirms the emulation profile + feature flags
         // are wired correctly and the client constructs.
         WreqTransport::new_chrome().expect("client should build offline");
+    }
+
+    #[test]
+    fn emulation_from_env_defaults_and_overrides() {
+        // Env-dependent: only assert the default when the var is unset.
+        if std::env::var("TWITTER_EMULATION").is_err() {
+            assert_eq!(emulation_from_env(), Emulation::Chrome131);
+        }
+        // A serde name round-trips through the same path the env uses.
+        let parsed: Emulation =
+            serde_json::from_value(serde_json::Value::String("chrome_133".into())).unwrap();
+        assert_eq!(parsed, Emulation::Chrome133);
+        // Garbage falls back rather than panicking.
+        let bad: Result<Emulation, _> =
+            serde_json::from_value(serde_json::Value::String("not_a_browser".into()));
+        assert!(bad.is_err());
     }
 }
