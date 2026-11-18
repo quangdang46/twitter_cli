@@ -264,38 +264,38 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Follow a user id.
+    /// Follow a user (id or screen name).
     Follow {
         id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Unfollow a user id.
+    /// Unfollow a user (id or screen name).
     Unfollow {
         id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Mute a user id (self-only, invisible to the target).
+    /// Mute a user, by id or screen name (self-only, invisible to the target).
     Mute {
         id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Unmute a user id.
+    /// Unmute a user (id or screen name).
     Unmute {
         id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Block a user id (target-visible: they can detect it; also triggers
+    /// Block a user, by id or screen name (target-visible: they can detect it; also triggers
     /// X's own implicit unfollow-on-block — the response may say so).
     Block {
         id: String,
         #[arg(long)]
         idempotency_key: Option<String>,
     },
-    /// Unblock a user id.
+    /// Unblock a user (id or screen name).
     Unblock {
         id: String,
         #[arg(long)]
@@ -4492,6 +4492,14 @@ fn mute_block_rest_path(cmd: &str) -> Option<&'static str> {
     }
 }
 
+/// Engagement writes whose target is a user rather than a tweet.
+fn is_user_target_cmd(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "follow" | "unfollow" | "mute" | "unmute" | "block" | "unblock"
+    )
+}
+
 /// Map subcommand to GraphQL op (or 1.1 friendships endpoint).
 fn engage_op_of(cmd: &str) -> EngageOp {
     match cmd {
@@ -4585,6 +4593,18 @@ async fn run_engage(
         Decision::Execute => {}
         Decision::Cancelled => return (cancelled_data(cmd), 0),
     }
+
+    // follow/unfollow/mute/unmute/block/unblock take a user: a screen name
+    // has to become a numeric id first, or X rejects the write with a 403
+    // that looks like API drift.
+    let target_id = if is_user_target_cmd(cmd) {
+        match resolve_user_id(opts, config, &target_id).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        }
+    } else {
+        target_id
+    };
 
     // Delete always previews (text prefix + id) even with --apply (§5.5).
     if cmd == "delete" {
@@ -7638,5 +7658,46 @@ mod error_suggestion_tests {
         // `state: unknown` writes carry a suggestion but no error message.
         let err = exit6(serde_json::json!({"state": "unknown", "suggestion": "x"}));
         assert!(err.suggestion.unwrap().contains("doctor --refresh"));
+    }
+}
+
+#[cfg(test)]
+mod user_target_tests {
+    use super::*;
+
+    #[test]
+    fn every_write_that_sends_a_user_id_resolves_its_argument() {
+        for cmd in ["follow", "unfollow", "mute", "unmute", "block", "unblock"] {
+            assert!(is_user_target_cmd(cmd), "{cmd}");
+            assert!(
+                engage_op_of(cmd).use_friendships || mute_block_rest_path(cmd).is_some(),
+                "{cmd} does not send a user_id"
+            );
+        }
+        for cmd in ["like", "retweet", "bookmark", "pin", "delete"] {
+            assert!(!is_user_target_cmd(cmd), "{cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_numeric_id_is_used_without_a_lookup() {
+        let opts = OutputOptions::new(Some("t".into()));
+        let config = twr_config::TwrConfig::default();
+        let id = resolve_user_id(&opts, &config, " 34743251 ").await;
+        assert_eq!(id.unwrap(), "34743251");
+    }
+
+    #[tokio::test]
+    async fn an_argument_that_is_no_handle_is_a_usage_error() {
+        let opts = OutputOptions::new(Some("t".into()));
+        let config = twr_config::TwrConfig::default();
+        let (data, code) = resolve_user_id(&opts, &config, "@has space")
+            .await
+            .unwrap_err();
+        assert_eq!(code, 2);
+        assert!(data["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a user id or screen name"));
     }
 }
