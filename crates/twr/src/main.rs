@@ -115,6 +115,10 @@ enum Command {
         /// OAuth2 client ID (X developer app).
         #[arg(long, env = "TWR_CLIENT_ID")]
         client_id: Option<String>,
+        /// Authorization code or full redirect URL from the api-v2
+        /// authorize step — completes the PKCE exchange (bead p3c).
+        #[arg(long)]
+        code: Option<String>,
     },
     Logout,
     /// Search the local SQLite cache (FTS5, offline).
@@ -799,11 +803,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             guide,
             api_v2,
             client_id,
+            code,
         } => {
             kind = "auth";
-            let (d, code) = login_data_v2aware(cookie, guide, api_v2, client_id);
+            let (d, c) = login_data_v2aware(cookie, guide, api_v2, client_id, code, &opts).await;
             data = d;
-            exit_code = code;
+            exit_code = c;
         }
         Command::Logout => {
             kind = "auth";
@@ -865,9 +870,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
                 let (routed, _) = twr_v2::route("post", backend);
                 if routed == twr_v2::Backend::ApiV2 {
-                    let vpath = video.or(file).unwrap_or_default();
+                    let vpath = video.or(file);
                     let alt = alt_text.clone();
-                    let (d, code) = run_post_write_v2video(
+                    let (d, code) = run_post_write_v2(
                         &opts,
                         &config,
                         text,
@@ -901,24 +906,49 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     exit_code = code;
                 }
             } else {
-                let (d, code) = run_post_write(
-                    &opts,
-                    &config,
-                    WriteArgs {
-                        operation: "post",
-                        text,
-                        reply_to,
-                        quote_id: None,
-                        images: image,
-                        video: None,
-                        card_uri,
-                        edit_target: None,
-                        idempotency_key,
-                    },
-                )
-                .await;
-                data = d;
-                exit_code = code;
+                // Text-only post: honor --backend api-v2 via POST /2/tweets
+                // (bead 255) instead of silently falling back to cookies.
+                // Cookie-only flags are rejected loudly, never dropped.
+                let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
+                let (routed, _) = twr_v2::route("post", backend);
+                if routed == twr_v2::Backend::ApiV2 {
+                    if !image.is_empty() || alt_text.is_some() || card_uri.is_some() {
+                        data = serde_json::json!({"error": "api-v2 post does not support --image/--alt-text/--card-uri (video only supports --video/--file/--alt-text); use --backend cookie"});
+                        exit_code = 2;
+                    } else {
+                        let (d, code) = run_post_write_v2(
+                            &opts,
+                            &config,
+                            text,
+                            reply_to,
+                            None,
+                            None,
+                            idempotency_key,
+                        )
+                        .await;
+                        data = d;
+                        exit_code = code;
+                    }
+                } else {
+                    let (d, code) = run_post_write(
+                        &opts,
+                        &config,
+                        WriteArgs {
+                            operation: "post",
+                            text,
+                            reply_to,
+                            quote_id: None,
+                            images: image,
+                            video: None,
+                            card_uri,
+                            edit_target: None,
+                            idempotency_key,
+                        },
+                    )
+                    .await;
+                    data = d;
+                    exit_code = code;
+                }
             }
         }
         Command::Reply {
@@ -2320,7 +2350,10 @@ async fn run_feed(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "timeline fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "timeline fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -2360,7 +2393,10 @@ async fn run_bookmarks(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "bookmarks fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "bookmarks fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -2420,6 +2456,14 @@ async fn run_bookmark_folders(opts: &OutputOptions) -> (serde_json::Value, i32) 
             return (
                 serde_json::json!({"error": "contract drift (stale query ID)"}),
                 6,
+            );
+        }
+        // Any other non-2xx is an error, never an empty success (k8h).
+        if !(200..300).contains(&resp.status) {
+            let kind = twr_core::ErrorKind::from_http_status(resp.status);
+            return (
+                serde_json::json!({"error": format!("bookmark folders fetch failed: HTTP {}", resp.status)}),
+                kind.exit_code(),
             );
         }
         let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -2492,9 +2536,9 @@ async fn run_bookmark_folder_timeline(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (
+        Err(e) => (
             serde_json::json!({"error": format!("bookmark folder {folder_id} fetch failed")}),
-            6,
+            page_fetch_exit(&e),
         ),
     }
 }
@@ -2597,7 +2641,10 @@ async fn run_search(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "search fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "search fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -2699,7 +2746,10 @@ async fn run_tweet(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"error": "rate limited"}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "tweet fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "tweet fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -2807,7 +2857,10 @@ async fn run_list(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "list fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "list fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -2973,10 +3026,10 @@ async fn run_lists(
                 truncated = true;
                 break;
             }
-            Err(_) => {
+            Err(e) => {
                 return (
                     serde_json::json!({"error": format!("{op} fetch failed")}),
-                    6,
+                    page_fetch_exit(&e),
                 );
             }
         }
@@ -3062,10 +3115,10 @@ async fn run_list_members(
                 truncated = true;
                 break;
             }
-            Err(_) => {
+            Err(e) => {
                 return (
                     serde_json::json!({"error": format!("list {list_id} members fetch failed")}),
-                    6,
+                    page_fetch_exit(&e),
                 );
             }
         }
@@ -3083,22 +3136,15 @@ async fn run_list_members(
     (data, 0)
 }
 
-async fn run_user(
-    opts: &OutputOptions,
-    config: &twr_config::TwrConfig,
-    handle: String,
-) -> (serde_json::Value, i32) {
-    let auth = match read_auth(opts) {
-        Ok(a) => a,
-        Err((AuthFail::Envelope(err), code)) => {
-            return emit_fail(opts, err, code);
-        }
-    };
-    let transport = match twr_client::WreqTransport::new_chrome() {
-        Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
-    };
-    let ctx = build_ctx(opts, config, &transport, &auth);
+/// Shared `UserByScreenName` fetch through an already-built ctx (bead vmn):
+/// nested runners (user-posts/likes/user-tab/followers) resolve the handle
+/// on the SAME auth+transport+ctx they then page with, instead of `run_user`
+/// building a whole second set and round-tripping the profile through JSON.
+/// Errors are the same `(envelope, exit)` pairs `run_user` emits.
+async fn user_lookup(
+    ctx: &mut cli::exec::ExecCtx<'_>,
+    handle: &str,
+) -> Result<twr_model::UserProfile, (serde_json::Value, i32)> {
     let vars = serde_json::json!({"screen_name": handle.trim_start_matches('@')});
     // UserByScreenName returns a user result, not a timeline: single GET.
     let qid = ctx
@@ -3121,46 +3167,45 @@ async fn run_user(
         .collect();
     let resp = match ctx.transport.get(&url, &refs).await {
         Ok(r) => r,
-        Err(_) => return (serde_json::json!({"error": "user fetch failed"}), 5),
+        Err(_) => {
+            return Err((serde_json::json!({"error": "user fetch failed"}), 5));
+        }
     };
     if resp.status == 429 {
-        return (serde_json::json!({"error": "rate limited"}), 4);
+        return Err((serde_json::json!({"error": "rate limited"}), 4));
     }
     if resp.status == 404 {
-        return (
+        return Err((
             serde_json::json!({"error": "contract drift (stale query ID)"}),
             6,
-        );
+        ));
+    }
+    // Any other non-2xx is an error, never an empty success (k8h).
+    if !(200..300).contains(&resp.status) {
+        let kind = twr_core::ErrorKind::from_http_status(resp.status);
+        return Err((
+            serde_json::json!({"error": format!("user fetch failed: HTTP {}", resp.status)}),
+            kind.exit_code(),
+        ));
     }
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
     let result = body
         .pointer("/data/user/result")
         .cloned()
         .unwrap_or_default();
-    match twr_model::parse_user_result(&result) {
-        Some(u) => (serde_json::to_value(&u).unwrap_or_default(), 0),
-        None => (
+    twr_model::parse_user_result(&result).ok_or_else(|| {
+        (
             serde_json::json!({"error": format!("user @{handle} not found")}),
             3,
-        ),
-    }
+        )
+    })
 }
 
-async fn run_user_posts(
+async fn run_user(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     handle: String,
-    max: Option<usize>,
-    filter: bool,
 ) -> (serde_json::Value, i32) {
-    // Resolve handle -> user id first, then UserTweets.
-    let (udata, code) = run_user(opts, config, handle.clone()).await;
-    if code != 0 {
-        return (udata, code);
-    }
-    let Some(uid) = udata.get("id").and_then(|v| v.as_str()) else {
-        return (serde_json::json!({"error": "user has no id"}), 3);
-    };
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
@@ -3172,6 +3217,38 @@ async fn run_user_posts(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
+    match user_lookup(&mut ctx, &handle).await {
+        Ok(u) => (serde_json::to_value(&u).unwrap_or_default(), 0),
+        Err((d, c)) => (d, c),
+    }
+}
+
+async fn run_user_posts(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    handle: String,
+    max: Option<usize>,
+    filter: bool,
+) -> (serde_json::Value, i32) {
+    // Resolve handle -> user id AND page on ONE auth+transport+ctx (bead
+    // vmn): previously `run_user` built a full second set and the profile
+    // round-tripped through JSON only to be re-parsed for its id.
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(opts, err, code);
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let profile = match user_lookup(&mut ctx, &handle).await {
+        Ok(u) => u,
+        Err((d, c)) => return (d, c),
+    };
+    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
     // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
     let vars = serde_json::json!({
@@ -3198,7 +3275,10 @@ async fn run_user_posts(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "user-posts fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "user-posts fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -3210,13 +3290,7 @@ async fn run_likes(
     filter: bool,
 ) -> (serde_json::Value, i32) {
     // Own-account-only per X; noted in schema. Same plumbing as user-posts.
-    let (udata, code) = run_user(opts, config, handle.clone()).await;
-    if code != 0 {
-        return (udata, code);
-    }
-    let Some(uid) = udata.get("id").and_then(|v| v.as_str()) else {
-        return (serde_json::json!({"error": "user has no id"}), 3);
-    };
+    // One auth+transport+ctx for lookup + paging (bead vmn).
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
@@ -3228,6 +3302,11 @@ async fn run_likes(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let profile = match user_lookup(&mut ctx, &handle).await {
+        Ok(u) => u,
+        Err((d, c)) => return (d, c),
+    };
+    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
     // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
     let vars = serde_json::json!({
@@ -3254,7 +3333,10 @@ async fn run_likes(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (serde_json::json!({"error": "likes fetch failed"}), 6),
+        Err(e) => (
+            serde_json::json!({"error": "likes fetch failed"}),
+            page_fetch_exit(&e),
+        ),
     }
 }
 
@@ -3320,7 +3402,11 @@ async fn run_notifications(
             })
             .as_deref(),
     });
-    headers.insert("Referer".into(), "https://x.com/notifications".into());
+    twr_client::set_header(
+        &mut headers,
+        "Referer",
+        "https://x.com/notifications".into(),
+    );
     let refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -3341,6 +3427,14 @@ async fn run_notifications(
         return (
             serde_json::json!({"error": "contract drift (notifications endpoint moved)"}),
             6,
+        );
+    }
+    // Any other non-2xx is an error, never an empty success (k8h).
+    if !(200..300).contains(&resp.status) {
+        let kind = twr_core::ErrorKind::from_http_status(resp.status);
+        return (
+            serde_json::json!({"error": format!("notifications fetch failed: HTTP {}", resp.status)}),
+            kind.exit_code(),
         );
     }
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -3389,13 +3483,7 @@ async fn run_user_tab(
     max: Option<usize>,
     filter: bool,
 ) -> (serde_json::Value, i32) {
-    let (udata, code) = run_user(opts, config, handle.clone()).await;
-    if code != 0 {
-        return (udata, code);
-    }
-    let Some(uid) = udata.get("id").and_then(|v| v.as_str()) else {
-        return (serde_json::json!({"error": "user has no id"}), 3);
-    };
+    // One auth+transport+ctx for lookup + paging (bead vmn).
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
@@ -3407,6 +3495,11 @@ async fn run_user_tab(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let profile = match user_lookup(&mut ctx, &handle).await {
+        Ok(u) => u,
+        Err((d, c)) => return (d, c),
+    };
+    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
     let vars = user_tab_vars(uid, count);
     let out = cli::exec::fetch_tweets_paged(
@@ -3426,9 +3519,9 @@ async fn run_user_tab(
         Err(twr_client::PageError::RateLimited) => {
             (serde_json::json!({"tweets": [], "truncated": true}), 4)
         }
-        Err(_) => (
+        Err(e) => (
             serde_json::json!({"error": format!("{operation} fetch failed")}),
-            6,
+            page_fetch_exit(&e),
         ),
     }
 }
@@ -3453,26 +3546,14 @@ async fn run_following(
     run_user_list(opts, config, "Following", id, max, cursor).await
 }
 
-/// Resolve a `followers`/`following` argument to a numeric X user id.
-///
-/// A bare numeric id is used as is. Anything else is a screen name and is
-/// resolved through `UserByScreenName` -- the same path `user`, `user-posts`
-/// and `likes` already use. Before this, a screen name went out as `userId`
-/// verbatim and X answered with an empty list, which the caller could not
-/// tell apart from "this account follows nobody" (issue #2).
-///
-/// Three outcomes, each with its own exit code so an agent can tell them
-/// apart: a numeric id (0), an argument that is neither an id nor a possible
-/// screen name (2, usage error), and a screen name that names nobody (3,
-/// not found).
-async fn resolve_user_id(
-    opts: &OutputOptions,
-    config: &twr_config::TwrConfig,
-    arg: &str,
-) -> Result<String, (serde_json::Value, i32)> {
+/// Cheap half of `followers`/`following` argument classification (issue
+/// #2): `Ok(Some(id))` = already a numeric user id, `Ok(None)` = a screen
+/// name to look up, `Err` = usage error. Runs BEFORE auth so a malformed
+/// argument still exits 2 without credentials, exactly as before.
+fn classify_user_arg(arg: &str) -> Result<Option<String>, (serde_json::Value, i32)> {
     let trimmed = arg.trim();
     if let Some(id) = cli::ids::numeric_user_id(trimmed) {
-        return Ok(id);
+        return Ok(Some(id));
     }
     let handle = trimmed.trim_start_matches('@');
     if !cli::ids::is_screen_name(handle) {
@@ -3484,19 +3565,61 @@ async fn resolve_user_id(
             2,
         ));
     }
-    let (udata, code) = run_user(opts, config, handle.to_string()).await;
-    if code != 0 {
-        return Err((udata, code));
-    }
-    match udata.get("id").and_then(|v| v.as_str()) {
-        Some(id) => Ok(id.to_string()),
-        None => Err((
-            serde_json::json!({
-                "error": format!("user @{handle} not found"),
-                "suggestion": "verify the screen name; `twr user @{handle}` must resolve first",
-            }),
-            3,
-        )),
+    Ok(None)
+}
+
+/// Resolve a `followers`/`following`/user-target argument to a numeric X
+/// user id. A bare numeric id is used as is; anything else is a screen
+/// name resolved through `UserByScreenName` via [`user_lookup`] on ONE
+/// auth+transport+ctx (bead vmn — previously this ran the whole `run_user`
+/// envelope and re-parsed the JSON only to keep its `id` field).
+///
+/// Three outcomes, each with its own exit code so an agent can tell them
+/// apart: a numeric id (0), an argument that is neither an id nor a possible
+/// screen name (2, usage error), and a screen name that names nobody (3,
+/// not found).
+async fn resolve_user_id(
+    opts: &OutputOptions,
+    config: &twr_config::TwrConfig,
+    arg: &str,
+) -> Result<String, (serde_json::Value, i32)> {
+    match classify_user_arg(arg)? {
+        Some(id) => Ok(id),
+        None => {
+            let auth = match read_auth(opts) {
+                Ok(a) => a,
+                Err((AuthFail::Envelope(err), code)) => {
+                    let (data, code) = emit_fail(opts, err, code);
+                    return Err((data, code));
+                }
+            };
+            let transport = match twr_client::WreqTransport::new_chrome() {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err((serde_json::json!({"error": format!("transport: {e}")}), 5));
+                }
+            };
+            let mut ctx = build_ctx(opts, config, &transport, &auth);
+            let handle = arg.trim().trim_start_matches('@');
+            user_lookup(&mut ctx, handle)
+                .await
+                .map(|u| u.id)
+                .map_err(|(d, c)| {
+                    // Keep the historic not-found suggestion for unknown
+                    // handles so agents get the same recovery hint.
+                    if c == 3 && d.get("error").is_some() {
+                        (
+                            serde_json::json!({
+                                "error": format!("user @{handle} not found"),
+                                "suggestion": "verify the screen name; `twr user @{handle}` must resolve first",
+                            }),
+                            3,
+                        )
+                    } else {
+                        (d, c)
+                    }
+                })
+        }
     }
 }
 
@@ -3510,8 +3633,12 @@ async fn run_user_list(
 ) -> (serde_json::Value, i32) {
     // The user id is resolved before the list is fetched: a screen name has
     // to become a numeric id, or X answers with an empty list (issue #2).
-    let id = match resolve_user_id(opts, config, &arg).await {
-        Ok(uid) => uid,
+    // Numeric ids and usage errors resolve without any network; a screen
+    // name is looked up through `user_lookup` on the SAME ctx the list
+    // fetch then uses (bead vmn — previously `run_user` built a second
+    // auth+transport+ctx and the profile round-tripped through JSON).
+    let presolved = match classify_user_arg(&arg) {
+        Ok(id) => id,
         Err((data, code)) => return (data, code),
     };
     let auth = match read_auth(opts) {
@@ -3525,6 +3652,16 @@ async fn run_user_list(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
+    let id = match presolved {
+        Some(id) => id,
+        None => {
+            let handle = arg.trim().trim_start_matches('@');
+            match user_lookup(&mut ctx, handle).await {
+                Ok(u) => u.id,
+                Err((d, c)) => return (d, c),
+            }
+        }
+    };
     // POST per Python (followers/following use POST).
     let qid = ctx.query_id(op).map(|r| r.query_id).unwrap_or_default();
     let url = format!("https://x.com/i/api/graphql/{qid}/{op}");
@@ -3592,6 +3729,14 @@ async fn run_user_list(
         return (
             serde_json::json!({"error": "contract drift (stale query ID)"}),
             6,
+        );
+    }
+    // Any other non-2xx is an error, never an empty success (k8h).
+    if !(200..300).contains(&resp.status) {
+        let kind = twr_core::ErrorKind::from_http_status(resp.status);
+        return (
+            serde_json::json!({"error": format!("{op} fetch failed: HTTP {}", resp.status)}),
+            kind.exit_code(),
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -3914,7 +4059,7 @@ async fn run_post_write(
     let store_path = twr_core::idempotency::default_store_path();
     if let Some(key) = &idempotency_key {
         if let Some(p) = &store_path {
-            match twr_core::idempotency::claim(p, key, now) {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
                 Ok(twr_core::PreCheck::ReplayCached(result)) => {
                     return (
                         serde_json::json!({"idempotent_replay": true, "result": result}),
@@ -3939,11 +4084,13 @@ async fn run_post_write(
             return emit_fail(opts, err, code);
         }
     };
-    let transport = match twr_client::WreqTransport::new_chrome() {
+    // Arc so the per-attachment upload tasks below can each hold a clone
+    // (bead a99); `ctx.transport` borrows through it unchanged.
+    let transport = std::sync::Arc::new(match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
-    };
-    let mut ctx = build_ctx(opts, config, &transport, &auth);
+    });
+    let mut ctx = build_ctx(opts, config, transport.as_ref(), &auth);
     let has_full_cookie = auth
         .session
         .full_string
@@ -3952,12 +4099,18 @@ async fn run_post_write(
     // Upload attached media (INIT→APPEND→FINALIZE each), images first then
     // the optional video. Both use the same cookie upload endpoint; video
     // differs only by `media_category=tweet_video` + the STATUS poll inside
-    // `upload_media` (issue #1).
-    let mut media_ids: Vec<String> = Vec::new();
-    // Images and a video can't share a tweet: X allows 4 photos *or* 1 video.
+    // `upload_media` (issue #1). File reads are async — a 128MB video must
+    // not park a tokio worker — and the uploads run concurrently: up to 4
+    // images are independent round-trips and `media_ids` keeps argument
+    // order regardless of finish order (bead a99). APPEND segments inside
+    // one upload stay ordered.
     let attachments: Vec<&String> = images.iter().chain(video.iter()).collect();
+    // Phase 1 — read + validate every attachment up front, in argument
+    // order, so the first local failure is reported before any upload
+    // starts (same errors the serial loop produced).
+    let mut uploads: Vec<(Vec<u8>, &'static str)> = Vec::with_capacity(attachments.len());
     for path in attachments {
-        let data = match std::fs::read(path) {
+        let data = match tokio::fs::read(path).await {
             Ok(d) => d,
             Err(_) => {
                 return (
@@ -3986,36 +4139,72 @@ async fn run_post_write(
                 2,
             );
         }
-        let headers = twr_client::build_headers(&twr_client::HeaderInput {
-            creds: &ctx.creds,
-            method: "POST",
-            os: twr_client::Os::current(),
-            chrome_major: &ctx.chrome_major,
-            user_agent: ctx.user_agent.as_deref(),
-            locale: &ctx.locale,
-            transaction_id: None,
-        });
-        let refs: Vec<(&str, &str)> = headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        match twr_client::upload::upload_media(&transport, &refs, data, mime).await {
-            Ok(id) => media_ids.push(id),
-            Err(e) => {
-                let (kind, code) = match e {
-                    // A processing timeout or server-side transcode failure is
-                    // not a transport problem — surface it as such so the
-                    // message reads as actionable, not a generic upload error.
-                    twr_client::upload::UploadError::ProcessingTimeout { .. }
-                    | twr_client::upload::UploadError::ProcessingFailed(_) => {
-                        ("media processing", 4)
-                    }
-                    _ => ("upload", 7),
-                };
-                return (
-                    serde_json::json!({"error": format!("{kind} failed: {e}")}),
-                    code,
-                );
+        uploads.push((data, mime));
+    }
+    // Phase 2 — one header set for every upload (it was identical per
+    // iteration) and the uploads themselves in parallel.
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "POST",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
+        locale: &ctx.locale,
+        transaction_id: None,
+    });
+    let owned_headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let mut media_ids: Vec<String> = Vec::new();
+    if !uploads.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, (data, mime)) in uploads.into_iter().enumerate() {
+            let transport = transport.clone();
+            let hdrs = owned_headers.clone();
+            set.spawn(async move {
+                let refs: Vec<(&str, &str)> =
+                    hdrs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                (
+                    idx,
+                    twr_client::upload::upload_media(transport.as_ref(), &refs, data, mime).await,
+                )
+            });
+        }
+        let mut results: Vec<(usize, Result<String, twr_client::upload::UploadError>)> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(r) => results.push(r),
+                Err(_) => {
+                    return (
+                        serde_json::json!({"error": "upload failed: worker task dropped"}),
+                        7,
+                    )
+                }
+            }
+        }
+        // Re-order by argument position, then apply the same error mapping
+        // the serial loop used — first failure in argument order wins.
+        results.sort_by_key(|(i, _)| *i);
+        for (_, res) in results {
+            match res {
+                Ok(id) => media_ids.push(id),
+                Err(e) => {
+                    let (kind, code) = match e {
+                        // A processing timeout or server-side transcode failure is
+                        // not a transport problem — surface it as such so the
+                        // message reads as actionable, not a generic upload error.
+                        twr_client::upload::UploadError::ProcessingTimeout { .. }
+                        | twr_client::upload::UploadError::ProcessingFailed(_) => {
+                            ("media processing", 4)
+                        }
+                        _ => ("upload", 7),
+                    };
+                    return (
+                        serde_json::json!({"error": format!("{kind} failed: {e}")}),
+                        code,
+                    );
+                }
             }
         }
     }
@@ -4090,14 +4279,22 @@ async fn run_post_write(
     cli::exec::throttle_wait(&mut ctx.throttle, graphql_op).await;
     // Idempotency: mark `Sent` IMMEDIATELY before the wire (bead sxu) —
     // a crash from here on leaves "in flight, do not auto-retry"; every
-    // earlier exit leaves only `Prepared` (retryable).
-    idem_set(
+    // earlier exit leaves only `Prepared` (retryable). FAIL CLOSED: if the
+    // `Sent` state cannot be persisted we must not send — an untracked
+    // in-flight write is exactly the double-post hazard the state exists
+    // to prevent (bead 11c).
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Sent,
         None,
         now,
-    );
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            5,
+        );
+    }
     // Reserve budgets atomically at send time (bead nku): check+increment
     // under the state lock so concurrent invocations cannot both pass.
     // post/reply/quote/edit are all CreateTweet-family → post cap applies.
@@ -4224,13 +4421,15 @@ async fn run_post_write(
         ))
         .await;
         // Budgets were RESERVED at send time (bead nku) — no double count.
-        idem_set(
+        if let Err(e) = idem_set(
             &store_path,
             idempotency_key.as_deref(),
             twr_core::WriteState::Acknowledged,
             Some(serde_json::json!({"id": new_id})),
             now,
-        );
+        ) {
+            eprintln!("twr: write landed but idempotency ack failed: {e}");
+        }
         return (
             serde_json::json!({"id": new_id, "operation": operation, "graphql_operation": "CreateNoteTweet"}),
             0,
@@ -4272,13 +4471,15 @@ async fn run_post_write(
             cli::write::write_delay_secs(u01),
         ))
         .await;
-        idem_set(
+        if let Err(e) = idem_set(
             &store_path,
             idempotency_key.as_deref(),
             twr_core::WriteState::Acknowledged,
             Some(serde_json::json!({"id": new_id})),
             now,
-        );
+        ) {
+            eprintln!("twr: write landed but idempotency ack failed: {e}");
+        }
         let prev = edit_target.clone().unwrap_or_default();
         return (
             serde_json::json!({"id": new_id, "previous_tweet_id": prev, "operation": "edit"}),
@@ -4332,13 +4533,15 @@ async fn run_post_write(
         // Still Acknowledge the key (bead sxu): the server accepted, and a
         // cached replay must return the same unresolved-id result rather
         // than re-posting.
-        idem_set(
+        if let Err(e) = idem_set(
             &store_path,
             idempotency_key.as_deref(),
             twr_core::WriteState::Acknowledged,
             Some(serde_json::json!({"id": null, "id_status": "unresolved"})),
             now,
-        );
+        ) {
+            eprintln!("twr: write landed but idempotency ack failed: {e}");
+        }
         return (
             serde_json::json!({"id": null, "id_status": "unresolved", "operation": operation, "note": "X accepted the tweet but returned no id; reconcile via user-posts before assuming it did not land"}),
             0,
@@ -4360,14 +4563,32 @@ async fn run_post_write(
     ))
     .await;
     // Budgets were RESERVED at send time (bead nku) — no double count.
-    idem_set(
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Acknowledged,
         Some(serde_json::json!({"id": new_id})),
         now,
-    );
+    ) {
+        eprintln!("twr: write landed but idempotency ack failed: {e}");
+    }
     (serde_json::json!({"id": new_id, "operation": operation}), 0)
+}
+
+/// Run a blocking state-file critical section (budget reserve / idempotency
+/// claim+upsert) without parking a tokio worker: `block_in_place` hands the
+/// worker's other tasks to a replacement thread on the multi-thread runtime
+/// `#[tokio::main]` builds. Off-runtime or on a current-thread runtime
+/// (unit tests) it just runs inline — the lock retry inside can sleep
+/// ~5s under contention and must not stall scheduling (bead c83-e).
+fn state_blocking<T>(f: impl FnOnce() -> T) -> T {
+    let multi_thread = tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
 }
 
 /// Set one idempotency entry's state under the state lock (bead sxu/nku):
@@ -4379,28 +4600,36 @@ fn idem_set(
     state: twr_core::WriteState,
     result: Option<serde_json::Value>,
     now: u64,
-) {
+) -> Result<(), String> {
     if let (Some(p), Some(key)) = (store_path, key) {
-        let _ = twr_core::idempotency::upsert(
-            p,
-            key,
-            twr_core::IdempotencyEntry {
-                state,
-                created_at_secs: now,
-                result,
-            },
-        );
+        state_blocking(|| {
+            twr_core::idempotency::upsert(
+                p,
+                key,
+                twr_core::IdempotencyEntry {
+                    state,
+                    created_at_secs: now,
+                    result,
+                },
+            )
+        })
+    } else {
+        Ok(())
     }
 }
 
 /// Transport-level failure AFTER the request may have been sent: the
-/// honest state is `unknown` — never auto-retry (bead sxu).
+/// honest state is `unknown` — never auto-retry (bead sxu). Persistence
+/// failures here are logged, not propagated: the caller is already on an
+/// error path and the entry staying `Sent` still refuses auto-retry.
 fn mark_unknown(store_path: &Option<std::path::PathBuf>, key: Option<&str>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    idem_set(store_path, key, twr_core::WriteState::Unknown, None, now);
+    if let Err(e) = idem_set(store_path, key, twr_core::WriteState::Unknown, None, now) {
+        eprintln!("twr: could not persist idempotency state: {e}");
+    }
 }
 
 /// A DEFINITE failure (server answered: HTTP error status or an in-body
@@ -4408,7 +4637,9 @@ fn mark_unknown(store_path: &Option<std::path::PathBuf>, key: Option<&str>) {
 /// reaching `Sent`): nothing was applied, so the key returns to
 /// `Prepared` — retryable, never a false "in flight" (bead sxu).
 fn mark_prepared(store_path: &Option<std::path::PathBuf>, key: Option<&str>, now: u64) {
-    idem_set(store_path, key, twr_core::WriteState::Prepared, None, now);
+    if let Err(e) = idem_set(store_path, key, twr_core::WriteState::Prepared, None, now) {
+        eprintln!("twr: could not persist idempotency state: {e}");
+    }
 }
 
 /// Reserve the general mutation budget AND (for post-family ops) the
@@ -4423,7 +4654,7 @@ fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, 
         .unwrap_or(0);
     if let Some(path) = twr_core::budget::default_log_path() {
         let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
-        match twr_core::budget::reserve(&path, &today, limit) {
+        match state_blocking(|| twr_core::budget::reserve(&path, &today, limit)) {
             Ok(twr_core::BudgetCheck::Allow { .. }) => {}
             Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
                 return Err((
@@ -4438,7 +4669,9 @@ fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, 
         if let Some(path) = twr_core::budget::default_post_log_path() {
             let limit = twr_core::budget::effective_post_budget(|k| std::env::var(k).ok());
             let interval = twr_core::budget::effective_post_min_interval(|k| std::env::var(k).ok());
-            match twr_core::budget::reserve_post(&path, &today, limit, interval, now_secs) {
+            match state_blocking(|| {
+                twr_core::budget::reserve_post(&path, &today, limit, interval, now_secs)
+            }) {
                 Ok(twr_core::budget::PostCheck::Allow { .. }) => {}
                 Ok(twr_core::budget::PostCheck::DenyBudget { used, limit }) => {
                     return Err((
@@ -4624,7 +4857,7 @@ async fn run_engage(
     // is written immediately before the mutation POST below.
     if let Some(key) = &idempotency_key {
         if let Some(p) = &store_path {
-            match twr_core::idempotency::claim(p, key, now) {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
                 Ok(twr_core::PreCheck::ReplayCached(result)) => {
                     return (
                         serde_json::json!({"idempotent_replay": true, "result": result}),
@@ -4662,13 +4895,19 @@ async fn run_engage(
     cli::exec::throttle_wait(&mut ctx.throttle, cmd).await;
     // `Sent` immediately before the wire + atomic general-budget reserve
     // (beads sxu/nku). Engage ops are NOT post-family → no post cap.
-    idem_set(
+    // FAIL CLOSED on persistence error (bead 11c).
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Sent,
         None,
         now,
-    );
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            5,
+        );
+    }
     if let Err(e) = reserve_budgets_at_send(false) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return e;
@@ -4800,13 +5039,15 @@ async fn run_engage(
         return (serde_json::json!({"error": message}), code);
     }
     // Budgets were RESERVED at send time (bead nku) — no double count.
-    idem_set(
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Acknowledged,
         Some(serde_json::json!({"ok": true, "operation": cmd})),
         now,
-    );
+    ) {
+        eprintln!("twr: write landed but idempotency ack failed: {e}");
+    }
     (
         serde_json::json!({"ok": true, "operation": cmd, "target": target_id}),
         0,
@@ -5065,7 +5306,7 @@ async fn run_list_write(
     // immediately before the mutation POST below.
     if let Some(key) = &idempotency_key {
         if let Some(p) = &store_path {
-            match twr_core::idempotency::claim(p, key, now) {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
                 Ok(twr_core::PreCheck::ReplayCached(result)) => {
                     return (
                         serde_json::json!({"idempotent_replay": true, "result": result}),
@@ -5130,7 +5371,11 @@ async fn run_list_write(
     // `https://x.com/i/lists/<id>/info`). 214 root cause still UNRESOLVED —
     // this is variable #2 after the in-body queryId below; DevTools capture
     // of x.com/i/lists/create is the ground truth if this also fails.
-    headers.insert("Referer".into(), "https://x.com/i/lists/create".into());
+    twr_client::set_header(
+        &mut headers,
+        "Referer",
+        "https://x.com/i/lists/create".into(),
+    );
     let refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -5153,13 +5398,19 @@ async fn run_list_write(
     cli::exec::throttle_wait(&mut ctx.throttle, op).await;
     // `Sent` immediately before the wire + atomic budget reserve (beads
     // sxu/nku). List ops are not post-family → general budget only.
-    idem_set(
+    // FAIL CLOSED on persistence error (bead 11c).
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Sent,
         None,
         now,
-    );
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            5,
+        );
+    }
     if let Err(e) = reserve_budgets_at_send(false) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return e;
@@ -5291,24 +5542,43 @@ fn finish_list_write(
     operation: &str,
     args: &ListWriteArgs,
 ) {
-    idem_set(
+    if let Err(e) = idem_set(
         store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Acknowledged,
         Some(serde_json::json!({"ok": true, "operation": operation, "target": args.target()})),
         now,
-    );
+    ) {
+        eprintln!("twr: list write landed but idempotency ack failed: {e}");
+    }
 }
 
 /// True when a response body carries a not-found shape (tombstone /
 /// *Unavailable / "not found" message) — for the delete-retry success rule.
 fn is_not_found_payload(body: &[u8]) -> bool {
     let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
-    let text = payload.to_string().to_lowercase();
-    text.contains("not found")
-        || text.contains("does not exist")
-        || text.contains("unavailable")
-        || text.contains("tombstone")
+    value_mentions_not_found(&payload)
+}
+
+/// Walk `message`/`__typename` string fields looking for not-found
+/// phrasing (bead c83): the old code serialized the WHOLE body to a
+/// lowercase String — a full-tree alloc + scan per list-delete response.
+/// Restricting to the two fields X actually uses for this keeps coverage
+/// (`errors[].message`, `__typename` tombstones) without the big alloc.
+fn value_mentions_not_found(v: &serde_json::Value) -> bool {
+    const NEEDLES: [&str; 4] = ["not found", "does not exist", "unavailable", "tombstone"];
+    fn hit(s: &str) -> bool {
+        let l = s.to_lowercase();
+        NEEDLES.iter().any(|n| l.contains(n))
+    }
+    match v {
+        serde_json::Value::Object(map) => map.iter().any(|(k, val)| {
+            ((k == "message" || k == "__typename") && val.as_str().is_some_and(hit))
+                || value_mentions_not_found(val)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(value_mentions_not_found),
+        _ => false,
+    }
 }
 
 /// True when a mutation rejection message means "already in that state"
@@ -5401,7 +5671,7 @@ async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_jso
     let url = match &cursor {
         Some(c) => format!(
             "https://x.com/i/api/1.1/dm/inbox_timeline/trusted.json?max_id={}&dm_users=false",
-            url_encode_query(c)
+            twr_client::url_encode_query(c)
         ),
         None => "https://x.com/i/api/1.1/dm/inbox_initial_state.json?dm_users=true".to_string(),
     };
@@ -5429,6 +5699,14 @@ async fn run_dm_list(opts: &OutputOptions, cursor: Option<String>) -> (serde_jso
         return (
             serde_json::json!({"error": "contract drift (DM inbox endpoint moved)"}),
             6,
+        );
+    }
+    // Any other non-2xx is an error, never an empty success (k8h).
+    if !(200..300).contains(&resp.status) {
+        let kind = twr_core::ErrorKind::from_http_status(resp.status);
+        return (
+            serde_json::json!({"error": format!("dm-list fetch failed: HTTP {}", resp.status)}),
+            kind.exit_code(),
         );
     }
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -5475,11 +5753,11 @@ async fn run_dm_read(
     };
     let mut url = format!(
         "https://x.com/i/api/1.1/dm/conversation/{}.json?context={}&dm_users=false&include_conversation_info=true",
-        url_encode_query(&conversation_id),
+        twr_client::url_encode_query(&conversation_id),
         context
     );
     if let Some(c) = &cursor {
-        url.push_str(&format!("&max_id={}", url_encode_query(c)));
+        url.push_str(&format!("&max_id={}", twr_client::url_encode_query(c)));
     }
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
@@ -5504,6 +5782,14 @@ async fn run_dm_read(
     if resp.status == 404 {
         return (serde_json::json!({"error": "conversation not found"}), 3);
     }
+    // Any other non-2xx is an error, never an empty success (k8h).
+    if !(200..300).contains(&resp.status) {
+        let kind = twr_core::ErrorKind::from_http_status(resp.status);
+        return (
+            serde_json::json!({"error": format!("dm-read fetch failed: HTTP {}", resp.status)}),
+            kind.exit_code(),
+        );
+    }
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
     let (msgs, next) = twr_model::parse_dm_conversation_response(&body);
     let mut page = serde_json::json!({"returned": msgs.len(), "hasMore": next.is_some()});
@@ -5514,18 +5800,6 @@ async fn run_dm_read(
         serde_json::json!({"conversation_id": conversation_id, "messages": msgs, "page": page}),
         0,
     )
-}
-
-fn url_encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// `twr dm-send <user_id> <text>`: THE highest-scrutiny write in twr — see
@@ -5665,7 +5939,7 @@ async fn run_dm_send(
     // the DM POST below.
     if let Some(key) = &idempotency_key {
         if let Some(p) = &store_path {
-            match twr_core::idempotency::claim(p, key, now) {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
                 Ok(twr_core::PreCheck::ReplayCached(result)) => {
                     return (
                         serde_json::json!({"idempotent_replay": true, "result": result}),
@@ -5727,13 +6001,19 @@ async fn run_dm_send(
     // `Sent` immediately before the wire (bead sxu) + atomic reserves for
     // BOTH the general mutation budget and DM's own daily cap (bead nku —
     // DM send previously skipped the general budget entirely).
-    idem_set(
+    // FAIL CLOSED on persistence error (bead 11c).
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Sent,
         None,
         now,
-    );
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            5,
+        );
+    }
     if let Err(e) = reserve_budgets_at_send(false) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return e;
@@ -5742,7 +6022,7 @@ async fn run_dm_send(
         let today = twr_core::budget::today_utc();
         if let Some(path) = twr_core::budget::default_dm_log_path() {
             let limit = twr_core::budget::effective_dm_budget(|k| std::env::var(k).ok());
-            match twr_core::budget::reserve(&path, &today, limit) {
+            match state_blocking(|| twr_core::budget::reserve(&path, &today, limit)) {
                 Ok(twr_core::BudgetCheck::Allow { .. }) => {}
                 Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
@@ -5802,13 +6082,15 @@ async fn run_dm_send(
     ))
     .await;
     // Budgets were RESERVED at send time (bead nku) — no double count.
-    idem_set(
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Acknowledged,
         Some(serde_json::json!({"ok": true, "recipient": user_id})),
         now,
-    );
+    ) {
+        eprintln!("twr: write landed but idempotency ack failed: {e}");
+    }
     (
         serde_json::json!({"ok": true, "operation": "dm-send", "recipient": user_id}),
         0,
@@ -5840,23 +6122,25 @@ fn run_completions(shell: &str) -> anyhow::Result<()> {
 
 /// Human renderer: same structs as JSON, table view (plan §0.1).
 fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> String {
+    // Deserialize straight from the borrowed Value — `from_value(v.clone())`
+    // deep-cloned whole tweet/user subtrees per render (bead c83).
     let tweets: Vec<twr_model::Tweet> = data
         .get("tweets")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .and_then(|v| <Vec<twr_model::Tweet> as serde::Deserialize>::deserialize(v).ok())
         .unwrap_or_default();
     if !tweets.is_empty() || kind == "tweet_list" {
         let show_score = tweets.iter().any(|t| t.score.is_some());
         return cli::table::tweet_table(&tweets, opts.full_text, opts.time_mode, show_score);
     }
     if kind == "user" {
-        if let Ok(u) = serde_json::from_value::<twr_model::UserProfile>(data.clone()) {
+        if let Ok(u) = <twr_model::UserProfile as serde::Deserialize>::deserialize(data) {
             return cli::table::user_card(&u);
         }
     }
     if kind == "user_list" {
         let users: Vec<twr_model::UserProfile> = data
             .get("users")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .and_then(|v| <Vec<twr_model::UserProfile> as serde::Deserialize>::deserialize(v).ok())
             .unwrap_or_default();
         // An empty list gets a line, not a bare table: a header over no rows
         // reads like a rendering bug rather than "nothing came back".
@@ -5877,7 +6161,7 @@ fn render_human(kind: &str, data: &serde_json::Value, opts: &OutputOptions) -> S
         return out;
     }
     if kind == "tweet_detail" || kind == "article" {
-        if let Ok(t) = serde_json::from_value::<twr_model::Tweet>(data.clone()) {
+        if let Ok(t) = <twr_model::Tweet as serde::Deserialize>::deserialize(data) {
             return cli::table::tweet_table(std::slice::from_ref(&t), true, opts.time_mode, false);
         }
     }
@@ -5919,6 +6203,19 @@ fn emit_fail(opts: &OutputOptions, err: twr_core::TwrError, code: i32) -> (serde
         OutputFormat::Toon => emit(&envelope),
     }
     std::process::exit(code);
+}
+
+/// Exit code for a failed page/timeline fetch (bead twitter_cli-k8h):
+/// `PageError::Http(status)` maps through the shared `twr-core` HTTP-status
+/// table (401/403→77, 5xx→5, 226/429→4, …); transport/parse failures
+/// (`Fatal`) keep the historical exit 6.
+fn page_fetch_exit(err: &twr_client::PageError) -> i32 {
+    match err {
+        twr_client::PageError::Http(status) => {
+            twr_core::ErrorKind::from_http_status(*status).exit_code()
+        }
+        _ => twr_core::ErrorKind::ContractDrift.exit_code(),
+    }
 }
 
 fn run_cache_search(query: &str, max: usize) -> (serde_json::Value, i32) {
@@ -6329,6 +6626,15 @@ async fn run_search_v2aware(
 ) -> (serde_json::Value, i32) {
     let (routed, why) = twr_v2::route("search", backend);
     if routed == twr_v2::Backend::ApiV2 {
+        // --cursor/--filter are cookie-backend features; the v2 search API
+        // has no equivalents — reject loudly instead of silently dropping
+        // them (bead 255).
+        if cursor.is_some() || filter {
+            return (
+                serde_json::json!({"error": "api-v2 search does not support --cursor/--filter (cookie backend only)"}),
+                2,
+            );
+        }
         return run_search_v2(opts, q, max, scope, why).await;
     }
     run_search(opts, config, q, max, cursor, filter).await
@@ -6341,30 +6647,17 @@ async fn run_search_v2(
     scope: &str,
     why: &str,
 ) -> (serde_json::Value, i32) {
-    let tokens = twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
-    let Some(tokens) = tokens else {
-        return (
-            serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
-            77,
-        );
+    let token = match v2_bearer().await {
+        Ok(t) => t,
+        Err((d, c)) => return (d, c),
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if tokens.is_expired(now) {
-        return (
-            serde_json::json!({"error": "api-v2 access token expired; re-run `twr login --api-v2`"}),
-            77,
-        );
-    }
     let sc = twr_v2::SearchScope::parse(scope).unwrap_or_default();
     let url = twr_v2::search_url(&q.raw_query(), sc, max.unwrap_or(20));
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
-    let auth = format!("Bearer {}", tokens.access_token);
+    let auth = format!("Bearer {token}");
     let headers = [("Authorization", auth.as_str())];
     let resp = match transport.get(&url, &headers).await {
         Ok(r) => r,
@@ -6399,13 +6692,9 @@ async fn run_tweet_v2aware(
     let backend = twr_v2::Backend::parse(&opts.backend).unwrap_or_default();
     let (routed, why) = twr_v2::route("tweet", backend);
     if routed == twr_v2::Backend::ApiV2 {
-        let tokens =
-            twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
-        let Some(tokens) = tokens else {
-            return (
-                serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
-                77,
-            );
+        let token = match v2_bearer().await {
+            Ok(t) => t,
+            Err((d, c)) => return (d, c),
         };
         let rs = twr_v2::ReplyScope::parse(&reply_scope).unwrap_or_default();
         let tid = cli::ids::normalize_tweet_id(&id).unwrap_or(id);
@@ -6414,7 +6703,7 @@ async fn run_tweet_v2aware(
             Ok(t) => t,
             Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
         };
-        let auth = format!("Bearer {}", tokens.access_token);
+        let auth = format!("Bearer {token}");
         let headers = [("Authorization", auth.as_str())];
         let resp = match transport.get(&url, &headers).await {
             Ok(r) => r,
@@ -6444,21 +6733,46 @@ async fn run_tweet_v2aware(
     run_tweet(opts, config, id, conversation, cursor).await
 }
 
-/// v2 video post: validate → chunked upload w/ STATUS poll → CreateTweet w/ media.
-/// `--alt-text` is recorded in the envelope (v2 attaches it via a separate
-/// media-metadata call in full PR #31 scope — noted, not silently dropped).
+/// v2 post: text-only OR text+video. `video_path: None` → plain
+/// `POST /2/tweets` (bead 255); `Some(path)` → chunked media upload with
+/// STATUS poll first, then the same create call. `--alt-text` is recorded
+/// in the envelope (v2 attaches it via a separate media-metadata call in
+/// full PR #31 scope — noted, not silently dropped).
 #[allow(clippy::too_many_arguments)]
-async fn run_post_write_v2video(
+async fn run_post_write_v2(
     opts: &OutputOptions,
     config: &twr_config::TwrConfig,
     text: String,
     reply_to: Option<String>,
-    video_path: String,
+    video_path: Option<String>,
     alt_text: Option<String>,
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
+    // Same client-side validation as the cookie path (bead 0p9/255):
+    // empty text and unparseable reply targets are usage errors (exit 2)
+    // — they fail even on --dry-run, before budgets or the apply gate.
+    if text.trim().is_empty() {
+        return (
+            serde_json::json!({"error": "post text is empty or whitespace"}),
+            2,
+        );
+    }
+    // Normalize the reply target to a bare tweet id — `POST /2/tweets`
+    // `reply.in_reply_to_tweet_id` requires the numeric id, not a URL.
+    let reply_to = match reply_to {
+        Some(r) => match cli::ids::normalize_tweet_id(&r) {
+            Some(id) => Some(id),
+            None => {
+                return (
+                    serde_json::json!({"error": format!("reply target is not a tweet ID or x.com URL: {r}")}),
+                    2,
+                )
+            }
+        },
+        None => None,
+    };
     // Fail CLOSED when no state dir exists (bead nku): budgets and
     // idempotency cannot be enforced, so refuse before any side effect.
     if let Err(e) = require_write_state() {
@@ -6513,7 +6827,11 @@ async fn run_post_write_v2video(
         Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
         Decision::Preview => return (dry_run_data("post"), 0),
         Decision::Prompt => {
-            eprintln!("This will post video \"{video_path}\" with text \"{text}\". Type 'yes' to proceed:");
+            let what = video_path
+                .as_deref()
+                .map(|p| format!("video \"{p}\""))
+                .unwrap_or_else(|| "a text post".to_string());
+            eprintln!("This will post {what} with text \"{text}\". Type 'yes' to proceed:");
             let mut line = String::new();
             if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
             {
@@ -6533,7 +6851,7 @@ async fn run_post_write_v2video(
     let store_path = twr_core::idempotency::default_store_path();
     if let Some(key) = &idempotency_key {
         if let Some(p) = &store_path {
-            match twr_core::idempotency::claim(p, key, now) {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
                 Ok(twr_core::PreCheck::ReplayCached(result)) => {
                     return (
                         serde_json::json!({"idempotent_replay": true, "result": result}),
@@ -6551,153 +6869,51 @@ async fn run_post_write_v2video(
             }
         }
     }
-    let path = std::path::Path::new(&video_path);
-    let Some(mime) = twr_v2::video::video_mime(path) else {
-        return (
-            serde_json::json!({"error": format!("unsupported video (mp4/mov): {video_path}")}),
-            2,
-        );
+    // Optional video upload (INIT → APPEND → FINALIZE → STATUS poll).
+    // Text-only posts skip straight to the create call (bead 255).
+    let media_id = match video_path.as_deref() {
+        Some(vpath) => match v2_upload_video(vpath).await {
+            Ok(id) => id,
+            Err((d, c)) => return (d, c),
+        },
+        None => String::new(),
     };
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => {
-            return (
-                serde_json::json!({"error": format!("cannot read video: {video_path}")}),
-                7,
-            )
-        }
-    };
-    if data.len() as u64 > twr_v2::video::MAX_VIDEO_BYTES {
-        return (serde_json::json!({"error": "video over 128MB cap"}), 2);
-    }
-    let tokens = twr_v2::oauth::default_token_path().and_then(|p| twr_v2::oauth::load_tokens(&p));
-    let Some(tokens) = tokens else {
-        return (
-            serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
-            77,
-        );
-    };
-    let transport = match twr_client::WreqTransport::new_chrome() {
-        Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
-    };
-    let auth = format!("Bearer {}", tokens.access_token);
-    let base = [("Authorization", auth.as_str())];
-    // INIT
-    let init = twr_v2::video::init_body(data.len() as u64, mime);
-    let raw = serde_json::to_vec(&init).unwrap_or_default();
-    let init_resp = match transport
-        .post_json(twr_v2::video::V2_UPLOAD_INIT_URL, &base, &raw)
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return (serde_json::json!({"error": "v2 video INIT failed"}), 5),
-    };
-    if !(200..300).contains(&init_resp.status) {
-        return (
-            serde_json::json!({"error": format!("v2 video INIT HTTP {}", init_resp.status)}),
-            6,
-        );
-    }
-    let media_id = serde_json::from_slice::<serde_json::Value>(&init_resp.body)
-        .ok()
-        .and_then(|v| {
-            v.pointer("/data/id")
-                .and_then(|s| s.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    if media_id.is_empty() {
-        return (
-            serde_json::json!({"error": "v2 video INIT returned no media id"}),
-            6,
-        );
-    }
-    // APPEND segments
-    for (i, seg) in twr_v2::video::video_chunks(&data).iter().enumerate() {
-        let body = serde_json::json!({"media_id": media_id, "segment_index": i, "media": base64_like(seg)});
-        let raw = serde_json::to_vec(&body).unwrap_or_default();
-        match transport
-            .post_json(twr_v2::video::V2_UPLOAD_APPEND_URL, &base, &raw)
-            .await
-        {
-            Ok(r) if (200..300).contains(&r.status) => {}
-            Ok(r) => {
-                return (
-                    serde_json::json!({"error": format!("v2 video APPEND HTTP {}", r.status)}),
-                    6,
-                )
-            }
-            Err(_) => return (serde_json::json!({"error": "v2 video APPEND failed"}), 5),
-        }
-    }
-    // FINALIZE
-    let fin = serde_json::json!({"media_id": media_id});
-    let raw = serde_json::to_vec(&fin).unwrap_or_default();
-    match transport
-        .post_json(twr_v2::video::V2_UPLOAD_FINALIZE_URL, &base, &raw)
-        .await
-    {
-        Ok(r) if (200..300).contains(&r.status) => {}
-        Ok(r) => {
-            return (
-                serde_json::json!({"error": format!("v2 video FINALIZE HTTP {}", r.status)}),
-                6,
-            )
-        }
-        Err(_) => return (serde_json::json!({"error": "v2 video FINALIZE failed"}), 5),
-    }
-    // STATUS poll until succeeded (5s × 12).
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let url = format!(
-            "{}?media_id={media_id}",
-            twr_v2::video::V2_UPLOAD_STATUS_URL
-        );
-        let resp = match transport.get(&url, &base).await {
-            Ok(r) => r,
-            Err(_) => return (serde_json::json!({"error": "v2 video STATUS failed"}), 5),
-        };
-        match twr_v2::video::parse_status(&resp.body) {
-            twr_v2::video::UploadStatus::Succeeded { .. } => break,
-            twr_v2::video::UploadStatus::Failed { reason } => {
-                return (serde_json::json!({"error": reason}), 6);
-            }
-            _ if attempts >= twr_v2::video::STATUS_POLL_ATTEMPTS => {
-                return (
-                    serde_json::json!({"error": "video still processing after ~1min; retry later"}),
-                    4,
-                );
-            }
-            _ => {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    twr_v2::video::STATUS_POLL_DELAY_SECS,
-                ))
-                .await
-            }
-        }
-    }
     // CREATE the tweet (bead tab): the upload above only stages media —
     // without this POST the old code returned a fake success with
     // `"id": ""` and NO tweet was ever created. Now a real
     // `POST /2/tweets` with `media.media_ids` (+ optional reply target).
     // `Sent` + atomic budget reserve happen immediately before the wire,
     // same contract as the cookie path.
-    let reply_to = reply_to.filter(|s| !s.is_empty());
-    let body = twr_v2::backend::create_tweet_body(
-        &text,
-        std::slice::from_ref(&media_id),
-        reply_to.as_deref(),
-    );
+    let media_ids: Vec<String> = if media_id.is_empty() {
+        Vec::new()
+    } else {
+        vec![media_id.clone()]
+    };
+    let body = twr_v2::backend::create_tweet_body(&text, &media_ids, reply_to.as_deref());
+    let token = match v2_bearer().await {
+        Ok(t) => t,
+        Err((d, c)) => return (d, c),
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let auth = format!("Bearer {token}");
+    let base = [("Authorization", auth.as_str())];
     let raw = serde_json::to_vec(&body).unwrap_or_default();
-    idem_set(
+    // FAIL CLOSED on persistence error (bead 11c).
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Sent,
         None,
         now,
-    );
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            5,
+        );
+    }
     if let Err(e) = reserve_budgets_at_send(true) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return e;
@@ -6741,49 +6957,179 @@ async fn run_post_write_v2video(
     ))
     .await;
     let alt_recorded = alt_text.is_some();
-    idem_set(
+    if let Err(e) = idem_set(
         &store_path,
         idempotency_key.as_deref(),
         twr_core::WriteState::Acknowledged,
         Some(serde_json::json!({"id": new_id})),
         now,
-    );
-    (
-        serde_json::json!({"id": new_id, "operation": "post", "backend": "api-v2", "media_id": media_id, "alt_text_recorded": alt_recorded}),
-        0,
-    )
+    ) {
+        eprintln!("twr: write landed but idempotency ack failed: {e}");
+    }
+    let mut out = serde_json::json!({"id": new_id, "operation": "post", "backend": "api-v2", "alt_text_recorded": alt_recorded});
+    if !media_id.is_empty() {
+        out["media_id"] = serde_json::json!(media_id);
+    }
+    (out, 0)
 }
 
-/// Minimal base64 for APPEND segments (v2 takes raw bytes in real scope;
-/// base64 keeps the JSON body well-formed here).
-fn base64_like(seg: &[u8]) -> String {
-    const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in seg.chunks(3) {
-        let mut n = 0u32;
-        for (i, b) in chunk.iter().enumerate() {
-            n |= (*b as u32) << (16 - 8 * i);
+/// v2 video upload: validate → INIT → raw-multipart APPEND → FINALIZE →
+/// STATUS poll until `succeeded`. Returns the attachable `media_id`.
+/// Errors are `(envelope, exit_code)` — the caller is already past the
+/// idempotency `Prepared` claim, so every failure here is definite and
+/// leaves the key retryable.
+async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value, i32)> {
+    let path = std::path::Path::new(video_path);
+    let Some(mime) = twr_v2::video::video_mime(path) else {
+        return Err((
+            serde_json::json!({"error": format!("unsupported video (mp4/mov): {video_path}")}),
+            2,
+        ));
+    };
+    // Async read: up to 128MB must not park a tokio worker (bead a99).
+    let data = match tokio::fs::read(path).await {
+        Ok(d) => d,
+        Err(_) => {
+            return Err((
+                serde_json::json!({"error": format!("cannot read video: {video_path}")}),
+                7,
+            ))
         }
-        let pad = 3 - chunk.len();
-        for i in 0..4 - pad {
-            out.push(ALPH[((n >> (18 - 6 * i)) & 63) as usize] as char);
-        }
-        for _ in 0..pad {
-            out.push('=');
+    };
+    if data.len() as u64 > twr_v2::video::MAX_VIDEO_BYTES {
+        return Err((serde_json::json!({"error": "video over 128MB cap"}), 2));
+    }
+    let token = v2_bearer().await?;
+    let transport = twr_client::WreqTransport::new_chrome()
+        .map_err(|e| (serde_json::json!({"error": format!("transport: {e}")}), 5))?;
+    let auth = format!("Bearer {token}");
+    let base = [("Authorization", auth.as_str())];
+    // INIT
+    let init = twr_v2::video::init_body(data.len() as u64, mime);
+    let raw = serde_json::to_vec(&init).unwrap_or_default();
+    let init_resp = transport
+        .post_json(twr_v2::video::V2_UPLOAD_INIT_URL, &base, &raw)
+        .await
+        .map_err(|_| (serde_json::json!({"error": "v2 video INIT failed"}), 5))?;
+    if !(200..300).contains(&init_resp.status) {
+        return Err((
+            serde_json::json!({"error": format!("v2 video INIT HTTP {}", init_resp.status)}),
+            6,
+        ));
+    }
+    let media_id = serde_json::from_slice::<serde_json::Value>(&init_resp.body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/data/id")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    if media_id.is_empty() {
+        return Err((
+            serde_json::json!({"error": "v2 video INIT returned no media id"}),
+            6,
+        ));
+    }
+    // APPEND segments — raw multipart bytes to
+    // `POST /2/media/upload/{media_id}/append` (bead 93i), NOT base64 JSON.
+    for (i, seg) in twr_v2::video::video_chunks(&data).iter().enumerate() {
+        let boundary = format!("----twr-v2-upload-{media_id}-{i}");
+        let parts = twr_v2::video::append_body(&media_id, i, seg, &boundary);
+        let ct = twr_v2::video::append_content_type(&boundary);
+        let mut owned: Vec<(String, String)> = base
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        owned.push(("Content-Type".into(), ct));
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match transport
+            .post_json(&twr_v2::video::append_url(&media_id), &refs, &parts)
+            .await
+        {
+            Ok(r) if (200..300).contains(&r.status) => {}
+            Ok(r) => {
+                return Err((
+                    serde_json::json!({"error": format!("v2 video APPEND HTTP {}", r.status)}),
+                    6,
+                ))
+            }
+            Err(_) => {
+                return Err((serde_json::json!({"error": "v2 video APPEND failed"}), 5));
+            }
         }
     }
-    out
+    // FINALIZE — `POST /2/media/upload/{media_id}/finalize`.
+    let raw = serde_json::to_vec(&serde_json::json!({})).unwrap_or_default();
+    match transport
+        .post_json(&twr_v2::video::finalize_url(&media_id), &base, &raw)
+        .await
+    {
+        Ok(r) if (200..300).contains(&r.status) => {}
+        Ok(r) => {
+            return Err((
+                serde_json::json!({"error": format!("v2 video FINALIZE HTTP {}", r.status)}),
+                6,
+            ))
+        }
+        Err(_) => {
+            return Err((serde_json::json!({"error": "v2 video FINALIZE failed"}), 5));
+        }
+    }
+    // STATUS poll until succeeded (5s × 12) — GET with command=STATUS.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let resp = transport
+            .get(&twr_v2::video::status_url(&media_id), &base)
+            .await
+            .map_err(|_| (serde_json::json!({"error": "v2 video STATUS failed"}), 5))?;
+        match twr_v2::video::parse_status(&resp.body) {
+            twr_v2::video::UploadStatus::Succeeded { .. } => break,
+            twr_v2::video::UploadStatus::Failed { reason } => {
+                return Err((serde_json::json!({"error": reason}), 6));
+            }
+            _ if attempts >= twr_v2::video::STATUS_POLL_ATTEMPTS => {
+                return Err((
+                    serde_json::json!({"error": "video still processing after ~1min; retry later"}),
+                    4,
+                ));
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    twr_v2::video::STATUS_POLL_DELAY_SECS,
+                ))
+                .await
+            }
+        }
+    }
+    Ok(media_id)
 }
 
-/// Login dispatch: cookie flow (existing) or api-v2 PKCE start.
-fn login_data_v2aware(
+/// Login dispatch: cookie flow (existing) or api-v2 PKCE flow (bead p3c).
+///
+/// Step 1 (`--api-v2` without `--code`): persist the PKCE verifier/state
+/// owner-only in `~/.twr/oauth2-pending.json` and print the authorize URL.
+/// Step 2 (`--api-v2 --code <code|redirect-url>`): load the pending state,
+/// exchange at `TOKEN_URL`, save `~/.twr/oauth2.json`. Interactive runs
+/// without `--code` may also paste the code on stdin after the URL print.
+async fn login_data_v2aware(
     cookie: Option<String>,
     guide: bool,
     api_v2: bool,
     client_id: Option<String>,
+    code: Option<String>,
+    opts: &OutputOptions,
 ) -> (serde_json::Value, i32) {
     if !api_v2 {
         return login_data(cookie, guide);
+    }
+    // Step 2: exchange a pasted code / redirect URL for tokens.
+    if let Some(input) = code {
+        return v2_login_exchange(&input).await;
     }
     let Some(cid) = client_id.filter(|c| !c.is_empty()) else {
         return (
@@ -6791,10 +7137,6 @@ fn login_data_v2aware(
             2,
         );
     };
-    // PKCE start: print the authorize URL; the token exchange completes after
-    // the user pastes the redirected code (second step, same command family).
-    // Full code->token exchange needs the live callback; here we emit the URL
-    // plus the verifier/state the caller must keep for step 2.
     let verifier = twr_v2::oauth::new_verifier();
     let challenge = twr_v2::oauth::challenge_s256(&verifier);
     let state = twr_v2::oauth::new_state();
@@ -6805,15 +7147,209 @@ fn login_data_v2aware(
         &state,
         &challenge,
     );
+    // Persist PKCE state for the --code step; fail closed — without it the
+    // exchange cannot succeed and the user would chase a dead end.
+    let pending = twr_v2::oauth::PendingPkce {
+        verifier,
+        state: state.clone(),
+        client_id: cid,
+        redirect_uri: twr_v2::oauth::DEFAULT_REDIRECT_URI.to_string(),
+        created_at_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    if let Some(p) = twr_v2::oauth::pending_path() {
+        if let Err(e) = twr_v2::oauth::save_pending(&p, &pending) {
+            return (
+                serde_json::json!({"error": format!("cannot persist PKCE state ({e}); api-v2 login cannot complete")}),
+                5,
+            );
+        }
+    }
+    // Interactive convenience: after printing the URL, accept the pasted
+    // code/redirect on stdin unless --no-interactive forbids it.
+    let interactive = !opts.no_interactive && std::io::stdin().is_terminal();
+    if interactive {
+        eprintln!("Open authorize_url, approve, then paste the redirect URL or code here (empty line to quit):");
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() {
+            let line = line.trim().to_string();
+            if !line.is_empty() {
+                return v2_login_exchange(&line).await;
+            }
+        }
+    }
     (
         serde_json::json!({
             "authorize_url": url,
-            "pkce_verifier": verifier,
             "state": state,
-            "next": "open authorize_url, approve, then complete the local callback to exchange code for tokens (stored in ~/.twr/oauth2.json)",
+            "next": "open authorize_url, approve, then run `twr login --api-v2 --code <code-or-redirect-url>` to exchange for tokens (stored in ~/.twr/oauth2.json)",
         }),
         0,
     )
+}
+
+/// Step 2 of api-v2 login (bead p3c): validate the pasted code/redirect
+/// against the pending PKCE state, POST the authorization_code grant to
+/// `TOKEN_URL`, and persist tokens owner-only.
+async fn v2_login_exchange(input: &str) -> (serde_json::Value, i32) {
+    let Some((code, redirect_state)) = twr_v2::oauth::extract_code(input) else {
+        return (
+            serde_json::json!({"error": "could not find a `code` in the input — paste the redirect URL or the bare code"}),
+            2,
+        );
+    };
+    let Some(pending_path) = twr_v2::oauth::pending_path() else {
+        return (
+            serde_json::json!({"error": "no home dir for PKCE state"}),
+            5,
+        );
+    };
+    let Some(pending) = twr_v2::oauth::load_pending(&pending_path) else {
+        return (
+            serde_json::json!({"error": "no pending api-v2 login (missing, stale >15min, or already completed) — re-run `twr login --api-v2` to start a new flow"}),
+            2,
+        );
+    };
+    // CSRF check: when the redirect carried a state it MUST match.
+    if let Some(s) = &redirect_state {
+        if *s != pending.state {
+            return (
+                serde_json::json!({"error": "state mismatch — this redirect belongs to a different login flow; restart `twr login --api-v2`"}),
+                2,
+            );
+        }
+    }
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+    };
+    let form = twr_v2::oauth::exchange_form(
+        &code,
+        &pending.redirect_uri,
+        &pending.client_id,
+        &pending.verifier,
+    );
+    let headers = [("Content-Type", "application/x-www-form-urlencoded")];
+    let resp = match transport
+        .post_json(twr_v2::oauth::TOKEN_URL, &headers, form.as_bytes())
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                serde_json::json!({"error": "token exchange request failed (network)"}),
+                5,
+            )
+        }
+    };
+    if !(200..300).contains(&resp.status) {
+        return (
+            serde_json::json!({"error": format!("token exchange failed: HTTP {}", resp.status)}),
+            6,
+        );
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tokens = match twr_v2::oauth::parse_token_response(
+        &resp.body,
+        now,
+        twr_v2::oauth::DEFAULT_SCOPES.join(" ").as_str(),
+    ) {
+        Ok(t) => t,
+        Err(e) => return (serde_json::json!({"error": e}), 6),
+    };
+    tokens.client_id = Some(pending.client_id.clone());
+    let Some(token_path) = twr_v2::oauth::default_token_path() else {
+        return (
+            serde_json::json!({"error": "no home dir for token storage"}),
+            5,
+        );
+    };
+    if let Err(e) = twr_v2::oauth::save_tokens(&token_path, &tokens) {
+        return (
+            serde_json::json!({"error": format!("cannot save tokens to ~/.twr/oauth2.json: {e}")}),
+            5,
+        );
+    }
+    twr_v2::oauth::clear_pending(&pending_path);
+    (
+        serde_json::json!({
+            "saved": true,
+            "token_path": "~/.twr/oauth2.json",
+            "expires_at_secs": tokens.expires_at_secs,
+            "has_refresh_token": tokens.refresh_token.is_some(),
+            "scope": tokens.scope,
+        }),
+        0,
+    )
+}
+
+/// Load api-v2 tokens, transparently refreshing via the `refresh_token`
+/// grant when expired (bead p3c). Centralized so EVERY v2 path — search,
+/// tweet read, text post, video post — shares the same expiry handling.
+/// Returns the usable access token, or an error envelope + exit code.
+async fn v2_bearer() -> Result<String, (serde_json::Value, i32)> {
+    let missing = || {
+        (
+            serde_json::json!({"error": "api-v2 backend needs OAuth2: run `twr login --api-v2` first"}),
+            77,
+        )
+    };
+    let Some(path) = twr_v2::oauth::default_token_path() else {
+        return Err(missing());
+    };
+    let Some(tokens) = twr_v2::oauth::load_tokens(&path) else {
+        return Err(missing());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if !tokens.is_expired(now) {
+        return Ok(tokens.access_token);
+    }
+    // Expired: try the refresh_token grant before giving up.
+    let (Some(refresh), Some(client_id)) = (tokens.refresh_token.clone(), tokens.client_id.clone())
+    else {
+        return Err((
+            serde_json::json!({"error": "api-v2 access token expired and no usable refresh token; re-run `twr login --api-v2`"}),
+            77,
+        ));
+    };
+    let transport = twr_client::WreqTransport::new_chrome()
+        .map_err(|e| (serde_json::json!({"error": format!("transport: {e}")}), 5))?;
+    let form = twr_v2::oauth::refresh_form(&refresh, &client_id);
+    let headers = [("Content-Type", "application/x-www-form-urlencoded")];
+    let resp = transport
+        .post_json(twr_v2::oauth::TOKEN_URL, &headers, form.as_bytes())
+        .await
+        .map_err(|_| {
+            (
+                serde_json::json!({"error": "token refresh request failed (network)"}),
+                5,
+            )
+        })?;
+    if !(200..300).contains(&resp.status) {
+        return Err((
+            serde_json::json!({"error": format!("token refresh failed: HTTP {}", resp.status)}),
+            77,
+        ));
+    }
+    let mut fresh = twr_v2::oauth::parse_token_response(&resp.body, now, tokens.scope.as_str())
+        .map_err(|e| (serde_json::json!({"error": e}), 6))?;
+    // X may omit refresh_token on refresh — keep the old one (bead p3c).
+    if fresh.refresh_token.is_none() {
+        fresh.refresh_token = tokens.refresh_token.clone();
+    }
+    fresh.client_id = Some(client_id);
+    if let Err(e) = twr_v2::oauth::save_tokens(&path, &fresh) {
+        eprintln!("twr: token refresh succeeded but could not persist: {e}");
+    }
+    Ok(fresh.access_token)
 }
 
 /// Live query-ID rescrape for `doctor --refresh` (bead hoi): fetch the
@@ -6843,17 +7379,55 @@ async fn rescrape_query_ids() -> (usize, Vec<String>) {
         return (0, vec!["homepage listed no client-web bundles".into()]);
     }
     // Fetch bundles (public static content — no cookies off x.com).
-    // Bounded by scrape::MAX_CHUNKS; sequential is fine for an explicit
-    // doctor invocation.
+    // Bounded by scrape::MAX_CHUNKS, fetched WORKERS-at-a-time: up to 800
+    // serial GETs made `doctor --refresh` take minutes (bead xhg).
+    let urls: Vec<String> = urls.into_iter().take(twr_graphql::MAX_CHUNKS).collect();
+    let transport = std::sync::Arc::new(transport);
+    let urls = std::sync::Arc::new(urls);
+    let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = twr_graphql::WORKERS.min(urls.len());
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..workers {
+        let transport = transport.clone();
+        let urls = urls.clone();
+        let next = next.clone();
+        set.spawn(async move {
+            // (index, url, outcome) — index keeps error order stable.
+            let mut out = Vec::new();
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= urls.len() {
+                    break;
+                }
+                let url = urls[i].clone();
+                let res = match transport.get(&url, &[]).await {
+                    Ok(r) if (200..300).contains(&r.status) => {
+                        Ok(String::from_utf8_lossy(&r.body).into_owned())
+                    }
+                    Ok(r) => Err(format!("{url}: HTTP {}", r.status)),
+                    Err(e) => Err(format!("{url}: {e}")),
+                };
+                out.push((i, url, res));
+            }
+            out
+        });
+    }
+    let mut fetched: Vec<(usize, String, Result<String, String>)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(mut items) => fetched.append(&mut items),
+            Err(e) => return (0, vec![format!("bundle fetch task: {e}")]),
+        }
+    }
+    fetched.sort_by_key(|(i, _, _)| *i);
     let mut bodies: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut errors = Vec::new();
-    for url in urls.into_iter().take(twr_graphql::MAX_CHUNKS) {
-        match transport.get(&url, &[]).await {
-            Ok(r) if (200..300).contains(&r.status) => {
-                bodies.insert(url, String::from_utf8_lossy(&r.body).into_owned());
+    for (_, url, res) in fetched {
+        match res {
+            Ok(body) => {
+                bodies.insert(url, body);
             }
-            Ok(r) => errors.push(format!("{url}: HTTP {}", r.status)),
-            Err(e) => errors.push(format!("{url}: {e}")),
+            Err(e) => errors.push(e),
         }
     }
     let found = twr_graphql::scrape::rescrape(&html, |u| bodies.get(u).cloned());
@@ -6865,9 +7439,13 @@ async fn rescrape_query_ids() -> (usize, Vec<String>) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if let Some(path) = twr_graphql::cache::default_cache_path() {
-        for (op, qid) in &found {
-            let _ = twr_graphql::cache::put(&path, op, qid, now);
-        }
+        // One load+serialize+atomic write for the whole rescrape — per-op
+        // `put` would cycle the file once per discovered op.
+        let entries: Vec<(String, String)> = found
+            .iter()
+            .map(|(op, qid)| (op.clone(), qid.clone()))
+            .collect();
+        let _ = twr_graphql::cache::put_many(&path, &entries, now);
     }
     (found.len(), errors)
 }

@@ -171,35 +171,39 @@ pub fn search_tweets(
     query: &str,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, CacheError> {
-    use rusqlite::OptionalExtension;
-    let ids = search(conn, query, limit)?;
+    // One JOIN instead of N+1: the FTS table shares tweets.rowid, so rank
+    // order (ORDER BY rank) is preserved while rows are fetched in a
+    // single query. Tweets missing from `tweets` drop out of the join,
+    // same as the old `.optional()` skip.
     let mut stmt = conn.prepare(
-        "SELECT id, author_screen_name, text, created_at, metrics_json FROM tweets WHERE id = ?1",
+        "SELECT t.id, t.author_screen_name, t.text, t.created_at, t.metrics_json
+         FROM tweets t
+         JOIN tweets_fts ON tweets_fts.rowid = t.rowid
+         WHERE tweets_fts MATCH ?1
+         ORDER BY tweets_fts.rank
+         LIMIT ?2",
     )?;
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let row = stmt
-            .query_row(params![id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .optional()?;
-        if let Some((id, author, text, created_at, metrics_json)) = row {
-            let metrics: serde_json::Value =
-                serde_json::from_str(&metrics_json).unwrap_or_else(|_| serde_json::json!({}));
-            out.push(serde_json::json!({
-                "id": id,
-                "text": text,
-                "author": {"screen_name": author},
-                "created_at": created_at,
-                "metrics": metrics,
-            }));
-        }
+    let mut rows = stmt.query_map(params![query, limit as i64], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut out = Vec::with_capacity(limit);
+    for row in rows.by_ref() {
+        let (id, author, text, created_at, metrics_json) = row?;
+        let metrics: serde_json::Value =
+            serde_json::from_str(&metrics_json).unwrap_or_else(|_| serde_json::json!({}));
+        out.push(serde_json::json!({
+            "id": id,
+            "text": text,
+            "author": {"screen_name": author},
+            "created_at": created_at,
+            "metrics": metrics,
+        }));
     }
     Ok(out)
 }

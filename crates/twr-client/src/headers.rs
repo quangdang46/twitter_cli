@@ -9,8 +9,6 @@
 //! `X-Client-Transaction-Id` minted fresh per request via `twr-tx`.
 //! POST adds JSON content type + `Priority: u=1, i` and a compose Referer.
 
-use std::collections::HashMap;
-
 /// X's own public web-client bearer (plan §1.2). Distinct in security class
 /// from user credentials — a replaceable constant, never a user secret.
 pub const BEARER_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
@@ -142,18 +140,34 @@ pub struct HeaderInput<'a> {
     pub transaction_id: Option<&'a str>,
 }
 
-/// Build the full header map. Mirrors `_build_headers` key-for-key.
-pub fn build_headers(input: &HeaderInput) -> HashMap<String, String> {
-    let mut h = HashMap::new();
-    h.insert("Authorization".into(), format!("Bearer {BEARER_TOKEN}"));
-    h.insert("Cookie".into(), input.creds.cookie_header());
-    h.insert("X-Csrf-Token".into(), input.creds.ct0.clone());
-    h.insert("X-Twitter-Active-User".into(), "yes".into());
-    h.insert("X-Twitter-Auth-Type".into(), "OAuth2Session".into());
-    h.insert(
+/// Insert-or-replace one header in a built list, preserving first-position
+/// order — the Vec equivalent of the old HashMap `insert` (bead c83-f:
+/// callers that override a header, e.g. `Referer`, keep last-wins
+/// semantics without duplicating the key on the wire).
+pub fn set_header(h: &mut Vec<(String, String)>, key: &str, value: String) {
+    if let Some(slot) = h.iter_mut().find(|(k, _)| k == key) {
+        slot.1 = value;
+    } else {
+        h.push((key.to_string(), value));
+    }
+}
+
+/// Build the full header list. Mirrors `_build_headers` key-for-key.
+/// Returns an ordered `Vec` — callers flatten to `Vec<(&str,&str)>` for
+/// the transport; use [`set_header`] when overriding a key afterwards.
+pub fn build_headers(input: &HeaderInput) -> Vec<(String, String)> {
+    // ~30 entries below: pre-size to skip growth. Plain pushes — every key
+    // is unique (Referer's value is chosen up front), so no dedup scan.
+    let mut h = Vec::with_capacity(32);
+    h.push(("Authorization".into(), format!("Bearer {BEARER_TOKEN}")));
+    h.push(("Cookie".into(), input.creds.cookie_header()));
+    h.push(("X-Csrf-Token".into(), input.creds.ct0.clone()));
+    h.push(("X-Twitter-Active-User".into(), "yes".into()));
+    h.push(("X-Twitter-Auth-Type".into(), "OAuth2Session".into()));
+    h.push((
         "X-Twitter-Client-Language".into(),
         client_language(input.locale),
-    );
+    ));
     let user_agent = input
         .user_agent
         .filter(|u| !u.trim().is_empty())
@@ -165,52 +179,57 @@ pub fn build_headers(input: &HeaderInput) -> HashMap<String, String> {
                 input.chrome_major,
             )
         });
-    h.insert("User-Agent".into(), user_agent);
-    h.insert("Origin".into(), "https://x.com".into());
-    h.insert("Referer".into(), "https://x.com/".into());
-    h.insert("Accept".into(), "*/*".into());
-    h.insert("Accept-Language".into(), accept_language(input.locale));
-    h.insert(
+    h.push(("User-Agent".into(), user_agent));
+    h.push(("Origin".into(), "https://x.com".into()));
+    // Referer differs GET vs POST — pick once instead of insert+replace.
+    let referer = if input.method == "POST" {
+        "https://x.com/compose/post"
+    } else {
+        "https://x.com/"
+    };
+    h.push(("Referer".into(), referer.into()));
+    h.push(("Accept".into(), "*/*".into()));
+    h.push(("Accept-Language".into(), accept_language(input.locale)));
+    h.push((
         "sec-ch-ua".into(),
         format!(
             "\"Chromium\";v=\"{}\", \"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"{}\"",
             input.chrome_major, input.chrome_major,
         ),
-    );
-    h.insert("sec-ch-ua-mobile".into(), "?0".into());
-    h.insert(
+    ));
+    h.push(("sec-ch-ua-mobile".into(), "?0".into()));
+    h.push((
         "sec-ch-ua-platform".into(),
         input.os.ch_ua_platform().into(),
-    );
-    h.insert("sec-ch-ua-arch".into(), host_arch().into());
-    h.insert("sec-ch-ua-bitness".into(), "\"64\"".into());
-    h.insert(
+    ));
+    h.push(("sec-ch-ua-arch".into(), host_arch().into()));
+    h.push(("sec-ch-ua-bitness".into(), "\"64\"".into()));
+    h.push((
         "sec-ch-ua-full-version".into(),
         format!("\"{}.0.0.0\"", input.chrome_major),
-    );
-    h.insert(
+    ));
+    h.push((
         "sec-ch-ua-full-version-list".into(),
         format!(
             "\"Google Chrome\";v=\"{0}.0.0.0\", \"Chromium\";v=\"{0}.0.0.0\", \"Not.A/Brand\";v=\"99.0.0.0\"",
             input.chrome_major,
         ),
-    );
-    h.insert("sec-ch-ua-model".into(), "\"\"".into());
-    h.insert(
+    ));
+    h.push(("sec-ch-ua-model".into(), "\"\"".into()));
+    h.push((
         "sec-ch-ua-platform-version".into(),
         input.os.ch_ua_platform_version().into(),
-    );
-    h.insert("Sec-Fetch-Dest".into(), "empty".into());
-    h.insert("Sec-Fetch-Mode".into(), "cors".into());
-    h.insert("Sec-Fetch-Site".into(), "same-origin".into());
+    ));
+    h.push(("Sec-Fetch-Dest".into(), "empty".into()));
+    h.push(("Sec-Fetch-Mode".into(), "cors".into()));
+    h.push(("Sec-Fetch-Site".into(), "same-origin".into()));
 
     if input.method == "POST" {
-        h.insert("Content-Type".into(), "application/json".into());
-        h.insert("Referer".into(), "https://x.com/compose/post".into());
-        h.insert("Priority".into(), "u=1, i".into());
+        h.push(("Content-Type".into(), "application/json".into()));
+        h.push(("Priority".into(), "u=1, i".into()));
     }
     if let Some(tid) = input.transaction_id {
-        h.insert("X-Client-Transaction-Id".into(), tid.to_string());
+        h.push(("X-Client-Transaction-Id".into(), tid.to_string()));
     }
     h
 }
@@ -277,13 +296,21 @@ pub fn notifications_url(kind: &str, count: usize, cursor: Option<&str>) -> Stri
     )
 }
 
-fn url_encode_query(s: &str) -> String {
+const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Percent-encode one query-string component (RFC 3986 unreserved set kept
+/// verbatim). Zero-alloc hot path: a 256-entry nibble table, no per-byte
+/// `format!`. Shared by `twr` (GraphQL GET URLs, DM 1.1 endpoints) so the
+/// encoding rule lives in exactly one place (bead yql).
+pub fn url_encode_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+    for &b in s.as_bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.push('%');
+            out.push(PERCENT_HEX[(b >> 4) as usize] as char);
+            out.push(PERCENT_HEX[(b & 0xF) as usize] as char);
         }
     }
     out
@@ -313,6 +340,18 @@ mod tests {
         }
     }
 
+    /// Header lookup for the Vec return type (was HashMap indexing).
+    fn hv<'a>(h: &'a [(String, String)], k: &str) -> &'a str {
+        h.iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("")
+    }
+
+    fn has(h: &[(String, String)], k: &str) -> bool {
+        h.iter().any(|(kk, _)| kk == k)
+    }
+
     #[test]
     fn notification_params_carry_xfetch_bundle_and_count() {
         let p = notification_params(20, None);
@@ -338,11 +377,11 @@ mod tests {
     fn bearer_cookie_csrf_and_auth_type_present() {
         let c = creds();
         let h = build_headers(&input(&c, "GET", None));
-        assert!(h["Authorization"].starts_with("Bearer AAAA"));
-        assert_eq!(h["Cookie"], "auth_token=tok; ct0=ct");
-        assert_eq!(h["X-Csrf-Token"], "ct");
-        assert_eq!(h["X-Twitter-Active-User"], "yes");
-        assert_eq!(h["X-Twitter-Auth-Type"], "OAuth2Session");
+        assert!(hv(&h, "Authorization").starts_with("Bearer AAAA"));
+        assert_eq!(hv(&h, "Cookie"), "auth_token=tok; ct0=ct");
+        assert_eq!(hv(&h, "X-Csrf-Token"), "ct");
+        assert_eq!(hv(&h, "X-Twitter-Active-User"), "yes");
+        assert_eq!(hv(&h, "X-Twitter-Auth-Type"), "OAuth2Session");
     }
 
     #[test]
@@ -352,27 +391,30 @@ mod tests {
             ..creds()
         };
         let h = build_headers(&input(&c, "GET", None));
-        assert_eq!(h["Cookie"], "auth_token=a; ct0=b; guest_id=c");
+        assert_eq!(hv(&h, "Cookie"), "auth_token=a; ct0=b; guest_id=c");
     }
 
     #[test]
     fn post_adds_json_priority_and_compose_referer() {
         let c = creds();
         let get = build_headers(&input(&c, "GET", None));
-        assert!(!get.contains_key("Content-Type"));
-        assert!(!get.contains_key("Priority"));
+        assert!(!has(&get, "Content-Type"));
+        assert!(!has(&get, "Priority"));
         let post = build_headers(&input(&c, "POST", None));
-        assert_eq!(post["Content-Type"], "application/json");
-        assert_eq!(post["Priority"], "u=1, i");
-        assert_eq!(post["Referer"], "https://x.com/compose/post");
+        assert_eq!(hv(&post, "Content-Type"), "application/json");
+        assert_eq!(hv(&post, "Priority"), "u=1, i");
+        assert_eq!(hv(&post, "Referer"), "https://x.com/compose/post");
     }
 
     #[test]
     fn transaction_id_attached_only_when_given() {
         let c = creds();
-        assert!(!build_headers(&input(&c, "GET", None)).contains_key("X-Client-Transaction-Id"));
+        assert!(!has(
+            &build_headers(&input(&c, "GET", None)),
+            "X-Client-Transaction-Id"
+        ));
         let h = build_headers(&input(&c, "GET", Some("tid-1")));
-        assert_eq!(h["X-Client-Transaction-Id"], "tid-1");
+        assert_eq!(hv(&h, "X-Client-Transaction-Id"), "tid-1");
     }
 
     #[test]
@@ -395,13 +437,15 @@ mod tests {
             os: Os::Macos,
             ..input(&c, "GET", None)
         };
-        assert!(build_headers(&mac)["User-Agent"].contains("Macintosh"));
-        assert_eq!(build_headers(&mac)["sec-ch-ua-platform"], "\"macOS\"");
+        let mac_h = build_headers(&mac);
+        assert!(hv(&mac_h, "User-Agent").contains("Macintosh"));
+        assert_eq!(hv(&mac_h, "sec-ch-ua-platform"), "\"macOS\"");
         // A configured UA wins verbatim over the generated Chrome string.
         let custom = HeaderInput {
             user_agent: Some("CustomUA/1.0"),
             ..input(&c, "GET", None)
         };
-        assert_eq!(build_headers(&custom)["User-Agent"], "CustomUA/1.0");
+        let custom_h = build_headers(&custom);
+        assert_eq!(hv(&custom_h, "User-Agent"), "CustomUA/1.0");
     }
 }

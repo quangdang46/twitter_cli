@@ -5,7 +5,7 @@
 //! build variables → pick GET/POST → headers (+ gated tx-id) → parse bytes →
 //! `(data, pagination)`. Error mapping goes through `twr-core` kinds.
 
-use twr_client::{fetch_timeline, Page, PageError, Throttle};
+use twr_client::{fetch_timeline_async, Page, PageError, Throttle};
 use twr_graphql::{compact_features, ExtraRotation};
 use twr_tx::RequestProof;
 
@@ -219,28 +219,16 @@ pub fn graphql_get_url(
     let features = serde_json::Value::Object(compact_features(operation));
     let mut url = format!(
         "https://x.com/i/api/graphql/{query_id}/{operation}?variables={}&features={}",
-        url_encode(&variables.to_string()),
-        url_encode(&features.to_string()),
+        twr_client::url_encode_query(&variables.to_string()),
+        twr_client::url_encode_query(&features.to_string()),
     );
     if let Some(toggles) = field_toggles {
         url.push_str(&format!(
             "&fieldToggles={}",
-            url_encode(&toggles.to_string())
+            twr_client::url_encode_query(&toggles.to_string())
         ));
     }
     url
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// Fetch one timeline page over the transport and parse it with `twr-model`.
@@ -284,6 +272,10 @@ pub async fn fetch_parsed_page_generic<T>(
 
     ctx.ensure_tx(operation).await;
 
+    // Features depend only on the op — build once per page fetch, not per
+    // 404-retry attempt (bead c83).
+    let features_json = serde_json::Value::Object(compact_features(operation));
+
     // 404 recovery (bead hoi): invalidate the cached ID, rotate to the next
     // EXTRA candidate, retry ONCE. A second 404 is contract drift.
     let mut retry_qid: Option<String> = None;
@@ -315,10 +307,7 @@ pub async fn fetch_parsed_page_generic<T>(
             let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
             let mut body = serde_json::Map::new();
             body.insert("variables".into(), variables.clone());
-            body.insert(
-                "features".into(),
-                serde_json::Value::Object(compact_features(operation)),
-            );
+            body.insert("features".into(), features_json.clone());
             let raw = serde_json::to_vec(&body).unwrap_or_default();
             ctx.transport
                 .post_json(&url, &header_refs, &raw)
@@ -355,6 +344,12 @@ pub async fn fetch_parsed_page_generic<T>(
     if resp.status == 404 || (500..600).contains(&resp.status) {
         return Err(PageError::Fatal);
     }
+    // Any OTHER non-2xx (401/403/226/400/…) is an error, never an empty
+    // success page — the caller maps the status through
+    // `ErrorKind::from_http_status` (bead twitter_cli-k8h).
+    if !(200..300).contains(&resp.status) {
+        return Err(PageError::Http(resp.status));
+    }
     let body: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|_| PageError::Fatal)?;
     Ok(parse(&body, instructions))
@@ -379,6 +374,10 @@ pub async fn fetch_parsed_page_with_toggles(
     }
 
     ctx.ensure_tx(operation).await;
+
+    // Features depend only on the op — build once per page fetch, not per
+    // 404-retry attempt (bead c83).
+    let features_json = serde_json::Value::Object(compact_features(operation));
 
     // 404 recovery (bead hoi): invalidate → rotate → retry once.
     let mut retry_qid: Option<String> = None;
@@ -410,10 +409,7 @@ pub async fn fetch_parsed_page_with_toggles(
             let url = format!("https://x.com/i/api/graphql/{qid}/{operation}");
             let mut body = serde_json::Map::new();
             body.insert("variables".into(), variables.clone());
-            body.insert(
-                "features".into(),
-                serde_json::Value::Object(compact_features(operation)),
-            );
+            body.insert("features".into(), features_json.clone());
             let raw = serde_json::to_vec(&body).unwrap_or_default();
             ctx.transport
                 .post_json(&url, &header_refs, &raw)
@@ -449,6 +445,12 @@ pub async fn fetch_parsed_page_with_toggles(
     if resp.status == 404 || (500..600).contains(&resp.status) {
         return Err(PageError::Fatal);
     }
+    // Any OTHER non-2xx (401/403/226/400/…) is an error, never an empty
+    // success page — the caller maps the status through
+    // `ErrorKind::from_http_status` (bead twitter_cli-k8h).
+    if !(200..300).contains(&resp.status) {
+        return Err(PageError::Http(resp.status));
+    }
     let body: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|_| PageError::Fatal)?;
     // Payload-shape 404 disambiguation lives in twr-core; an *Unavailable
@@ -474,37 +476,27 @@ pub async fn fetch_tweets_paged(
     let mut order: Vec<String> = Vec::new();
 
     // Wrap: each loop iteration fetches one page and registers its tweets.
+    // The async pagination loop awaits each page directly (bead zf1) —
+    // the old sync loop needed block_in_place + Handle::block_on per page,
+    // which panics on a current_thread runtime and parks a worker thread.
     let ctx_ref = &mut *ctx;
-    let result = fetch_timeline(
+    let result = fetch_timeline_async(
         count,
         ctx_ref.max_count,
         start_cursor,
         true,
-        |page_count, cursor| {
+        async |page_count, cursor| {
             let mut vars = base_variables.clone();
             vars["count"] = serde_json::json!(page_count);
             if let Some(c) = cursor {
                 vars["cursor"] = serde_json::json!(c);
             }
-            // fetch_parsed_page is async; the loop is sync — block on it.
-            // (Read commands run inside a tokio runtime; block_in_place
-            // avoids nested-runtime panics.)
-            let (tweets, next) = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(fetch_parsed_page(
-                    ctx_ref,
-                    operation,
-                    vars,
-                    instructions,
-                ))
-            })?;
+            let (tweets, next) = fetch_parsed_page(ctx_ref, operation, vars, instructions).await?;
             let mut page = Page {
                 ids: Vec::with_capacity(tweets.len()),
                 next_cursor: next,
             };
             for t in tweets {
-                // Jittered inter-request delay is applied by the caller
-                // between loop iterations via request_delay_secs; the
-                // per-page sleep here keeps the port faithful but tiny.
                 page.ids.push(t.id.clone());
                 by_id.entry(t.id.clone()).or_insert(t);
             }
@@ -516,7 +508,8 @@ pub async fn fetch_tweets_paged(
             }
             Ok(page)
         },
-    )?;
+    )
+    .await?;
 
     let mut tweets = Vec::new();
     for id in result.ids.iter() {

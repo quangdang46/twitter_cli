@@ -142,16 +142,25 @@ pub fn compute_animation_key(
 
     let d = &frame_paths[1];
     let sliced: String = d.chars().skip(9).collect();
-    let rows: Vec<Vec<i64>> = sliced
+    // Digit runs come from live JS — an oversized token must surface as a
+    // derivation error, never an `unwrap` panic (bead twitter_cli-4e5).
+    let rows: Result<Vec<Vec<i64>>, TxError> = sliced
         .split('C')
         .map(|segment| {
             let cleaned = NON_DIGIT_RE.replace_all(segment, " ");
             cleaned
                 .split_whitespace()
-                .map(|n| n.parse::<i64>().unwrap())
+                .map(|n| {
+                    n.parse::<i64>().map_err(|_| {
+                        TxError::Derivation(format!(
+                            "loading-x-anim path number does not fit i64: {n}"
+                        ))
+                    })
+                })
                 .collect()
         })
         .collect();
+    let rows = rows?;
 
     let row_index = (key_bytes[row_index_key] as usize) % 16;
     // `animate` reads the first 11 numbers of the row (colors, rotation, curve).
@@ -371,6 +380,28 @@ mod tests {
         // Byte 15 has nibble 15, and 15^17 exceeds i64::MAX.
         let frames = extract_frame_paths(&page());
         compute_animation_key(&key_bytes(), &frames, ROW_INDEX_KEY, &[15; 17]).unwrap();
+    }
+
+    /// Bead twitter_cli-4e5: a digit token too large for i64 (live JS can
+    /// change shape) must be a Derivation error, not an unwrap panic.
+    #[test]
+    fn oversized_path_number_is_a_derivation_error_not_a_panic() {
+        let mut frames = BTreeMap::new();
+        let mut rows: Vec<String> = (0..16)
+            .map(|_| "1 2 3 4 5 6 7 8 9 10 11".to_string())
+            .collect();
+        // Row 8 is the one `animate` reads (key_bytes[24] % 16 == 8).
+        rows[8] = "99999999999999999999999 2 3 4 5 6 7 8 9 10 11".to_string();
+        let d = format!("M0 0 C 0 {}", rows.join("C"));
+        for i in 0..4u32 {
+            frames.insert(i, vec!["M1 1".to_string(), d.clone()]);
+        }
+        let err =
+            compute_animation_key(&key_bytes(), &frames, ROW_INDEX_KEY, &BYTE_INDICES).unwrap_err();
+        assert!(
+            matches!(&err, TxError::Derivation(m) if m.contains("does not fit i64")),
+            "{err}"
+        );
     }
 
     #[test]

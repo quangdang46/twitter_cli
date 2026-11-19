@@ -175,7 +175,9 @@ pub enum ProcessingState {
 /// Absent `processing_info` means X processed the media synchronously — which
 /// is the normal case for images, and must NOT be treated as success for
 /// video (issue #1: a naive immediate read of the finalize response is the
-/// empty-`media_id_string` race). Callers poll when this returns `None`.
+/// empty-`media_id_string` race). `None` also covers invalid JSON and a
+/// missing `state` key — callers poll when this returns `None`; only an
+/// explicit `Succeeded` may end the wait (bead or4).
 pub fn parse_processing(body: &[u8]) -> Option<ProcessingState> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let info = v.get("processing_info")?;
@@ -266,12 +268,15 @@ pub async fn await_processing(
             return Err(UploadError::BadFinalize(resp.status));
         }
         match parse_processing(&resp.body) {
-            // No processing_info on a STATUS response means the media is done.
-            Some(ProcessingState::Succeeded) | None => return Ok(()),
+            // Only an EXPLICIT `succeeded` ends the wait (bead or4): a
+            // STATUS body with invalid JSON or no `processing_info.state`
+            // parses to `None` and must keep polling — never attach an
+            // unprocessed media id.
+            Some(ProcessingState::Succeeded) => return Ok(()),
             Some(ProcessingState::Failed(reason)) => {
                 return Err(UploadError::ProcessingFailed(reason))
             }
-            Some(ProcessingState::Pending) | Some(ProcessingState::InProgress) => {}
+            Some(ProcessingState::Pending) | Some(ProcessingState::InProgress) | None => {}
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(UploadError::ProcessingTimeout {
@@ -643,6 +648,49 @@ mod tests {
         // The message must point at the override, not just say "failed".
         let msg = UploadError::ProcessingTimeout { secs }.to_string();
         assert!(msg.contains("TWR_UPLOAD_POLL_TIMEOUT_SECS"), "{msg}");
+    }
+
+    /// Bead or4: a STATUS body with no explicit `succeeded` state — invalid
+    /// JSON or a missing `processing_info` — must keep polling and end in
+    /// the timeout error, never a false "done".
+    #[tokio::test(start_paused = true)]
+    async fn status_without_explicit_success_keeps_polling() {
+        struct NoState;
+        #[async_trait::async_trait]
+        impl HttpTransport for NoState {
+            async fn get(
+                &self,
+                _u: &str,
+                _h: &[(&str, &str)],
+            ) -> Result<crate::TransportResponse, TransportError> {
+                // Valid JSON but no processing_info at all.
+                Ok(crate::TransportResponse {
+                    status: 200,
+                    body: br#"{"media_id_string":"m1"}"#.to_vec(),
+                })
+            }
+            async fn post_json(
+                &self,
+                _u: &str,
+                _h: &[(&str, &str)],
+                body: &[u8],
+            ) -> Result<crate::TransportResponse, TransportError> {
+                let b = String::from_utf8_lossy(body);
+                let body = if b.contains("command=INIT") {
+                    br#"{"media_id_string":"m1"}"#.to_vec()
+                } else {
+                    br#"{"processing_info":{"state":"pending"}}"#.to_vec()
+                };
+                Ok(crate::TransportResponse { status: 200, body })
+            }
+        }
+        let err = upload_media(&NoState, &[], vec![0u8; 8], "video/mp4")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UploadError::ProcessingTimeout { .. }),
+            "missing processing_info must not report success: {err}"
+        );
     }
 
     /// Image uploads must NOT start polling — they finalize synchronously,

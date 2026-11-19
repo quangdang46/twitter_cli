@@ -45,6 +45,12 @@ impl FrameParser {
     fn handle_start(&mut self, rest: &str) {
         match self.active {
             None => {
+                // Cheap prefilter over ~1MB of homepage HTML: a frame match
+                // requires id="loading-x-anim-N", so the marker substring
+                // must be present verbatim — skip the ATTR_RE scan otherwise.
+                if !rest.contains("loading-x-anim-") {
+                    return;
+                }
                 if let Some(id) = Self::attr(rest, "id") {
                     if let Some(caps) = FRAME_ID_RE.captures(id) {
                         let n: u32 = caps[1].parse().unwrap();

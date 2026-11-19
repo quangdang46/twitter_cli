@@ -283,7 +283,7 @@ pub fn apply_fields(data: &serde_json::Value, fields: &[String]) -> serde_json::
                 .map(|items| {
                     items
                         .iter()
-                        .map(|item| apply_fields(item, fields).clone())
+                        .map(|item| apply_fields(item, fields))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -304,7 +304,7 @@ pub fn apply_fields(data: &serde_json::Value, fields: &[String]) -> serde_json::
             if fields.iter().all(|f| !f.contains('.')) {
                 let projected: Vec<serde_json::Value> = items
                     .iter()
-                    .map(|item| apply_fields(item, fields).clone())
+                    .map(|item| apply_fields(item, fields))
                     .collect();
                 let mut out = serde_json::Map::new();
                 out.insert(key.clone(), serde_json::Value::Array(projected));
@@ -316,7 +316,7 @@ pub fn apply_fields(data: &serde_json::Value, fields: &[String]) -> serde_json::
     for field in fields {
         let path: Vec<&str> = field.split('.').collect();
         if let Some(v) = get_path(data, &path) {
-            set_path(&mut out, &path, v.clone());
+            set_path(&mut out, &path, v);
         }
     }
     serde_json::Value::Object(out)

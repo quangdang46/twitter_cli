@@ -17,11 +17,13 @@ mod wreq_transport;
 pub use wreq_transport::{emulation_from_env, WreqTransport};
 
 pub use headers::{
-    build_headers, notification_params, notifications_url, Credentials, HeaderInput, Os,
-    BEARER_TOKEN,
+    build_headers, notification_params, notifications_url, set_header, url_encode_query,
+    Credentials, HeaderInput, Os, BEARER_TOKEN,
 };
 pub use throttle::{jittered_delay_secs, page_count, use_post, BucketConfig, Throttle, POST_OPS};
-pub use timeline::{backoff_delays_secs, fetch_timeline, Page, PageError, TimelineResult};
+pub use timeline::{
+    backoff_delays_secs, fetch_timeline, fetch_timeline_async, Page, PageError, TimelineResult,
+};
 
 use async_trait::async_trait;
 

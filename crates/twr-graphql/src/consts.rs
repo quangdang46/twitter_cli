@@ -379,7 +379,28 @@ pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
 /// Merge defaults + per-op extras, dropping false values (414 guard).
 /// Ops with a [`feature_overrides`] entry use ONLY their deck-declared
 /// schema (strict-validation 214 guard) — defaults/extras are skipped.
+///
+/// Memoized per op (bead c83): paged fetches rebuild the same ~30-entry
+/// map once per page (and again per 404 retry) — the merge is pure, so the
+/// first call per op computes it and later calls clone the cached map.
 pub fn compact_features(operation: &str) -> serde_json::Map<String, serde_json::Value> {
+    static CACHE: std::sync::LazyLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        >,
+    > = std::sync::LazyLock::new(Default::default);
+    if let Some(hit) = CACHE.lock().unwrap().get(operation) {
+        return hit.clone();
+    }
+    let built = build_compact_features(operation);
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(operation.to_string(), built.clone());
+    built
+}
+
+fn build_compact_features(operation: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
     if let Some(schema) = feature_overrides(operation) {
         for (k, v) in schema {

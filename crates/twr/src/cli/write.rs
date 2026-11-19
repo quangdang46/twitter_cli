@@ -162,7 +162,12 @@ pub const NOTE_TWEET_THRESHOLD: usize = 280;
 pub fn weighted_length(text: &str) -> usize {
     let mut len = 0;
     let mut rest = text;
-    while let Some(pos) = rest.find("http://").or_else(|| rest.find("https://")) {
+    while let Some(pos) = match (rest.find("http://"), rest.find("https://")) {
+        // Take the EARLIEST of the two — `or_else` would skip an https://
+        // that precedes the first http:// and count it as raw text.
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    } {
         len += rest[..pos].chars().count();
         let after = &rest[pos..];
         let url_len = after
@@ -528,6 +533,16 @@ mod tests {
             weighted_length(with_url),
             4 + 23 + 4,
             "4 chars + url(23) + 4 chars"
+        );
+        // An https:// BEFORE the first http:// must still normalize to 23 —
+        // `find("http://").or_else(find("https://"))` used to skip it and
+        // count the whole URL as raw text.
+        let https_first = "see https://x.com/a end http://x.com/b";
+        // "see " (4) + url(23) + " end " (5) + url(23).
+        assert_eq!(
+            weighted_length(https_first),
+            4 + 23 + 5 + 23,
+            "{https_first}"
         );
         assert!(!needs_note_tweet("short"));
         assert!(needs_note_tweet(&"x".repeat(281)));

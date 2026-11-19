@@ -87,14 +87,27 @@ pub fn get_fresh(cache: &QueryIdCache, operation: &str, now_secs: u64) -> Option
 /// Insert/update one op and persist. Best-effort: errors are returned so the
 /// caller may ignore them.
 pub fn put(path: &Path, operation: &str, query_id: &str, now_secs: u64) -> std::io::Result<()> {
+    put_many(
+        path,
+        &[(operation.to_string(), query_id.to_string())],
+        now_secs,
+    )
+}
+
+/// Insert/update many ops and persist ONCE. `doctor --refresh` discovers
+/// dozens of ops at a time; per-op [`put`] would re-read, re-parse, and
+/// atomically re-write the whole file for each one (O(n) file cycles).
+pub fn put_many(path: &Path, entries: &[(String, String)], now_secs: u64) -> std::io::Result<()> {
     let mut cache = load(path).unwrap_or_default();
-    cache.insert(
-        operation.to_string(),
-        CacheEntry {
-            query_id: query_id.to_string(),
-            updated_at_secs: now_secs,
-        },
-    );
+    for (operation, query_id) in entries {
+        cache.insert(
+            operation.clone(),
+            CacheEntry {
+                query_id: query_id.clone(),
+                updated_at_secs: now_secs,
+            },
+        );
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -119,7 +132,11 @@ mod tests {
     use super::*;
 
     fn tmp() -> PathBuf {
-        std::env::temp_dir().join(format!("twr-qid-cache-{}", std::process::id()))
+        // Unique per call: tests run in parallel in one process and a
+        // pid-only dir lets them clobber each other's cache file.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("twr-qid-cache-{}-{n}", std::process::id()))
     }
 
     #[test]
@@ -150,6 +167,36 @@ mod tests {
         );
         invalidate(&path, "SearchTimeline");
         assert!(!load(&path).unwrap().contains_key("SearchTimeline"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn put_many_writes_all_ops_in_one_file() {
+        let dir = tmp();
+        let path = dir.join("query-ids.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        put_many(
+            &path,
+            &[
+                ("OpA".to_string(), "qid-a".to_string()),
+                ("OpB".to_string(), "qid-b".to_string()),
+            ],
+            1_000_000,
+        )
+        .unwrap();
+        let cache = load(&path).unwrap();
+        assert_eq!(
+            get_fresh(&cache, "OpA", 1_000_100).as_deref(),
+            Some("qid-a")
+        );
+        assert_eq!(
+            get_fresh(&cache, "OpB", 1_000_100).as_deref(),
+            Some("qid-b")
+        );
+        // A later single put keeps the batch entries.
+        put(&path, "OpC", "qid-c", 1_000_200).unwrap();
+        let cache = load(&path).unwrap();
+        assert!(cache.contains_key("OpA") && cache.contains_key("OpC"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

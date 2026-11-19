@@ -25,6 +25,11 @@ pub struct Page {
 pub enum PageError {
     /// 429 / inner 88/348/349 — ship partial data, mark truncated.
     RateLimited,
+    /// An HTTP status the caller maps through `twr-core`'s
+    /// `ErrorKind::from_http_status` (bead twitter_cli-k8h): any non-2xx
+    /// that is not 429/404/5xx (e.g. 401/403/226/400) must fail the fetch,
+    /// never parse as an empty success page.
+    Http(u16),
     /// Anything else — abort the whole fetch.
     Fatal,
 }
@@ -73,7 +78,81 @@ pub fn fetch_timeline(
                 truncated = true;
                 break;
             }
-            Err(PageError::Fatal) => return Err(PageError::Fatal),
+            Err(e) => return Err(e),
+        };
+
+        for id in page.ids {
+            if !id.is_empty() && seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+
+        match page.next_cursor {
+            None => {
+                continuation_cursor = None;
+                break;
+            }
+            Some(next) if Some(&next) == cursor.as_ref() => {
+                continuation_cursor = None;
+                break;
+            }
+            Some(next) => {
+                continuation_cursor = Some(next.clone());
+                cursor = Some(next);
+            }
+        }
+    }
+
+    ids.truncate(count);
+    Ok(TimelineResult {
+        ids,
+        continuation_cursor: if return_cursor {
+            continuation_cursor
+        } else {
+            None
+        },
+        truncated,
+    })
+}
+
+/// Async twin of [`fetch_timeline`] (bead zf1): identical loop semantics,
+/// but the page fetcher is awaited directly instead of being wrapped in
+/// `block_in_place` + `Handle::block_on` per page (which panics on a
+/// `current_thread` runtime and parks a worker thread per page).
+/// `fetch_page` is an async closure/fn called once per page, sequentially —
+/// pagination is inherently cursor-chained, so pages cannot overlap.
+/// Keep the loop body in sync with [`fetch_timeline`].
+pub async fn fetch_timeline_async(
+    count: usize,
+    max_count: usize,
+    start_cursor: Option<String>,
+    return_cursor: bool,
+    mut fetch_page: impl AsyncFnMut(usize, Option<&str>) -> Result<Page, PageError>,
+) -> Result<TimelineResult, PageError> {
+    if count == 0 {
+        return Ok(TimelineResult::default());
+    }
+    let count = count.min(max_count);
+    let max_attempts = count.div_ceil(20) + 2;
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cursor = start_cursor;
+    let mut continuation_cursor = None;
+    let mut truncated = false;
+    let mut attempts = 0;
+
+    while ids.len() < count && attempts < max_attempts {
+        attempts += 1;
+        let remaining = count - ids.len();
+        let page_count = crate::throttle::page_count(remaining);
+        let page = match fetch_page(page_count, cursor.as_deref()).await {
+            Ok(page) => page,
+            Err(PageError::RateLimited) => {
+                truncated = true;
+                break;
+            }
+            Err(e) => return Err(e),
         };
 
         for id in page.ids {

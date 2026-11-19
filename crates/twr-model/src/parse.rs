@@ -245,37 +245,29 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
         return None;
     }
     let legacy_v = tweet_data.get("legacy").unwrap();
+    let null = Value::Null;
 
-    let user = dget!(tweet_data, "core", "user_results", "result")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let user_legacy = user.get("legacy").cloned().unwrap_or(Value::Null);
-    let user_core = user.get("core").cloned().unwrap_or(Value::Null);
+    // Borrowed, not cloned: everything below reads through these refs and
+    // only owned Strings/small structs leave this function.
+    let user = dget!(tweet_data, "core", "user_results", "result").unwrap_or(&null);
+    let user_legacy = user.get("legacy").unwrap_or(&null);
+    let user_core = user.get("core").unwrap_or(&null);
 
     let is_retweet = dget!(legacy_v, "retweeted_status_result", "result")
         .map(|v| !v.is_null())
         .unwrap_or(false);
 
     let mut retweet_subscriber_only = false;
-    let fallback = || {
-        (
-            tweet_data.clone(),
-            legacy_v.clone(),
-            user.clone(),
-            user_legacy.clone(),
-        )
-    };
+    // `fallback` is just the outer tweet's own (borrowed) data — no clone.
+    let fallback = || (tweet_data, legacy_v, user, user_legacy);
     let (actual_data, actual_legacy, actual_user, actual_user_legacy): (
-        Value,
-        Value,
-        Value,
-        Value,
+        &Value,
+        &Value,
+        &Value,
+        &Value,
     ) = if is_retweet {
-        let rt_result = dget!(legacy_v, "retweeted_status_result", "result")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let (rt_unwrapped, rt_sub) = unwrap_visibility(&rt_result);
-        let rt_unwrapped = rt_unwrapped.clone();
+        let rt_result = dget!(legacy_v, "retweeted_status_result", "result").unwrap_or(&null);
+        let (rt_unwrapped, rt_sub) = unwrap_visibility(rt_result);
         retweet_subscriber_only = rt_sub;
         let rt_legacy_is_object = rt_unwrapped
             .get("legacy")
@@ -286,12 +278,10 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
             .map(Value::is_object)
             .unwrap_or(false);
         if rt_legacy_is_object && rt_core_is_object {
-            let rt_legacy = rt_unwrapped.get("legacy").cloned().unwrap();
-            let rt_user = dget!(&rt_unwrapped, "core", "user_results", "result")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let rt_user_legacy = rt_user.get("legacy").cloned().unwrap_or(Value::Null);
-            (rt_unwrapped.clone(), rt_legacy, rt_user, rt_user_legacy)
+            let rt_legacy = rt_unwrapped.get("legacy").unwrap();
+            let rt_user = dget!(rt_unwrapped, "core", "user_results", "result").unwrap_or(&null);
+            let rt_user_legacy = rt_user.get("legacy").unwrap_or(&null);
+            (rt_unwrapped, rt_legacy, rt_user, rt_user_legacy)
         } else {
             fallback()
         }
@@ -299,8 +289,8 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
         fallback()
     };
 
-    let media = extract_media(&actual_legacy);
-    let urls: Vec<String> = dget!(&actual_legacy, "entities", "urls")
+    let media = extract_media(actual_legacy);
+    let urls: Vec<String> = dget!(actual_legacy, "entities", "urls")
         .and_then(Value::as_array)
         .map(|items| {
             items
@@ -314,12 +304,13 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
                 .collect()
         })
         .unwrap_or_default();
-    let quoted = dget!(&actual_data, "quoted_status_result", "result").cloned();
+    // Borrow the quoted sub-object; only the recursive Tweet is owned.
+    let quoted = dget!(actual_data, "quoted_status_result", "result");
     let quoted_tweet = quoted
-        .filter(Value::is_object)
-        .and_then(|q| parse_tweet_result(&q, depth + 1))
+        .filter(|v| v.is_object())
+        .and_then(|q| parse_tweet_result(q, depth + 1))
         .map(Box::new);
-    let author = extract_author(&actual_user, &actual_user_legacy);
+    let author = extract_author(actual_user, actual_user_legacy);
 
     let retweeted_by = if is_retweet {
         Some(
@@ -335,7 +326,7 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
     };
 
     let note_text = dget!(
-        &actual_data,
+        actual_data,
         "note_tweet",
         "note_tweet_results",
         "result",
@@ -351,7 +342,7 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
         })
         .to_string();
 
-    let article = parse_article(&actual_data);
+    let article = parse_article(actual_data);
 
     let is_subscriber_only = if is_retweet {
         is_subscriber_only || retweet_subscriber_only
@@ -372,7 +363,7 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
             retweets: parse_int(actual_legacy.get("retweet_count"), 0),
             replies: parse_int(actual_legacy.get("reply_count"), 0),
             quotes: parse_int(actual_legacy.get("quote_count"), 0),
-            views: parse_int(dget!(&actual_data, "views", "count"), 0),
+            views: parse_int(dget!(actual_data, "views", "count"), 0),
             bookmarks: parse_int(actual_legacy.get("bookmark_count"), 0),
         },
         created_at: actual_legacy
@@ -700,17 +691,18 @@ pub fn parse_notifications_response(
     data: &Value,
 ) -> (Vec<NotificationEvent>, Vec<Tweet>, Option<String>) {
     let empty_obj = Value::Object(Default::default());
+    let empty_map = serde_json::Map::new();
+    let null = Value::Null;
     let global = data.get("globalObjects").unwrap_or(&empty_obj);
+    // Borrowed maps: no wholesale clone of globalObjects per response.
     let global_tweets = global
         .get("tweets")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&empty_map);
     let global_users = global
         .get("users")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&empty_map);
 
     // Minimal REST-tweet → Tweet lift: id/text/author/metrics/created_at
     // from the legacy extended-mode fields (full_text, user_id_str,
@@ -718,12 +710,12 @@ pub fn parse_notifications_response(
     // Media/quote-nesting stay empty — the notification surface is a
     // pointer to the tweet, `twr tweet <id>` has the full body.
     let mut tweets = Vec::new();
-    for (tweet_id, t) in &global_tweets {
+    for (tweet_id, t) in global_tweets {
         let user_id = t
             .get("user_id_str")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let u = global_users.get(user_id).cloned().unwrap_or(Value::Null);
+        let u = global_users.get(user_id).unwrap_or(&null);
         tweets.push(Tweet {
             id: tweet_id.clone(),
             text: t
@@ -798,13 +790,14 @@ pub fn parse_notifications_response(
 
     let mut events = Vec::new();
     let mut next_cursor = None;
+    let empty_instructions: Vec<Value> = Vec::new();
+    let empty_entries: Vec<Value> = Vec::new();
     let instructions = data
         .get("timeline")
         .and_then(|t| t.get("instructions"))
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for instruction in &instructions {
+        .unwrap_or(&empty_instructions);
+    for instruction in instructions {
         // replaceEntry fallback for the Bottom cursor.
         if let Some(cursor) = instruction
             .get("replaceEntry")
@@ -822,9 +815,8 @@ pub fn parse_notifications_response(
             .get("addEntries")
             .and_then(|a| a.get("entries"))
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for entry in &entries {
+            .unwrap_or(&empty_entries);
+        for entry in entries {
             let content = entry.get("content").unwrap_or(&empty_obj);
             // ANY cursor row (Bottom AND Top — live `mentions` returns a bare
             // Top-cursor entry on accounts with no mentions, bead o1l.1.8) is
@@ -878,9 +870,9 @@ pub fn parse_notifications_response(
             let actors: Vec<NotificationActor> = actor_ids
                 .into_iter()
                 .map(|id| {
-                    let u = global_users.get(&id).cloned().unwrap_or(Value::Null);
+                    let u = global_users.get(&id).unwrap_or(&null);
                     NotificationActor {
-                        id: id.clone(),
+                        id,
                         screen_name: u
                             .get("screen_name")
                             .and_then(Value::as_str)

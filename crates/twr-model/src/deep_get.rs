@@ -47,14 +47,34 @@ macro_rules! dget {
 /// commas, surrounding whitespace, and numeric-string floats (`"12.0"`).
 pub fn parse_int(value: Option<&Value>, default: i64) -> i64 {
     let Some(value) = value else { return default };
+    // Fast path: JSON numbers need no stringification at all.
+    if let Value::Number(n) = value {
+        if let Some(i) = n.as_i64() {
+            return i;
+        }
+        if let Some(f) = n.as_f64() {
+            return f as i64;
+        }
+        return default;
+    }
     let text = match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.as_str(),
         Value::Null => return default,
-        other => other.to_string(),
+        other => return parse_int_text(&other.to_string(), default),
     };
-    let cleaned: String = text.replace(',', "");
-    let cleaned = cleaned.trim();
+    parse_int_text(text, default)
+}
+
+fn parse_int_text(text: &str, default: i64) -> i64 {
+    // Avoid the replace() allocation when there is no comma to strip.
+    let cleaned;
+    let text = if text.contains(',') {
+        cleaned = text.replace(',', "");
+        cleaned.as_str()
+    } else {
+        text
+    };
+    let cleaned = text.trim();
     if cleaned.is_empty() {
         return default;
     }

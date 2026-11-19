@@ -71,10 +71,17 @@ fn request_shape_is_correct() {
         locale: "en-US",
         transaction_id: None, // UserByScreenName is NOT gated — must be absent
     });
-    assert!(headers["Authorization"].starts_with("Bearer AAAA"));
-    assert!(headers["Cookie"].contains("auth_token=SYNTHETIC"));
-    assert_eq!(headers["X-Csrf-Token"], "SYNTHETIC");
-    assert!(!headers.contains_key("X-Client-Transaction-Id"));
+    let hv = |k: &str| {
+        headers
+            .iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("")
+    };
+    assert!(hv("Authorization").starts_with("Bearer AAAA"));
+    assert!(hv("Cookie").contains("auth_token=SYNTHETIC"));
+    assert_eq!(hv("X-Csrf-Token"), "SYNTHETIC");
+    assert!(!headers.iter().any(|(k, _)| k == "X-Client-Transaction-Id"));
 
     // GET URL shape: /i/api/graphql/<qid>/<op>?variables=..&features=..
     // (Same one-liner cli::exec::graphql_get_url uses; asserted on shape.)

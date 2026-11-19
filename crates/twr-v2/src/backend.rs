@@ -151,13 +151,19 @@ pub fn parse_created_tweet_id(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Percent-encode for query values (bead yql): same table-driven encoder
+/// as `twr_client::url_encode_query` — twr-v2 deliberately has no dep on
+/// twr-client, so the table is duplicated rather than adding a heavy edge.
 fn url_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+    for &b in s.as_bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0F) as usize] as char);
         }
     }
     out

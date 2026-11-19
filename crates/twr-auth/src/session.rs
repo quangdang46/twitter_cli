@@ -106,13 +106,25 @@ pub fn save(path: &Path, session: &SessionCookies, force: bool) -> Result<SaveOu
         twid_user_id: session.twid_user_id.clone(),
     };
     let raw = serde_json::to_string(&file).map_err(|e| SaveError::Io(e.to_string()))?;
-    std::fs::write(path, raw).map_err(|e| SaveError::Io(e.to_string()))?;
-
+    // Owner-only from creation (bead wk1): the old write-then-chmod left a
+    // window where the file was world-readable, and the chmod error was
+    // discarded. Open with mode 0o600 and propagate any permission failure.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perm = std::fs::Permissions::from_mode(0o600);
-        let _ = std::fs::set_permissions(path, perm);
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(path).map_err(|e| SaveError::Io(e.to_string()))?;
+        f.write_all(raw.as_bytes())
+            .map_err(|e| SaveError::Io(e.to_string()))?;
+        // A pre-existing file keeps its old mode — tighten it too.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| SaveError::Io(e.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, raw).map_err(|e| SaveError::Io(e.to_string()))?;
     }
 
     Ok(SaveOutcome::Saved)
