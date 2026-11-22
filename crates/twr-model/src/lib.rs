@@ -11,8 +11,8 @@ pub mod model;
 pub mod parse;
 
 pub use model::{
-    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, Metrics, NotificationActor,
-    NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, MediaVariant, Mention, Metrics,
+    NotificationActor, NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
 };
 pub use parse::{
     parse_bookmark_folders_response, parse_dm_conversation_response, parse_dm_inbox_response,

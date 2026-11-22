@@ -167,6 +167,16 @@ mod tests {
             conversation_id: None,
             in_reply_to_status_id: None,
             grok_translated_post_with_availability: None,
+            possibly_sensitive: None,
+            display_text_range: None,
+            mentions: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            edit_control: None,
+            favorited: None,
+            retweeted: None,
+            bookmarked: None,
+            has_birdwatch_notes: None,
         }
     }
 

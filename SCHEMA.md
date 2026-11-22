@@ -88,11 +88,25 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 Field names mirror the Python original for fixture parity:
 `Tweet{id,text,author{name,screen_name,profile_image_url,verified},
 metrics{likes,retweets,replies,quotes,views,bookmarks},created_at,
-media[{type,url,width,height}],urls,is_retweet,lang,retweeted_by,
+media[{type,url,width,height,id?,media_key?,poster_url?,alt_text?,
+duration_millis?,variants?[{url,content_type?,bitrate?}]}],urls,is_retweet,
+lang,retweeted_by,
 quoted_tweet,score,article_title,article_text,is_subscriber_only,is_promoted,
 conversation_id?,in_reply_to_status_id?,
-grok_translated_post_with_availability?}` — the last is the raw X
-`grok_translated_post_with_availability` object, present only when the
-server supplies it (tweet-read ops send the
+grok_translated_post_with_availability?,
+possibly_sensitive?,display_text_range?,mentions?[{id,screen_name?,name?,
+start?,end?}],in_reply_to_user_id?,in_reply_to_screen_name?,edit_control?,
+favorited?,retweeted?,bookmarked?,has_birdwatch_notes?}` — the grok field
+is the raw X `grok_translated_post_with_availability` object, present only
+when the server supplies it (tweet-read ops send the
 `responsive_web_grok_show_grok_translated_post` feature flag; issue #7).
+All `?` fields are emitted only when X supplies them; explicit `false`
+booleans are preserved (issue #13). `poster_url` is the video/GIF
+poster frame (`media_url_https`), `variants` keeps every playback variant
+(mp4 + HLS) in supplied order, and `mentions` carries structured
+`user_mentions` with text offsets. `has_birdwatch_notes` is a presence
+indicator only — note contents are never fetched.
+`is_promoted` is derived from timeline entry IDs/`promotedMetadata` only —
+a standalone tweet read always reports `false` and cannot distinguish an
+unpromoted tweet from an ad that arrived without timeline context.
 `--compact` strips `profile_image_url`, media dims, `urls`.

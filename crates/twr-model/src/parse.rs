@@ -9,10 +9,47 @@ use crate::article::parse_article;
 use crate::deep_get::parse_int;
 use crate::dget;
 use crate::model::{
-    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, Metrics, NotificationActor,
-    NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
+    Author, BookmarkFolder, DmConversation, DmMessage, ListOwner, MediaVariant, Mention, Metrics,
+    NotificationActor, NotificationEvent, Tweet, TweetMedia, TwitterList, UserProfile,
 };
 use serde_json::Value;
+
+fn opt_str(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn opt_bool(value: Option<&Value>) -> Option<bool> {
+    value.and_then(Value::as_bool)
+}
+
+/// `legacy.entities.user_mentions[]` → structured mentions (issue #13).
+/// Shared by the GraphQL `TweetResult` path and the URT legacy-tweet lift
+/// in `parse_notifications_response` (same REST entity shape).
+fn parse_mentions(entities: Option<&Value>) -> Option<Vec<Mention>> {
+    let items = entities?.get("user_mentions")?.as_array()?;
+    let mentions: Vec<Mention> = items
+        .iter()
+        .map(|m| {
+            let indices = m.get("indices").and_then(Value::as_array);
+            Mention {
+                id: m
+                    .get("id_str")
+                    .or_else(|| m.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                screen_name: opt_str(m.get("screen_name")),
+                name: opt_str(m.get("name")),
+                start: indices.and_then(|a| a.first()).and_then(Value::as_i64),
+                end: indices.and_then(|a| a.get(1)).and_then(Value::as_i64),
+            }
+        })
+        .collect();
+    (!mentions.is_empty()).then_some(mentions)
+}
 
 fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
     let mut media = Vec::new();
@@ -23,6 +60,28 @@ fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
         let media_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         let width = dget!(item, "original_info", "width").and_then(Value::as_i64);
         let height = dget!(item, "original_info", "height").and_then(Value::as_i64);
+        // Shared optional fields (issue #13): ids stay strings, alt text and
+        // duration pass through when supplied, absent stays absent.
+        let id = opt_str(item.get("id_str"));
+        let media_key = opt_str(item.get("media_key"));
+        let alt_text = opt_str(item.get("ext_alt_text"));
+        let duration_millis = parse_int_opt(dget!(item, "video_info", "duration_millis"));
+        let variants = dget!(item, "video_info", "variants")
+            .and_then(Value::as_array)
+            .map(|vs| {
+                vs.iter()
+                    .map(|v| MediaVariant {
+                        url: v
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        content_type: opt_str(v.get("content_type")),
+                        bitrate: v.get("bitrate").and_then(Value::as_i64),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|vs: &Vec<MediaVariant>| !vs.is_empty());
         match media_type {
             "photo" => {
                 let url = item
@@ -35,6 +94,12 @@ fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
                     url,
                     width,
                     height,
+                    id,
+                    media_key,
+                    poster_url: None,
+                    alt_text,
+                    duration_millis,
+                    variants,
                 });
             }
             "video" | "animated_gif" => {
@@ -71,12 +136,32 @@ fn extract_media(legacy: &Value) -> Vec<TweetMedia> {
                     url,
                     width,
                     height,
+                    id,
+                    media_key,
+                    poster_url: opt_str(item.get("media_url_https")),
+                    alt_text,
+                    duration_millis,
+                    variants,
                 });
             }
             _ => {}
         }
     }
     media
+}
+
+/// `parse_int` returns a default on missing; media fields want Option
+/// semantics instead — tolerate the same string/number shapes.
+fn parse_int_opt(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|v| match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::String(s) => s
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.trim().parse::<f64>().ok().map(|f| f as i64)),
+        _ => None,
+    })
 }
 
 fn extract_author(user_data: &Value, user_legacy: &Value) -> Author {
@@ -400,6 +485,23 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
             .get("grok_translated_post_with_availability")
             .filter(|v| v.is_object())
             .cloned(),
+        possibly_sensitive: opt_bool(actual_legacy.get("possibly_sensitive")),
+        display_text_range: actual_legacy
+            .get("display_text_range")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_i64).collect::<Vec<i64>>())
+            .filter(|r| !r.is_empty()),
+        mentions: parse_mentions(actual_legacy.get("entities")),
+        in_reply_to_user_id: opt_str(actual_legacy.get("in_reply_to_user_id_str")),
+        in_reply_to_screen_name: opt_str(actual_legacy.get("in_reply_to_screen_name")),
+        edit_control: actual_data
+            .get("edit_control")
+            .filter(|v| v.is_object())
+            .cloned(),
+        favorited: opt_bool(actual_legacy.get("favorited")),
+        retweeted: opt_bool(actual_legacy.get("retweeted")),
+        bookmarked: opt_bool(actual_legacy.get("bookmarked")),
+        has_birdwatch_notes: opt_bool(actual_data.get("has_birdwatch_notes")),
     })
 }
 
@@ -783,6 +885,22 @@ pub fn parse_notifications_response(
                 .map(str::to_string),
             // URT legacy tweets don't carry the GraphQL grok field.
             grok_translated_post_with_availability: None,
+            // The same legacy flags exist on REST tweet objects — lift the
+            // cheap ones (issue #13); media/edit_control stay GraphQL-only.
+            possibly_sensitive: opt_bool(t.get("possibly_sensitive")),
+            display_text_range: t
+                .get("display_text_range")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_i64).collect::<Vec<i64>>())
+                .filter(|r| !r.is_empty()),
+            mentions: parse_mentions(t.get("entities")),
+            in_reply_to_user_id: opt_str(t.get("in_reply_to_user_id_str")),
+            in_reply_to_screen_name: opt_str(t.get("in_reply_to_screen_name")),
+            edit_control: None,
+            favorited: opt_bool(t.get("favorited")),
+            retweeted: opt_bool(t.get("retweeted")),
+            bookmarked: opt_bool(t.get("bookmarked")),
+            has_birdwatch_notes: opt_bool(t.get("has_birdwatch_notes")),
         });
     }
     // Newest-first, mirroring xfetch's createdAt sort.
