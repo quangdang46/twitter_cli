@@ -32,6 +32,19 @@ pub struct Metrics {
     pub bookmarks: i64,
 }
 
+/// One playback variant from `video_info.variants` (issue #13) — mp4
+/// renditions AND the HLS playlist, kept in supplied order with url,
+/// content type, and bitrate when present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaVariant {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TweetMedia {
     /// `"photo" | "video" | "animated_gif"`
@@ -42,6 +55,39 @@ pub struct TweetMedia {
     pub width: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<i64>,
+    /// `id_str` — kept as a string, never parsed to int (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_key: Option<String>,
+    /// `media_url_https` — poster frame for video/animated_gif only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
+    /// `ext_alt_text` accessibility description when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+    /// `video_info.duration_millis` when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_millis: Option<i64>,
+    /// All `video_info.variants` verbatim (mp4 + HLS), supplied order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<MediaVariant>>,
+}
+
+/// One `legacy.entities.user_mentions[]` entry (issue #13): structured
+/// mention with id, handle, display name, and text offsets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mention {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<i64>,
 }
 
 /// `quoted_tweet` is `Box`ed because `Tweet` is self-referential (a quote
@@ -85,6 +131,38 @@ pub struct Tweet {
     /// the original.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_translated_post_with_availability: Option<serde_json::Value>,
+    /// `legacy.possibly_sensitive` — explicit `false` is preserved; absent
+    /// stays absent (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub possibly_sensitive: Option<bool>,
+    /// `legacy.display_text_range` `[start, end]` char offsets when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text_range: Option<Vec<i64>>,
+    /// `legacy.entities.user_mentions` structured mentions (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<Vec<Mention>>,
+    /// `legacy.in_reply_to_user_id_str` — recipient of a reply (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to_user_id: Option<String>,
+    /// `legacy.in_reply_to_screen_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to_screen_name: Option<String>,
+    /// Raw `edit_control` object, preserved verbatim when supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_control: Option<serde_json::Value>,
+    /// `legacy.favorited` — viewer liked this tweet (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorited: Option<bool>,
+    /// `legacy.retweeted` — viewer retweeted this tweet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retweeted: Option<bool>,
+    /// `legacy.bookmarked` — viewer bookmarked this tweet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bookmarked: Option<bool>,
+    /// Top-level `has_birdwatch_notes` indicator — presence flag only,
+    /// never the note contents (issue #13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_birdwatch_notes: Option<bool>,
 }
 
 /// A Twitter List (owned or followed). NOT a Tweet — its own type, mirroring
