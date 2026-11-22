@@ -7720,6 +7720,8 @@ mod bookmark_folder_tests {
                 screen_name: "s".into(),
                 profile_image_url: String::new(),
                 verified: false,
+                following: None,
+                followed_by: None,
             },
             metrics: twr_model::Metrics {
                 likes: 0,
@@ -7776,6 +7778,8 @@ mod bookmark_folder_tests {
                 screen_name: "s".into(),
                 profile_image_url: String::new(),
                 verified: false,
+                following: None,
+                followed_by: None,
             },
             metrics: twr_model::Metrics {
                 likes: 0,
@@ -8147,6 +8151,8 @@ mod human_user_list_tests {
             verified: true,
             profile_image_url: String::new(),
             created_at: String::new(),
+            following: None,
+            followed_by: None,
         }
     }
 
