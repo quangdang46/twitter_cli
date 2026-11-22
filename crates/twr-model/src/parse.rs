@@ -208,6 +208,8 @@ fn extract_author(user_data: &Value, user_legacy: &Value) -> Author {
         screen_name,
         profile_image_url,
         verified,
+        following: opt_bool(user_legacy.get("following")),
+        followed_by: opt_bool(user_legacy.get("followed_by")),
     }
 }
 
@@ -302,6 +304,8 @@ pub fn parse_user_result(user_data: &Value) -> Option<UserProfile> {
             .or_else(|| legacy.get("created_at").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
+        following: opt_bool(legacy.get("following")),
+        followed_by: opt_bool(legacy.get("followed_by")),
     })
 }
 
@@ -844,6 +848,9 @@ pub fn parse_notifications_response(
                     .unwrap_or_default()
                     .to_string(),
                 verified: u.get("verified").and_then(Value::as_bool).unwrap_or(false),
+                // REST user objects carry these top-level (issue #14).
+                following: opt_bool(u.get("following")),
+                followed_by: opt_bool(u.get("followed_by")),
             },
             metrics: Metrics {
                 likes: parse_int(t.get("favorite_count"), 0),

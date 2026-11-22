@@ -322,6 +322,8 @@ mod tests {
                 screen_name: "a".into(),
                 profile_image_url: String::new(),
                 verified: false,
+                following: None,
+                followed_by: None,
             },
             metrics: Default::default(),
             created_at: "t".into(),

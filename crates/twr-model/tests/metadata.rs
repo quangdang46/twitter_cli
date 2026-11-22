@@ -1,7 +1,8 @@
-//! Issue #13 (media previews/metadata): supplied vs absent metadata,
-//! explicit `false` flags, animated GIFs, quoted/retweeted media.
+//! Issue #13 (media previews/metadata) + #14 (viewer follow state):
+//! supplied vs absent metadata, explicit `false` flags, animated GIFs,
+//! quoted/retweeted media, and present/absent `following`/`followed_by`.
 
-use twr_model::parse_tweet_result;
+use twr_model::{parse_tweet_result, parse_user_result};
 
 fn tweet_result(legacy: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -169,6 +170,8 @@ fn absent_metadata_stays_absent() {
     ] {
         assert!(v.get(key).is_none(), "{key} must be absent");
     }
+    assert!(tweet.author.following.is_none());
+    assert!(tweet.author.followed_by.is_none());
 }
 
 #[test]
@@ -197,4 +200,50 @@ fn quoted_and_retweeted_tweets_carry_their_own_metadata() {
     let q = tweet.quoted_tweet.unwrap();
     assert_eq!(q.favorited, Some(true));
     assert_eq!(q.media[0].alt_text.as_deref(), Some("inner alt"));
+}
+
+#[test]
+fn user_profile_exposes_following_and_followed_by() {
+    let user = serde_json::json!({
+        "rest_id": "u9",
+        "core": {"name": "Grace", "screen_name": "grace"},
+        "legacy": {
+            "name": "Grace",
+            "screen_name": "grace",
+            "following": true,
+            "followed_by": false,
+        },
+    });
+    let p = parse_user_result(&user).unwrap();
+    assert_eq!(p.following, Some(true));
+    // Explicit false is data, not absence.
+    assert_eq!(p.followed_by, Some(false));
+
+    let no_flags = serde_json::json!({
+        "rest_id": "u8",
+        "core": {"name": "No", "screen_name": "no"},
+        "legacy": {"name": "No", "screen_name": "no"},
+    });
+    let p2 = parse_user_result(&no_flags).unwrap();
+    assert!(p2.following.is_none());
+    assert!(p2.followed_by.is_none());
+    let v = serde_json::to_value(&p2).unwrap();
+    assert!(v.get("following").is_none());
+    assert!(v.get("followed_by").is_none());
+}
+
+#[test]
+fn tweet_author_carries_viewer_follow_state() {
+    let mut result = tweet_result(serde_json::json!({
+        "full_text": "hi",
+        "created_at": "t",
+        "lang": "en",
+    }));
+    result["core"]["user_results"]["result"]["legacy"] = serde_json::json!({
+        "following": true,
+        "followed_by": true,
+    });
+    let tweet = parse_tweet_result(&result, 0).unwrap();
+    assert_eq!(tweet.author.following, Some(true));
+    assert_eq!(tweet.author.followed_by, Some(true));
 }

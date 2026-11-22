@@ -86,7 +86,8 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 ## Tweet / UserProfile
 
 Field names mirror the Python original for fixture parity:
-`Tweet{id,text,author{name,screen_name,profile_image_url,verified},
+`Tweet{id,text,author{name,screen_name,profile_image_url,verified,
+following?,followed_by?},
 metrics{likes,retweets,replies,quotes,views,bookmarks},created_at,
 media[{type,url,width,height,id?,media_key?,poster_url?,alt_text?,
 duration_millis?,variants?[{url,content_type?,bitrate?}]}],urls,is_retweet,
@@ -101,11 +102,13 @@ is the raw X `grok_translated_post_with_availability` object, present only
 when the server supplies it (tweet-read ops send the
 `responsive_web_grok_show_grok_translated_post` feature flag; issue #7).
 All `?` fields are emitted only when X supplies them; explicit `false`
-booleans are preserved (issue #13). `poster_url` is the video/GIF
+booleans are preserved (issues #13/#14). `poster_url` is the video/GIF
 poster frame (`media_url_https`), `variants` keeps every playback variant
 (mp4 + HLS) in supplied order, and `mentions` carries structured
 `user_mentions` with text offsets. `has_birdwatch_notes` is a presence
 indicator only — note contents are never fetched.
+`UserProfile` gains the same optional `following?`/`followed_by?` viewer
+flags (issue #14).
 `is_promoted` is derived from timeline entry IDs/`promotedMetadata` only —
 a standalone tweet read always reports `false` and cannot distinguish an
 unpromoted tweet from an ad that arrived without timeline context.

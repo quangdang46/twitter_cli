@@ -14,6 +14,13 @@ pub struct Author {
     pub profile_image_url: String,
     #[serde(default)]
     pub verified: bool,
+    /// Viewer relationship from `legacy.following` / `legacy.followed_by`
+    /// (issue #14). `None` when X does not supply the key — a missing field
+    /// is not evidence of "not following", so no `false` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed_by: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -287,4 +294,10 @@ pub struct UserProfile {
     pub profile_image_url: String,
     #[serde(default)]
     pub created_at: String,
+    /// Viewer relationship from `legacy.following` / `legacy.followed_by`
+    /// (issue #14) — omitted when X does not supply the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed_by: Option<bool>,
 }
