@@ -488,6 +488,74 @@ mod tests {
         assert_eq!(cursor.as_deref(), Some("NEXT_NOTIF"));
     }
 
+    /// Live `/i/api/2/notifications/all.json` returns URT `item` entries
+    /// (verified 2026-…): type under clientEventInfo.element, timestamp in
+    /// entry.sortIndex, actors in notification.fromUsers, tweets in
+    /// notification.targetTweets or item.content.tweet.id.
+    #[test]
+    fn parses_live_urt_notification_shape() {
+        let payload = json!({
+            "globalObjects": {
+                "users": {
+                    "u1": {"name": "Liker", "screen_name": "liker"},
+                    "u2": {"name": "Replier", "screen_name": "replier"}
+                },
+                "tweets": {
+                    "t1": {
+                        "full_text": "nice post",
+                        "user_id_str": "u2",
+                        "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                        "favorite_count": 1, "retweet_count": 0,
+                        "reply_count": 0, "quote_count": 0, "lang": "en"
+                    }
+                }
+            },
+            "timeline": {"instructions": [{
+                "addEntries": {"entries": [
+                    {
+                        "entryId": "notification-abc",
+                        "sortIndex": "1795239144676",
+                        "content": {"item": {
+                            "content": {"notification": {
+                                "id": "n1",
+                                "url": {"url": "https://twitter.com/u/status/1"},
+                                "fromUsers": ["u1"],
+                                "targetTweets": ["t1"]
+                            }},
+                            "clientEventInfo": {"element": "users_liked_your_tweet"}
+                        }}
+                    },
+                    {
+                        "entryId": "notification-def",
+                        "sortIndex": "1794104216344",
+                        "content": {"item": {
+                            "content": {"tweet": {"id": "t1", "displayType": "Tweet"}},
+                            "clientEventInfo": {"element": "user_replied_to_your_tweet"}
+                        }}
+                    },
+                    {
+                        "entryId": "cursor-bottom-1",
+                        "content": {"operation": {"cursor": {
+                            "cursorType": "Bottom", "value": "NEXT"
+                        }}}
+                    }
+                ]}
+            }]}
+        });
+        let (events, tweets, cursor) = crate::parse::parse_notifications_response(&payload);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "users_liked_your_tweet");
+        assert_eq!(events[0].timestamp_ms, "1795239144676");
+        assert_eq!(events[0].actors[0].screen_name, "liker");
+        assert_eq!(events[0].tweet_ids, vec!["t1".to_string()]);
+        // Reply entries carry no actor — resolved via the tweet author.
+        assert_eq!(events[1].event_type, "user_replied_to_your_tweet");
+        assert_eq!(events[1].tweet_ids, vec!["t1".to_string()]);
+        assert_eq!(events[1].actors[0].screen_name, "replier");
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(cursor.as_deref(), Some("NEXT"));
+    }
+
     /// Bead o1l.1.8 §1 — live-parity regression: a bare Top-cursor entry
     /// (exactly what `mentions --max 2` returned live 2026-09-16 on an
     /// account with no mentions: `{"entryId":"cursor-top-…","content":

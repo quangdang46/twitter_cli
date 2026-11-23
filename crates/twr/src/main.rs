@@ -3520,6 +3520,9 @@ async fn run_notifications(
         );
     }
     let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+    if std::env::var("TWR_DEBUG_DUMP").is_ok() {
+        eprintln!("RAW {}", String::from_utf8_lossy(&resp.body));
+    }
     let (events, tweets, next) = twr_model::parse_notifications_response(&body);
     let mut page = serde_json::json!({
         "returned": events.len(),
