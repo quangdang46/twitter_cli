@@ -10,6 +10,7 @@ use twr_client::HttpTransport;
 use twr_core::{decide, emit, ApplyInput, Envelope, Meta, OutputFormat, OutputOptions};
 
 mod cli;
+mod update;
 
 #[derive(Parser)]
 #[command(name = "twr", version, about = "Agent-first CLI for X/Twitter")]
@@ -136,6 +137,17 @@ enum Command {
     Completions {
         /// Shell: bash|zsh|fish|powershell|elvish.
         shell: String,
+    },
+    /// Self-update from GitHub releases: downloads the platform asset,
+    /// verifies its .sha256 sidecar, and replaces the running binary.
+    /// NOT an X write — ignores --policy, never touches auth/session.
+    Update {
+        /// Report whether an update is available without installing.
+        #[arg(long)]
+        check: bool,
+        /// Pin a version x.y.z (default: latest release).
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Serve the tool catalog over stdio (JSON-RPC MCP shape).
     Mcp,
@@ -774,6 +786,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
+    // Issue #25: passive once-per-24h GitHub release check. Skipped for the
+    // commands where a stderr notice or a GitHub round-trip is wrong:
+    // `update` does its own fetch, `mcp` is a long-lived stdio server, and
+    // `completions` is a pure offline render. TWR_NO_UPDATE_CHECK /
+    // TWR_UPDATE_CHECK=0 opt out inside update::maybe_notify_update.
+    let skip_update_check = matches!(
+        &cli.command,
+        Command::Update { .. } | Command::Mcp | Command::Completions { .. }
+    );
+    if !skip_update_check {
+        update::maybe_notify_update(opts.quiet).await;
+    }
+
     let kind: &'static str;
     let mut data: serde_json::Value;
     let mut exit_code = 0;
@@ -845,6 +870,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Completions { shell } => {
             return run_completions(&shell);
+        }
+        Command::Update { check, version } => {
+            kind = "update_result";
+            let (d, code) = update::run_update(check, version).await;
+            data = d;
+            exit_code = code;
         }
         Command::Mcp => {
             // stdio loop: never returns until stdin closes. We are already
@@ -1828,6 +1859,7 @@ fn envelope_type_of(command: &str) -> &'static str {
         // completions prints a shell script and mcp serves JSON-RPC stdio —
         // neither emits an envelope; "none" says so explicitly.
         "completions" => "none",
+        "update" => "update_result",
         "mcp" => "none",
         "post" | "reply" | "quote" | "edit" | "delete" | "like" | "unlike" | "retweet"
         | "unretweet" | "bookmark" | "unbookmark" | "follow" | "unfollow" | "mute" | "unmute"
@@ -1929,6 +1961,7 @@ fn schema_type_fields() -> serde_json::Value {
         "query-ids": {"operations": "[{operation, query_id, source?}]"},
         "schema": "this document",
         "commands": "[{name, type, desc}] inventory",
+        "update_result": {"updated?": "bool", "check?": "bool", "installed": "string", "latest": "string", "update_available?": "bool", "asset?": "string", "path?": "string", "staged?": "string", "manual_step?": "string", "reason?": "string", "path_shadow?": "{shadowing: string}"},
         "error": {"code": "ErrorKind", "message": "string", "suggestion?": "string", "retryable": "bool", "retry_after_ms?": "int", "failing_input?": "{flag,value}", "outcome?": "rejected|unknown|not_sent"}
     })
 }

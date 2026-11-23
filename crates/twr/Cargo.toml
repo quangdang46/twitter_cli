@@ -29,8 +29,13 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+sha2 = { workspace = true }
+tar = "0.4"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
-sha2 = { workspace = true }

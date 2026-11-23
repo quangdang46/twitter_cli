@@ -54,6 +54,20 @@ impl WreqTransport {
 
     /// Build a transport with an explicit emulation profile.
     pub fn with_emulation(emulation: Emulation) -> Result<Self, TransportError> {
+        Self::build(emulation, None)
+    }
+
+    /// Chrome-emulating transport with an explicit total request timeout —
+    /// for short-lived utility calls (the GitHub update check/download,
+    /// issue #25) that must never stall a command.
+    pub fn new_chrome_with_timeout(timeout: std::time::Duration) -> Result<Self, TransportError> {
+        Self::build(emulation_from_env(), Some(timeout))
+    }
+
+    fn build(
+        emulation: Emulation,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Self, TransportError> {
         // cookie_store(false): twr sends a full explicit `Cookie:` header
         // on every request (Method C paste, code-226 gate). Letting wreq
         // ALSO jar cookies means Set-Cookie responses (e.g. rotated guest
@@ -64,9 +78,11 @@ impl WreqTransport {
         // (Live-found 2026-09-20: CreateList 214'd through this transport
         // while succeeding via curl with byte-identical vars/features —
         // cookie-jar interference is the prime suspect.)
-        let client = Client::builder()
-            .emulation(emulation)
-            .cookie_store(false)
+        let mut builder = Client::builder().emulation(emulation).cookie_store(false);
+        if let Some(t) = timeout {
+            builder = builder.timeout(t);
+        }
+        let client = builder
             .build()
             .map_err(|e| TransportError::Io(format!("failed to build wreq client: {e}")))?;
         Ok(Self { client })

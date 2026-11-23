@@ -10,7 +10,7 @@ Every machine invocation prints exactly one document on stdout
 {
   "ok": true,
   "schema_version": "1",
-  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dm_list|dm_message_list|notification_list|list_list|headline_list|bookmark_folder_list|watchlist|error",
+  "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dm_list|dm_message_list|notification_list|list_list|headline_list|bookmark_folder_list|watchlist|update_result|error",
   "data": {"tweets": [], "page": {"returned": 20, "hasMore": true, "nextCursor": "…", "truncated": false, "maxRequested": 20, "filterApplied": false}},
   "meta": {"traceId": "…", "command": "tweet_list"}
 }
@@ -106,6 +106,22 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 - `dm_message_list`: `{"conversation_id": str, "messages": DmMessage[], "page": {...}}` (from `dm-read`); `DmMessage{id, sender_id, text, timestamp_ms}` — same privacy note
 - `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS|CACHE", "status": "pass|warn|fail", "suggestion": …}]}`
 - `query-ids`: `{"operations": [{"operation": …, "query_id": …, "source": …}]}`
+- `update_result`: `twr update` self-update report (issue #25; GitHub
+  Releases only — NOT an X write, ignores `--policy`, never touches
+  auth/session). Install mode: `{"updated": true, "installed": "0.1.6",
+  "latest": "0.1.7", "path": "…"}` on success, or `{"updated": false,
+  "reason": "already up to date", ...}`; `path_shadow.shadowing` names an
+  earlier-on-PATH `twr` that would shadow the updated binary. On Windows
+  the running exe cannot be overwritten, so the result is `{"updated":
+  false, "staged": "…/twr.new.exe", "manual_step": "…"}` — rename it over
+  `twr.exe` after closing twr. `--check` reports `{"check": true,
+  "installed", "latest", "update_available", "asset"}` without installing.
+  Separately, every invocation (except `update`/`mcp`/`completions`, and
+  when `TWR_NO_UPDATE_CHECK=1` or `TWR_UPDATE_CHECK=0`) may print ONE line
+  to **stderr** — `twr X.Y.Z available (installed A.B.C) — run `twr
+  update``` — throttled to once per 24h via `<state_dir>/update-check.json`;
+  silent when up-to-date, offline, or rate-limited. The notice never
+  appears inside the JSON envelope.
 - `schema` / `commands`: this catalog, machine-readable
 
 ## Tweet / UserProfile
