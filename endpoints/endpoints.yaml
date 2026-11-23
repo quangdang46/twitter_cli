@@ -28,6 +28,10 @@ UserByScreenName:
   queryId: 1VOOyvKkiI3FMmkeDNxM9A
   rps: 1.0
   burst: 4
+UserByRestId:
+  queryId: mxaYWwt52eAb6OAzYHMVzg
+  rps: 1.0
+  burst: 4
 TweetDetail:
   queryId: xd_EMdYvB9hfZsZ6Idri0w
   rps: 1.0

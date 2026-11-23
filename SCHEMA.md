@@ -66,7 +66,11 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
   (focal tweet included; pass `page.nextCursor` back as `--cursor` to continue)
 - `article`: `{"title": str, "markdown": str}` (with `--markdown`)
 - `user` / `user_list`: `UserProfile` / `{"users": [...], "page": {...}}` (list parsing
-  completes with fixture parity). `followers`/`following` take a numeric user id **or a
+  completes with fixture parity). `user`, `user-posts`, `user-replies`,
+  `user-media`, and `likes` accept a numeric user id **or a screen name**
+  (ids go through `UserByRestId`, names through `UserByScreenName`; timeline
+  commands skip the profile lookup entirely for numeric ids). `followers`/
+  `following` take a numeric user id **or a
   screen name** (resolved through `UserByScreenName`); an argument that is neither exits 2,
   a name that resolves to nobody exits 3. `page` carries `returned`, `maxRequested`,
   `truncated` (partial data from a rate limit, as elsewhere) and `nextCursor`/`hasMore`

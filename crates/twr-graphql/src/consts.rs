@@ -11,6 +11,11 @@ pub const FALLBACK_QUERY_IDS: &[(&str, &str)] = &[
     ("HomeTimeline", "c-CzHF1LboFilMpsx4ZCrQ"),
     ("HomeLatestTimeline", "BKB7oi212Fi7kQtCBGE4zA"),
     ("UserByScreenName", "1VOOyvKkiI3FMmkeDNxM9A"),
+    // UserByRestId (issue #18): numeric-id counterpart to UserByScreenName.
+    // Live-scraped from client-web main bundle 2026-11-23
+    // (queryId:"mxaYWwt52eAb6OAzYHMVzg",operationName:"UserByRestId");
+    // re-resolve via `doctor --refresh` on 404 drift like every baseline.
+    ("UserByRestId", "mxaYWwt52eAb6OAzYHMVzg"),
     ("UserTweets", "q6xj5bs0hapm9309hexA_g"),
     ("TweetDetail", "xd_EMdYvB9hfZsZ6Idri0w"),
     ("Likes", "lIDpu_NWL7_VhimGGt0o6A"),
@@ -337,8 +342,9 @@ pub fn feature_overrides(operation: &str) -> Option<&'static [(&'static str, boo
 pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
     match operation {
         // fetch_user extras: hidden/tipjar/subscriptions/highlights/
-        // article-notes/gift toggles.
-        "UserByScreenName" => &[
+        // article-notes/gift toggles. UserByRestId is the same user-result
+        // fetch by numeric id (issue #18) — identical extras.
+        "UserByScreenName" | "UserByRestId" => &[
             ("hidden_profile_subscriptions_enabled", true),
             ("tipjar_enabled", true),
             ("subscriptions_verification_info_enabled", true),
@@ -424,7 +430,7 @@ mod tests {
 
     #[test]
     fn baseline_has_22_plus_4_list_plus_2_user_tab_plus_2_pin_plus_8_list_mgmt_plus_1_note() {
-        assert_eq!(FALLBACK_QUERY_IDS.len(), 39);
+        assert_eq!(FALLBACK_QUERY_IDS.len(), 40);
         for op in [
             "ListOwnerships",
             "ListMemberships",

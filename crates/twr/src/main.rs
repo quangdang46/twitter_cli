@@ -538,11 +538,11 @@ enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
-    /// User profile by handle.
+    /// User profile by handle or numeric user id.
     User {
         handle: String,
     },
-    /// Recent posts by handle.
+    /// Recent posts by handle or numeric user id.
     UserPosts {
         handle: String,
         #[arg(long, short = 'n')]
@@ -550,7 +550,7 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
-    /// Posts + replies by handle (ungated replies-only tab).
+    /// Posts + replies by handle or numeric user id (ungated replies-only tab).
     UserReplies {
         handle: String,
         #[arg(long, short = 'n')]
@@ -558,7 +558,7 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
-    /// Photo/video-only posts by handle (server-side filtered tab).
+    /// Photo/video-only posts by handle or numeric user id (server-side filtered tab).
     UserMedia {
         handle: String,
         #[arg(long, short = 'n')]
@@ -566,7 +566,7 @@ enum Command {
         #[arg(long, env = "TWR_FILTER")]
         filter: bool,
     },
-    /// Own-account likes (X restricts this to self).
+    /// Own-account likes (X restricts this to self); handle or numeric user id.
     Likes {
         handle: String,
         #[arg(long, short = 'n')]
@@ -3136,22 +3136,40 @@ async fn run_list_members(
     (data, 0)
 }
 
-/// Shared `UserByScreenName` fetch through an already-built ctx (bead vmn):
+/// Shared user-result fetch through an already-built ctx (bead vmn):
 /// nested runners (user-posts/likes/user-tab/followers) resolve the handle
 /// on the SAME auth+transport+ctx they then page with, instead of `run_user`
 /// building a whole second set and round-tripping the profile through JSON.
 /// Errors are the same `(envelope, exit)` pairs `run_user` emits.
+///
+/// Accepts a screen name OR a bare numeric user id (issue #18): ids go
+/// through `UserByRestId` (`{"userId": ...}`), names through
+/// `UserByScreenName` (`{"screen_name": ...}`) — one rule for every
+/// user-target argument.
 async fn user_lookup(
     ctx: &mut cli::exec::ExecCtx<'_>,
-    handle: &str,
+    arg: &str,
 ) -> Result<twr_model::UserProfile, (serde_json::Value, i32)> {
-    let vars = serde_json::json!({"screen_name": handle.trim_start_matches('@')});
-    // UserByScreenName returns a user result, not a timeline: single GET.
+    let trimmed = arg.trim();
+    let (operation, vars, label) = if let Some(id) = cli::ids::numeric_user_id(trimmed) {
+        (
+            "UserByRestId",
+            serde_json::json!({"userId": id}),
+            trimmed.to_string(),
+        )
+    } else {
+        (
+            "UserByScreenName",
+            serde_json::json!({"screen_name": trimmed.trim_start_matches('@')}),
+            format!("@{}", trimmed.trim_start_matches('@')),
+        )
+    };
+    // Both ops return a user result, not a timeline: single GET.
     let qid = ctx
-        .query_id("UserByScreenName")
+        .query_id(operation)
         .map(|r| r.query_id)
         .unwrap_or_default();
-    let url = cli::exec::graphql_get_url(&qid, "UserByScreenName", &vars, None);
+    let url = cli::exec::graphql_get_url(&qid, operation, &vars, None);
     let headers = twr_client::build_headers(&twr_client::HeaderInput {
         creds: &ctx.creds,
         method: "GET",
@@ -3195,10 +3213,24 @@ async fn user_lookup(
         .unwrap_or_default();
     twr_model::parse_user_result(&result).ok_or_else(|| {
         (
-            serde_json::json!({"error": format!("user @{handle} not found")}),
+            serde_json::json!({"error": format!("user {label} not found")}),
             3,
         )
     })
+}
+
+/// Resolve a user-target argument to a numeric id for the timeline
+/// commands (issue #18): a bare numeric id needs NO lookup — it already
+/// is the `userId` the timeline call wants; a screen name still goes
+/// through [`user_lookup`].
+async fn user_id_for_timeline(
+    ctx: &mut cli::exec::ExecCtx<'_>,
+    arg: &str,
+) -> Result<String, (serde_json::Value, i32)> {
+    if let Some(id) = cli::ids::numeric_user_id(arg.trim()) {
+        return Ok(id);
+    }
+    user_lookup(ctx, arg).await.map(|u| u.id)
 }
 
 async fn run_user(
@@ -3244,11 +3276,10 @@ async fn run_user_posts(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
-    let profile = match user_lookup(&mut ctx, &handle).await {
-        Ok(u) => u,
+    let uid = match user_id_for_timeline(&mut ctx, &handle).await {
+        Ok(id) => id,
         Err((d, c)) => return (d, c),
     };
-    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
     // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
     let vars = serde_json::json!({
@@ -3302,11 +3333,10 @@ async fn run_likes(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
-    let profile = match user_lookup(&mut ctx, &handle).await {
-        Ok(u) => u,
+    let uid = match user_id_for_timeline(&mut ctx, &handle).await {
+        Ok(id) => id,
         Err((d, c)) => return (d, c),
     };
-    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
     // Full variable set mirrors Python fetch_user_tweets/likes; sparse sets parse empty.
     let vars = serde_json::json!({
@@ -3495,13 +3525,12 @@ async fn run_user_tab(
         Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
-    let profile = match user_lookup(&mut ctx, &handle).await {
-        Ok(u) => u,
+    let uid = match user_id_for_timeline(&mut ctx, &handle).await {
+        Ok(id) => id,
         Err((d, c)) => return (d, c),
     };
-    let uid = profile.id.as_str();
     let count = max.unwrap_or(config.fetch.count as usize);
-    let vars = user_tab_vars(uid, count);
+    let vars = user_tab_vars(&uid, count);
     let out = cli::exec::fetch_tweets_paged(
         &mut ctx,
         operation,
