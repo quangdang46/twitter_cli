@@ -700,7 +700,11 @@ mod tests {
             header.set_mode(0o755);
             header.set_cksum();
             builder
-                .append_data(&mut header, "dist/twr", &payload[..])
+                .append_data(
+                    &mut header,
+                    &format!("dist/{}", exe_file_name()),
+                    &payload[..],
+                )
                 .unwrap();
             builder.into_inner().unwrap().finish().unwrap();
         }
@@ -713,7 +717,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("twr-shadow-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("twr");
+        let fake = dir.join(exe_file_name());
         std::fs::write(&fake, b"x").unwrap();
         #[cfg(unix)]
         {
@@ -727,30 +731,37 @@ mod tests {
         );
         assert_eq!(shadow, Some(fake.clone()));
         // A symlink named `twr` pointing at the running exe counts as the
-        // same binary (canonicalize resolves it).
-        let same_dir = dir.join("same");
-        std::fs::create_dir_all(&same_dir).unwrap();
-        let link = same_dir.join("twr");
+        // same binary (canonicalize resolves it). Windows symlink creation
+        // needs elevated privileges, so this half is unix-only.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(std::env::current_exe().unwrap(), &link).unwrap();
-        // PATH where the running exe's own entry comes first → no shadow.
-        let both = format!("{}:{}", same_dir.display(), dir.display());
-        assert!(path_shadow(
-            &std::env::current_exe().unwrap(),
-            Some(std::ffi::OsStr::new(&both))
-        )
-        .is_none());
-        // Reversed order → the fake earlier copy shadows.
-        let reversed = format!("{}:{}", dir.display(), same_dir.display());
-        assert_eq!(
-            path_shadow(
+        {
+            let same_dir = dir.join("same");
+            std::fs::create_dir_all(&same_dir).unwrap();
+            let link = same_dir.join(exe_file_name());
+            std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+            // PATH where the running exe's own entry comes first → no shadow.
+            let both = std::env::join_paths([same_dir.as_path(), dir.as_path()])
+                .unwrap()
+                .into_string()
+                .unwrap();
+            assert!(path_shadow(
                 &std::env::current_exe().unwrap(),
-                Some(std::ffi::OsStr::new(&reversed))
-            ),
-            Some(fake.clone())
-        );
+                Some(std::ffi::OsStr::new(&both))
+            )
+            .is_none());
+            // Reversed order → the fake earlier copy shadows.
+            let reversed = std::env::join_paths([dir.as_path(), same_dir.as_path()])
+                .unwrap()
+                .into_string()
+                .unwrap();
+            assert_eq!(
+                path_shadow(
+                    &std::env::current_exe().unwrap(),
+                    Some(std::ffi::OsStr::new(&reversed))
+                ),
+                Some(fake.clone())
+            );
+        }
         // Empty PATH → none.
         assert!(path_shadow(
             &std::env::current_exe().unwrap(),
