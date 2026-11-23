@@ -17,7 +17,7 @@
 **A Rust CLI for X/Twitter, built for AI agents first and humans second — reading and posting through your own logged-in session, no developer API key required.**
 It talks to X's internal GraphQL surface the same way your browser does (cookie auth, browser-matched TLS, a real `x-client-transaction-id`), and wraps every command in a stable JSON/YAML/[TOON](https://github.com/toon-format/toon) envelope with frozen exit codes, so an agent can drive it without ever screen-scraping stdout.
 
-> **Status: v0.1.6 released and live-verified.** The full read surface (feed, bookmarks, search incl. the transaction-gated Latest path, tweet detail, user/timelines, followers/following, lists, articles, headlines) and the full write surface (post/reply/quote, like/retweet/bookmark/follow + reverses, media upload incl. MP4 video, idempotency, `--policy`, daily budget) are implemented across 11 crates, tested by 351 unit/integration tests, and verified end-to-end against real x.com — including real posts, replies, likes, follows and bookmarks from a live session. See [Roadmap](#roadmap) for what's shipped vs. what's still future work (official API v2 extras, long-form posts, MCP extras).
+> **Status: v0.1.7 released and live-verified.** The full read surface (feed, bookmarks, search incl. the transaction-gated Latest path, tweet detail, user/timelines, followers/following, lists, articles, headlines) and the full write surface (post/reply/quote, like/retweet/bookmark/follow + reverses, media upload incl. MP4 video, idempotency, `--policy`, daily budget) are implemented across 11 crates, tested by 351 unit/integration tests, and verified end-to-end against real x.com — including real posts, replies, likes, follows and bookmarks from a live session. See [Roadmap](#roadmap) for what's shipped vs. what's still future work (official API v2 extras, long-form posts, MCP extras).
 
 ---
 
@@ -153,7 +153,7 @@ CI/air-gapped environments with `TWR_NO_UPDATE_CHECK=1` or
 ```bash
 twr update            # download latest release, verify .sha256, replace binary
 twr update --check    # report only, install nothing
-twr update --version 0.1.6   # pin a specific version
+twr update --version 0.1.7   # pin a specific version
 ```
 
 `twr update` is not an X write — it ignores `--policy` and never touches
@@ -204,7 +204,7 @@ Full rationale — including the 15+ reference projects (Python `twitter-cli`, `
 | P0 | Transport + cookie-extraction + transaction-ID viability spike | ✅ done (live-verified; P0-4 recorded as bead comments) |
 | P1 | Read commands (feed/search/tweet/user/...) + full agent contract | ✅ done (351 tests, fixture + semantic parity) |
 | P2 | Write commands + media upload + idempotency + policy gating | ✅ done (live post/reply/like/retweet/bookmark/follow round-trips) |
-| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers, `v0.1.0`–`v0.1.6` tags) |
+| P3 | Human polish (tables, completions), `SKILL.md`, CI, releases | ✅ done (incl. curl/irm installers, `v0.1.0`–`v0.1.7` tags) |
 | P4 | Official API v2 backend (`--backend api-v2`, OAuth2 PKCE, dual routing) | ✅ code shipped; needs a human's X developer app to fully exercise |
 | P5 | SQLite cache, `twr mcp` server, headlines, guest tiers, `future` | ✅ code shipped; guest tier + MCP smoke-tested live |
 | P6 | Feature-completeness batch: reads + mute/block/pin + long-form/`EditTweet`/polls + DM (shipped, live-verified where accounts allow) | ✅ mostly done (shipped in `v0.1.1`) — list writes + `dm-send` live-gated, see `REMAINING.md` |
@@ -250,6 +250,6 @@ Shipped at repo root — the agent playbook (status gate first, `--json --max 20
 
 <div align="center">
 
-*Built contract-first from [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) — 351 tests green, live-verified against real x.com, released as `v0.1.6`.*
+*Built contract-first from [`COMPREHENSIVEPLANFORTWITTERCLI.md`](COMPREHENSIVEPLANFORTWITTERCLI.md) — 351 tests green, live-verified against real x.com, released as `v0.1.7`.*
 
 </div>

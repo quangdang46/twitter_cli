@@ -108,7 +108,7 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
 - `query-ids`: `{"operations": [{"operation": …, "query_id": …, "source": …}]}`
 - `update_result`: `twr update` self-update report (issue #25; GitHub
   Releases only — NOT an X write, ignores `--policy`, never touches
-  auth/session). Install mode: `{"updated": true, "installed": "0.1.6",
+  auth/session). Install mode: `{"updated": true, "installed": "0.1.7",
   "latest": "0.1.7", "path": "…"}` on success, or `{"updated": false,
   "reason": "already up to date", ...}`; `path_shadow.shadowing` names an
   earlier-on-PATH `twr` that would shadow the updated binary. On Windows
