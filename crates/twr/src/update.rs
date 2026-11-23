@@ -702,7 +702,7 @@ mod tests {
             builder
                 .append_data(
                     &mut header,
-                    &format!("dist/{}", exe_file_name()),
+                    format!("dist/{}", exe_file_name()),
                     &payload[..],
                 )
                 .unwrap();
