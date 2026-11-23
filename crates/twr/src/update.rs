@@ -536,7 +536,7 @@ async fn update_inner(check_only: bool, pin: Option<String>) -> Result<Value, (S
         if let Some(s) = &shadow {
             data["path_shadow"] = json!({"shadowing": s.display().to_string()});
         }
-        return Ok(data);
+        Ok(data)
     }
 
     #[cfg(not(windows))]
