@@ -11,15 +11,16 @@ Every machine invocation prints exactly one document on stdout
   "ok": true,
   "schema_version": "1",
   "type": "tweet_list|user_list|user|tweet_detail|article|status|auth|write_result|schema|commands|doctor|query-ids|dm_list|dm_message_list|notification_list|list_list|headline_list|bookmark_folder_list|watchlist|error",
-  "data": {},
-  "pagination": {"nextCursor": "…", "hasMore": true},
-  "meta": {"traceId": "…", "command": "search", "maxRequested": 20, "returned": 20, "filterApplied": false}
+  "data": {"tweets": [], "page": {"returned": 20, "hasMore": true, "nextCursor": "…", "truncated": false, "maxRequested": 20, "filterApplied": false}},
+  "meta": {"traceId": "…", "command": "tweet_list"}
 }
 ```
 
-`pagination` appears on list types; `meta.filterApplied` only when
-`--filter` was passed; `meta.truncated=true` ships with partial data on
-rate-limit resume (exit 4).
+List types carry paging under `data.page` (`returned`, `hasMore`,
+`nextCursor`, `truncated`, `maxRequested`, `filterApplied`) — there is no
+top-level `pagination` object. `meta.command` is the envelope `type`, not
+the invoked subcommand. On rate limit (exit 4) the error envelope ships
+instead of partial data.
 
 ## Error
 
@@ -103,7 +104,7 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
   impressions on reads and never fabricates event fields.
 - `dm_list`: `{"conversations": DmConversation[], "page": {...}}` (from `dm-list`); `DmConversation{id, participants[{id,screen_name,name}], last_message?, last_timestamp_ms, unread_count}` — private; never logged beyond envelope
 - `dm_message_list`: `{"conversation_id": str, "messages": DmMessage[], "page": {...}}` (from `dm-read`); `DmMessage{id, sender_id, text, timestamp_ms}` — same privacy note
-- `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS", "status": "pass|warn|fail", "suggestion": …}]}`
+- `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS|CACHE", "status": "pass|warn|fail", "suggestion": …}]}`
 - `query-ids`: `{"operations": [{"operation": …, "query_id": …, "source": …}]}`
 - `schema` / `commands`: this catalog, machine-readable
 
