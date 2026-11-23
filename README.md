@@ -142,6 +142,24 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/insta
 irm "https://raw.githubusercontent.com/quangdang46/twitter_cli/main/install.ps1" | iex
 ```
 
+### Updating
+
+`twr` checks GitHub Releases at most once per 24h and prints a one-line
+notice to **stderr** when a newer version exists (never inside the JSON
+envelope; silent when up-to-date, offline, or rate-limited). Opt out for
+CI/air-gapped environments with `TWR_NO_UPDATE_CHECK=1` or
+`TWR_UPDATE_CHECK=0`.
+
+```bash
+twr update            # download latest release, verify .sha256, replace binary
+twr update --check    # report only, install nothing
+twr update --version 0.1.6   # pin a specific version
+```
+
+`twr update` is not an X write — it ignores `--policy` and never touches
+auth/session state. On Windows it stages `twr.new.exe` next to the binary
+(a running exe can't be overwritten) and prints the rename step.
+
 ```bash
 # From source, manually (needs Rust stable + cmake/nasm/LLVM for wreq's
 # BoringSSL linkage — see REMAINING.md if the build complains about
