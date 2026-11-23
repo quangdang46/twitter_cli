@@ -362,9 +362,11 @@ pub fn extra_features(operation: &str) -> &'static [(&'static str, bool)] {
             ("withArticleRichContentState", true),
             ("responsive_web_grok_show_grok_translated_post", true),
         ],
-        // Tweet-read ops: ask X to include
-        // `grok_translated_post_with_availability` on each TweetResult
-        // (issue #7). Op set = exactly the ops `cli::instructions::
+        // Tweet-read ops: ask X to include the Grok translated-post
+        // payload on each TweetResult — wire name is now
+        // `grok_translated_post` ({entities, translation}); older captures
+        // had `grok_translated_post_with_availability` (issue #7/#24).
+        // Op set = exactly the ops `cli::instructions::
         // for_operation` parses tweets from — NOT mutations, NOT the
         // user/list ops (Followers/Following/ListMembers/ListOwnerships/
         // ListMemberships return users/lists, not tweets).

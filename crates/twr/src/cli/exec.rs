@@ -476,6 +476,9 @@ pub async fn fetch_parsed_page_with_toggles(
     if !(200..300).contains(&resp.status) {
         return Err(PageError::Http(resp.status));
     }
+    if std::env::var("TWR_DEBUG_DUMP").is_ok() {
+        eprintln!("RAW {operation} {}", String::from_utf8_lossy(&resp.body));
+    }
     let body: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|_| PageError::Fatal)?;
     // Payload-shape 404 disambiguation lives in twr-core; an *Unavailable

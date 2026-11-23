@@ -118,13 +118,19 @@ duration_millis?,variants?[{url,content_type?,bitrate?}]}],urls,is_retweet,
 lang,retweeted_by,
 quoted_tweet,score,article_title,article_text,is_subscriber_only,is_promoted,
 conversation_id?,in_reply_to_status_id?,
-grok_translated_post_with_availability?,
+grok_translated_post_with_availability?,grok_translated_post?,
 possibly_sensitive?,display_text_range?,mentions?[{id,screen_name?,name?,
 start?,end?}],in_reply_to_user_id?,in_reply_to_screen_name?,edit_control?,
-favorited?,retweeted?,bookmarked?,has_birdwatch_notes?}` — the grok field
-is the raw X `grok_translated_post_with_availability` object, present only
-when the server supplies it (tweet-read ops send the
-`responsive_web_grok_show_grok_translated_post` feature flag; issue #7).
+favorited?,retweeted?,bookmarked?,has_birdwatch_notes?}` — the grok fields
+are the raw X objects, present only when the server supplies them
+(tweet-read ops send the
+`responsive_web_grok_show_grok_translated_post` feature flag; issues
+#7/#24). X currently returns `grok_translated_post` =
+`{entities, translation}`; older captures had
+`grok_translated_post_with_availability` = `{is_available, data:
+{translation, source_language, destination_language, entities,
+associated_data}}`. Both are preserved verbatim under their own keys —
+`text`/`lang` always stay the original.
 All `?` fields are emitted only when X supplies them; explicit `false`
 booleans are preserved (issues #13/#14). `poster_url` is the video/GIF
 poster frame (`media_url_https`), `variants` keeps every playback variant

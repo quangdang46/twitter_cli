@@ -489,6 +489,15 @@ pub fn parse_tweet_result(result: &Value, depth: u8) -> Option<Tweet> {
             .get("grok_translated_post_with_availability")
             .filter(|v| v.is_object())
             .cloned(),
+        // Current wire name for the same payload (issue #24): X now sends
+        // `grok_translated_post` = {entities, translation} instead of the
+        // older `_with_availability` wrapper. Both keys are preserved
+        // verbatim under their own names — whichever X supplies wins,
+        // neither is synthesized from the other.
+        grok_translated_post: actual_data
+            .get("grok_translated_post")
+            .filter(|v| v.is_object())
+            .cloned(),
         possibly_sensitive: opt_bool(actual_legacy.get("possibly_sensitive")),
         display_text_range: actual_legacy
             .get("display_text_range")
@@ -890,8 +899,9 @@ pub fn parse_notifications_response(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            // URT legacy tweets don't carry the GraphQL grok field.
+            // URT legacy tweets don't carry the GraphQL grok fields.
             grok_translated_post_with_availability: None,
+            grok_translated_post: None,
             // The same legacy flags exist on REST tweet objects — lift the
             // cheap ones (issue #13); media/edit_control stay GraphQL-only.
             possibly_sensitive: opt_bool(t.get("possibly_sensitive")),
