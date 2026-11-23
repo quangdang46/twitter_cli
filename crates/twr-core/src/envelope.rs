@@ -172,7 +172,7 @@ impl<T: Serialize> Envelope<T> {
 /// must not `println!` the envelope (or anything else) anywhere else.
 pub fn render_json<T: Serialize>(envelope: &Envelope<T>) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| {
-        r#"{"ok":false,"schema_version":"1","type":"error","error":{"code":"general-auth","message":"envelope serialization failed","suggestion":null,"retryable":false,"retry_after_ms":null,"failing_input":null}}"#.to_string()
+        r#"{"ok":false,"schema_version":"1","type":"error","error":{"code":"general-auth","message":"envelope serialization failed","suggestion":null,"retryable":false,"retry_after_ms":null,"failing_input":null,"outcome":null}}"#.to_string()
     })
 }
 

@@ -1661,13 +1661,41 @@ fn handler_error(exit_code: i32, data: &serde_json::Value) -> twr_core::TwrError
         .unwrap_or_else(|| format!("command failed (exit {exit_code})"));
     let kind =
         twr_core::ErrorKind::from_exit_code(exit_code).unwrap_or(twr_core::ErrorKind::GeneralAuth);
-    let err = twr_core::TwrError::new(kind, message);
+    let mut err = twr_core::TwrError::new(kind, message);
+    // Issue #17: handlers annotate write failures with `outcome`
+    // ("rejected" | "unknown" | "not_sent"); `state:"unknown"` payloads
+    // imply the same. `with_outcome` forces retryable=false on unknown.
+    let outcome = data
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .and_then(twr_core::WriteOutcome::parse)
+        .or_else(|| {
+            (data.get("state").and_then(|v| v.as_str()) == Some("unknown"))
+                .then_some(twr_core::WriteOutcome::Unknown)
+        });
+    if let Some(outcome) = outcome {
+        err = err.with_outcome(outcome);
+    }
     match (
         data.get("error"),
         data.get("suggestion").and_then(|s| s.as_str()),
     ) {
         (Some(_), Some(suggestion)) => err.with_suggestion(suggestion),
         _ => err,
+    }
+}
+
+/// Issue #17: classify an HTTP write failure by status. 404 on the
+/// GraphQL endpoint means a stale query id — the mutation never executed
+/// (`not_sent`); 5xx after the request was sent is ambiguous (`unknown`);
+/// every other status is a definite server refusal (`rejected`).
+fn write_http_outcome(status: u16) -> &'static str {
+    if status == 404 {
+        "not_sent"
+    } else if status >= 500 {
+        "unknown"
+    } else {
+        "rejected"
     }
 }
 
@@ -3975,7 +4003,7 @@ async fn run_post_write(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
@@ -3997,13 +4025,13 @@ async fn run_post_write(
             match twr_core::budget::check_post(&path, &today, limit, interval, now_secs) {
                 PostCheck::DenyBudget { used, limit } => {
                     return (
-                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit), "outcome": "not_sent"}),
                         2,
                     );
                 }
                 PostCheck::DenyCooldown { wait_secs } => {
                     return (
-                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs), "outcome": "not_sent"}),
                         2,
                     );
                 }
@@ -4014,13 +4042,13 @@ async fn run_post_write(
     // Policy BEFORE the decision table: read_only-scoped agents cannot post even with --apply.
     if !opts.policy.allows(operation) {
         return (
-            serde_json::json!({"error": opts.policy.denial(operation)}),
+            serde_json::json!({"error": opts.policy.denial(operation), "outcome": "not_sent"}),
             2,
         );
     }
     // Validate -i/--video up front so even --dry-run fails fast on bad media.
     if let Err(e) = cli::write::validate_images(&images) {
-        return (serde_json::json!({"error": e}), 2);
+        return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2);
     }
     if let Some(v) = &video {
         if !v.is_empty() && !images.is_empty() {
@@ -4032,14 +4060,16 @@ async fn run_post_write(
             );
         }
         if let Err(e) = cli::write::validate_video(v) {
-            return (serde_json::json!({"error": e}), 2);
+            return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2);
         }
     }
     // Real TTY check (bead gtg): a pipe must NOT count as a confirm —
     // `echo yes | twr post x` without --apply/--dry-run exits 2.
     let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
-        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
         Decision::Preview => {
             // Report which mutation WOULD be used (o1l.4.1 acceptance),
             // without touching the network. reply_to/quote_id presence
@@ -4062,7 +4092,7 @@ async fn run_post_write(
         Decision::Prompt => {
             if opts.no_interactive {
                 return (
-                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    serde_json::json!({"error": "needs --apply or --dry-run", "outcome": "not_sent"}),
                     2,
                 );
             }
@@ -4102,7 +4132,7 @@ async fn run_post_write(
                     )
                 }
                 Ok(twr_core::PreCheck::Proceed) => {}
-                Err(e) => return (serde_json::json!({"error": e}), 2),
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
             }
         }
     }
@@ -4117,7 +4147,12 @@ async fn run_post_write(
     // (bead a99); `ctx.transport` borrows through it unchanged.
     let transport = std::sync::Arc::new(match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
     });
     let mut ctx = build_ctx(opts, config, transport.as_ref(), &auth);
     let has_full_cookie = auth
@@ -4143,7 +4178,7 @@ async fn run_post_write(
             Ok(d) => d,
             Err(_) => {
                 return (
-                    serde_json::json!({"error": format!("cannot read media: {path}")}),
+                    serde_json::json!({"error": format!("cannot read media: {path}"), "outcome": "not_sent"}),
                     7,
                 )
             }
@@ -4152,7 +4187,7 @@ async fn run_post_write(
             Some(m) => m,
             None => {
                 return (
-                    serde_json::json!({"error": format!("unsupported media type: {path}")}),
+                    serde_json::json!({"error": format!("unsupported media type: {path}"), "outcome": "not_sent"}),
                     2,
                 )
             }
@@ -4206,7 +4241,7 @@ async fn run_post_write(
                 Ok(r) => results.push(r),
                 Err(_) => {
                     return (
-                        serde_json::json!({"error": "upload failed: worker task dropped"}),
+                        serde_json::json!({"error": "upload failed: worker task dropped", "outcome": "not_sent"}),
                         7,
                     )
                 }
@@ -4230,7 +4265,7 @@ async fn run_post_write(
                         _ => ("upload", 7),
                     };
                     return (
-                        serde_json::json!({"error": format!("{kind} failed: {e}")}),
+                        serde_json::json!({"error": format!("{kind} failed: {e}"), "outcome": "not_sent"}),
                         code,
                     );
                 }
@@ -4266,7 +4301,7 @@ async fn run_post_write(
             quote_url.as_deref(),
         ) {
             Ok(v) => v,
-            Err(e) => return (serde_json::json!({"error": e}), 2),
+            Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
         }
     } else {
         cli::write::create_tweet_vars_full(
@@ -4320,7 +4355,7 @@ async fn run_post_write(
         now,
     ) {
         return (
-            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
             5,
         );
     }
@@ -4350,13 +4385,16 @@ async fn run_post_write(
     }
     if resp.status == 429 {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
-        return (serde_json::json!({"error": "rate limited"}), 4);
+        return (
+            serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+            4,
+        );
     }
     if !(200..300).contains(&resp.status) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
-            serde_json::json!({"error": format!("post failed: HTTP {}", resp.status)}),
-            6,
+            serde_json::json!({"error": format!("post failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
+            twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -4388,7 +4426,7 @@ async fn run_post_write(
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
                     return (
                         serde_json::json!({"error": format!("edit rejected ({ecode}): {message}"),
-                            "code": ecode, "suggestion": esuggest, "retryable": false}),
+                            "code": ecode, "suggestion": esuggest, "retryable": false, "outcome": "rejected"}),
                         4,
                     );
                 }
@@ -4407,7 +4445,10 @@ async fn run_post_write(
                     format!("long-form post rejected — account not eligible for CreateNoteTweet (X code {code}): {message}"),
                 );
                 mark_prepared(&store_path, idempotency_key.as_deref(), now);
-                return (serde_json::json!({"error": err.message}), 4);
+                return (
+                    serde_json::json!({"error": err.message, "outcome": "rejected"}),
+                    4,
+                );
             }
             let kind = twr_core::ErrorKind::from_api_code(code);
             let err = if code == 226 {
@@ -4426,7 +4467,10 @@ async fn run_post_write(
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"))
             };
             mark_prepared(&store_path, idempotency_key.as_deref(), now);
-            return (serde_json::json!({"error": err.message}), kind.exit_code());
+            return (
+                serde_json::json!({"error": err.message, "outcome": "rejected"}),
+                kind.exit_code(),
+            );
         }
     }
     // CreateNoteTweet: tolerate all three envelope shapes seen in the wild
@@ -4440,7 +4484,7 @@ async fn run_post_write(
             // may not have landed. Honest state is `unknown` (bead sxu).
             mark_unknown(&store_path, idempotency_key.as_deref());
             return (
-                serde_json::json!({"error": "long-form post returned no confirmation (empty tweet_results across all known envelope shapes) — the write may or may not have landed; check `twr user-posts` before retrying to avoid a double-post"}),
+                serde_json::json!({"error": "long-form post returned no confirmation (empty tweet_results across all known envelope shapes) — the write may or may not have landed; check `twr user-posts` before retrying to avoid a double-post", "outcome": "unknown"}),
                 6,
             );
         };
@@ -4482,7 +4526,7 @@ async fn run_post_write(
             // HTTP 200 but no new id — ambiguous; `unknown` (bead sxu).
             mark_unknown(&store_path, idempotency_key.as_deref());
             return (
-                serde_json::json!({"error": "edit returned no new tweet id (unexpected response shape)"}),
+                serde_json::json!({"error": "edit returned no new tweet id (unexpected response shape)", "outcome": "unknown"}),
                 6,
             );
         };
@@ -4581,7 +4625,7 @@ async fn run_post_write(
         // whether the write landed. `unknown`, never a success-shaped lie.
         mark_unknown(&store_path, idempotency_key.as_deref());
         return (
-            serde_json::json!({"error": "post returned no tweet id (unexpected create_tweet response shape)"}),
+            serde_json::json!({"error": "post returned no tweet id (unexpected create_tweet response shape)", "outcome": "unknown"}),
             6,
         );
     }
@@ -4687,11 +4731,11 @@ fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, 
             Ok(twr_core::BudgetCheck::Allow { .. }) => {}
             Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
                 return Err((
-                    serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                    serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                     2,
                 ));
             }
-            Err(e) => return Err((serde_json::json!({"error": e}), 2)),
+            Err(e) => return Err((serde_json::json!({"error": e, "outcome": "not_sent"}), 2)),
         }
     }
     if post_family {
@@ -4704,17 +4748,17 @@ fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, 
                 Ok(twr_core::budget::PostCheck::Allow { .. }) => {}
                 Ok(twr_core::budget::PostCheck::DenyBudget { used, limit }) => {
                     return Err((
-                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit), "outcome": "not_sent"}),
                         2,
                     ));
                 }
                 Ok(twr_core::budget::PostCheck::DenyCooldown { wait_secs }) => {
                     return Err((
-                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs), "outcome": "not_sent"}),
                         2,
                     ));
                 }
-                Err(e) => return Err((serde_json::json!({"error": e}), 2)),
+                Err(e) => return Err((serde_json::json!({"error": e, "outcome": "not_sent"}), 2)),
             }
         }
     }
@@ -4728,7 +4772,7 @@ fn reserve_budgets_at_send(post_family: bool) -> Result<(), (serde_json::Value, 
 fn require_write_state() -> Result<(), (serde_json::Value, i32)> {
     match twr_core::budget::require_state_dir() {
         Ok(_) => Ok(()),
-        Err(e) => Err((serde_json::json!({"error": e}), 2)),
+        Err(e) => Err((serde_json::json!({"error": e, "outcome": "not_sent"}), 2)),
     }
 }
 
@@ -4832,17 +4876,22 @@ async fn run_engage(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
     }
     if !opts.policy.allows(cmd) {
-        return (serde_json::json!({"error": opts.policy.denial(cmd)}), 2);
+        return (
+            serde_json::json!({"error": opts.policy.denial(cmd), "outcome": "not_sent"}),
+            2,
+        );
     }
     let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
-        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
         Decision::Preview => return (dry_run_data(cmd), 0),
         Decision::Prompt => {
             eprintln!("This will {cmd} \"{target_id}\". Type 'yes' to proceed:");
@@ -4900,7 +4949,7 @@ async fn run_engage(
                     )
                 }
                 Ok(twr_core::PreCheck::Proceed) => {}
-                Err(e) => return (serde_json::json!({"error": e}), 2),
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
             }
         }
     }
@@ -4908,12 +4957,21 @@ async fn run_engage(
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
-            return emit_fail(opts, err, code);
+            return emit_fail(
+                opts,
+                err.with_outcome(twr_core::WriteOutcome::NotSent),
+                code,
+            );
         }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
     };
     let mut ctx = build_ctx(opts, config, &transport, &auth);
     let desc = engage_op_of(cmd);
@@ -4933,7 +4991,7 @@ async fn run_engage(
         now,
     ) {
         return (
-            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
             5,
         );
     }
@@ -4968,7 +5026,11 @@ async fn run_engage(
                 if (200..300).contains(&r.status) {
                     Ok(())
                 } else {
-                    Err((format!("{cmd} failed: HTTP {}", r.status), 6, false))
+                    Err((
+                        format!("{cmd} failed: HTTP {}", r.status),
+                        twr_core::ErrorKind::from_http_status(r.status).exit_code(),
+                        r.status >= 500,
+                    ))
                 }
             }
             Err(_) => Err((format!("{cmd} failed: transport error"), 5, true)),
@@ -4997,7 +5059,11 @@ async fn run_engage(
                 if (200..300).contains(&r.status) {
                     Ok(())
                 } else {
-                    Err((format!("{cmd} failed: HTTP {}", r.status), 6, false))
+                    Err((
+                        format!("{cmd} failed: HTTP {}", r.status),
+                        twr_core::ErrorKind::from_http_status(r.status).exit_code(),
+                        r.status >= 500,
+                    ))
                 }
             }
             Err(_) => Err((format!("{cmd} failed: transport error"), 5, true)),
@@ -5008,11 +5074,17 @@ async fn run_engage(
                 let r = &post.response;
                 if r.status == 429 {
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
-                    return (serde_json::json!({"error": "rate limited"}), 4);
+                    return (
+                        serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+                        4,
+                    );
                 }
                 if !(200..300).contains(&r.status) {
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
-                    return (cli::exec::engage_failure_data(&ctx, cmd, desc.op, &post), 6);
+                    let kind = twr_core::ErrorKind::from_http_status(post.response.status);
+                    let mut data = cli::exec::engage_failure_data(&ctx, cmd, desc.op, &post);
+                    data["outcome"] = serde_json::json!(write_http_outcome(post.response.status));
+                    return (data, kind.exit_code());
                 }
                 // Inner data.errors on HTTP 200: X puts mutation rejections
                 // (88/348/349/226/187/186) INSIDE the body (live-confirmed
@@ -5043,7 +5115,10 @@ async fn run_engage(
                             )
                         };
                         mark_prepared(&store_path, idempotency_key.as_deref(), now);
-                        return (serde_json::json!({"error": err.message}), kind.exit_code());
+                        return (
+                            serde_json::json!({"error": err.message, "outcome": "rejected"}),
+                            kind.exit_code(),
+                        );
                     }
                 }
                 Ok(())
@@ -5065,7 +5140,13 @@ async fn run_engage(
         } else {
             mark_prepared(&store_path, idempotency_key.as_deref(), now);
         }
-        return (serde_json::json!({"error": message}), code);
+        return (
+            serde_json::json!({
+                "error": message,
+                "outcome": if ambiguous { "unknown" } else { "rejected" },
+            }),
+            code,
+        );
     }
     // Budgets were RESERVED at send time (bead nku) — no double count.
     if let Err(e) = idem_set(
@@ -5289,20 +5370,22 @@ async fn run_list_write(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
     }
     if !opts.policy.allows(operation) {
         return (
-            serde_json::json!({"error": opts.policy.denial(operation)}),
+            serde_json::json!({"error": opts.policy.denial(operation), "outcome": "not_sent"}),
             2,
         );
     }
     let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
-        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
         Decision::Preview => return (dry_run_data(operation), 0),
         Decision::Prompt => {
             eprintln!(
@@ -5349,7 +5432,7 @@ async fn run_list_write(
                     );
                 }
                 Ok(twr_core::PreCheck::Proceed) => {}
-                Err(e) => return (serde_json::json!({"error": e}), 2),
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
             }
         }
     }
@@ -5362,7 +5445,12 @@ async fn run_list_write(
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
     };
     // list-pin/unpin: fail closed BEFORE any network (but AFTER the
     // gate, so --dry-run still previews). UpdatePinnedTimelines takes
@@ -5436,7 +5524,7 @@ async fn run_list_write(
         now,
     ) {
         return (
-            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
             5,
         );
     }
@@ -5456,7 +5544,10 @@ async fn run_list_write(
     };
     if resp.status == 429 {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
-        return (serde_json::json!({"error": "rate limited"}), 4);
+        return (
+            serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+            4,
+        );
     }
     // Delete-retry on an already-deleted list: X answers 404 / errors with
     // a not-found shape — that is SUCCESS for a delete retry (plan §5.5),
@@ -5473,8 +5564,8 @@ async fn run_list_write(
     if !(200..300).contains(&resp.status) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
-            serde_json::json!({"error": format!("{operation} failed: HTTP {}", resp.status)}),
-            6,
+            serde_json::json!({"error": format!("{operation} failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
+            twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -5527,7 +5618,10 @@ async fn run_list_write(
             let err =
                 twr_core::TwrError::new(kind, format!("write rejected (X code {code}): {message}"));
             mark_prepared(&store_path, idempotency_key.as_deref(), now);
-            return (serde_json::json!({"error": err.message}), kind.exit_code());
+            return (
+                serde_json::json!({"error": err.message, "outcome": "rejected"}),
+                kind.exit_code(),
+            );
         }
     }
     // Create surfaces the new list_id for scripting (acceptance o1l.3.1):
@@ -5909,7 +6003,7 @@ async fn run_dm_send(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
@@ -5924,7 +6018,7 @@ async fn run_dm_send(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
@@ -5933,18 +6027,20 @@ async fn run_dm_send(
     // Policy::Write allows it — read_only AND engagement both deny.
     if !opts.policy.allows("dm-send") {
         return (
-            serde_json::json!({"error": opts.policy.denial("dm-send")}),
+            serde_json::json!({"error": opts.policy.denial("dm-send"), "outcome": "not_sent"}),
             2,
         );
     }
     let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
-        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
         Decision::Preview => return (dry_run_data("dm-send"), 0),
         Decision::Prompt => {
             if opts.no_interactive {
                 return (
-                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    serde_json::json!({"error": "needs --apply or --dry-run", "outcome": "not_sent"}),
                     2,
                 );
             }
@@ -5982,7 +6078,7 @@ async fn run_dm_send(
                     )
                 }
                 Ok(twr_core::PreCheck::Proceed) => {}
-                Err(e) => return (serde_json::json!({"error": e}), 2),
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
             }
         }
     }
@@ -5990,12 +6086,21 @@ async fn run_dm_send(
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
-            return emit_fail(opts, err, code);
+            return emit_fail(
+                opts,
+                err.with_outcome(twr_core::WriteOutcome::NotSent),
+                code,
+            );
         }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
     };
     let config = twr_config::TwrConfig::default();
     let mut ctx = build_ctx(opts, &config, &transport, &auth);
@@ -6039,7 +6144,7 @@ async fn run_dm_send(
         now,
     ) {
         return (
-            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
             5,
         );
     }
@@ -6056,13 +6161,13 @@ async fn run_dm_send(
                 Ok(twr_core::BudgetCheck::Deny { used, limit }) => {
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
                     return (
-                        serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit)}),
+                        serde_json::json!({"error": twr_core::budget::dm_denial_suggestion(used, limit), "outcome": "not_sent"}),
                         2,
                     );
                 }
                 Err(e) => {
                     mark_prepared(&store_path, idempotency_key.as_deref(), now);
-                    return (serde_json::json!({"error": e}), 2);
+                    return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2);
                 }
             }
         }
@@ -6079,13 +6184,16 @@ async fn run_dm_send(
     };
     if resp.status == 429 {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
-        return (serde_json::json!({"error": "rate limited"}), 4);
+        return (
+            serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+            4,
+        );
     }
     if !(200..300).contains(&resp.status) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
-            serde_json::json!({"error": format!("dm-send failed: HTTP {}", resp.status)}),
-            6,
+            serde_json::json!({"error": format!("dm-send failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
+            twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
         );
     }
     let payload: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
@@ -6102,7 +6210,10 @@ async fn run_dm_send(
                 format!("dm-send rejected (X code {code}): {message}"),
             );
             mark_prepared(&store_path, idempotency_key.as_deref(), now);
-            return (serde_json::json!({"error": err.message}), kind.exit_code());
+            return (
+                serde_json::json!({"error": err.message, "outcome": "rejected"}),
+                kind.exit_code(),
+            );
         }
     }
     let u01 = (now % 1000) as f64 / 1000.0;
@@ -6335,7 +6446,7 @@ fn watch_write_gate(
     use twr_core::{cancelled_data, dry_run_data, Decision};
     if !opts.policy.allows(operation) {
         return Some((
-            serde_json::json!({"error": opts.policy.denial(operation)}),
+            serde_json::json!({"error": opts.policy.denial(operation), "outcome": "not_sent"}),
             2,
         ));
     }
@@ -6346,7 +6457,7 @@ fn watch_write_gate(
         no_interactive: opts.no_interactive,
         stdin_is_tty,
     }) {
-        Decision::Deny(msg) => Some((serde_json::json!({"error": msg}), 2)),
+        Decision::Deny(msg) => Some((serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)),
         Decision::Preview => {
             let mut d = dry_run_data(operation);
             d["handle"] = serde_json::json!(handle);
@@ -6356,7 +6467,7 @@ fn watch_write_gate(
         Decision::Prompt => {
             if opts.no_interactive {
                 return Some((
-                    serde_json::json!({"error": "needs --apply or --dry-run"}),
+                    serde_json::json!({"error": "needs --apply or --dry-run", "outcome": "not_sent"}),
                     2,
                 ));
             }
@@ -6816,7 +6927,7 @@ async fn run_post_write_v2(
             twr_core::budget::check(&path, &today, limit)
         {
             return (
-                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit)}),
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
                 2,
             );
         }
@@ -6834,13 +6945,13 @@ async fn run_post_write_v2(
             match twr_core::budget::check_post(&path, &today, limit, interval, now_secs) {
                 PostCheck::DenyBudget { used, limit } => {
                     return (
-                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit)}),
+                        serde_json::json!({"error": twr_core::budget::post_denial_suggestion(used, limit), "outcome": "not_sent"}),
                         2,
                     );
                 }
                 PostCheck::DenyCooldown { wait_secs } => {
                     return (
-                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs)}),
+                        serde_json::json!({"error": twr_core::budget::post_cooldown_suggestion(wait_secs), "outcome": "not_sent"}),
                         2,
                     );
                 }
@@ -6849,11 +6960,16 @@ async fn run_post_write_v2(
         }
     }
     if !opts.policy.allows("post") {
-        return (serde_json::json!({"error": opts.policy.denial("post")}), 2);
+        return (
+            serde_json::json!({"error": opts.policy.denial("post"), "outcome": "not_sent"}),
+            2,
+        );
     }
     let stdin_is_tty = std::io::stdin().is_terminal();
     match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
-        Decision::Deny(msg) => return (serde_json::json!({"error": msg}), 2),
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
         Decision::Preview => return (dry_run_data("post"), 0),
         Decision::Prompt => {
             let what = video_path
@@ -6894,7 +7010,7 @@ async fn run_post_write_v2(
                     )
                 }
                 Ok(twr_core::PreCheck::Proceed) => {}
-                Err(e) => return (serde_json::json!({"error": e}), 2),
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
             }
         }
     }
@@ -6921,11 +7037,19 @@ async fn run_post_write_v2(
     let body = twr_v2::backend::create_tweet_body(&text, &media_ids, reply_to.as_deref());
     let token = match v2_bearer().await {
         Ok(t) => t,
-        Err((d, c)) => return (d, c),
+        Err((mut d, c)) => {
+            d["outcome"] = serde_json::json!("not_sent");
+            return (d, c);
+        }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
         Ok(t) => t,
-        Err(e) => return (serde_json::json!({"error": format!("transport: {e}")}), 5),
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
     };
     let auth = format!("Bearer {token}");
     let base = [("Authorization", auth.as_str())];
@@ -6939,7 +7063,7 @@ async fn run_post_write_v2(
         now,
     ) {
         return (
-            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}")}),
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
             5,
         );
     }
@@ -6962,13 +7086,16 @@ async fn run_post_write_v2(
     };
     if resp.status == 429 {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
-        return (serde_json::json!({"error": "rate limited"}), 4);
+        return (
+            serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+            4,
+        );
     }
     if !(200..300).contains(&resp.status) {
         mark_prepared(&store_path, idempotency_key.as_deref(), now);
         return (
-            serde_json::json!({"error": format!("v2 tweet create failed: HTTP {}", resp.status)}),
-            6,
+            serde_json::json!({"error": format!("v2 tweet create failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
+            twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
         );
     }
     let Some(new_id) = twr_v2::backend::parse_created_tweet_id(&resp.body) else {
@@ -6976,7 +7103,7 @@ async fn run_post_write_v2(
         // `unknown`, never a fake empty-id success (bead tab/sxu).
         mark_unknown(&store_path, idempotency_key.as_deref());
         return (
-            serde_json::json!({"error": "v2 tweet create returned no id (unexpected response shape) — the tweet may or may not have landed; check your timeline before retrying"}),
+            serde_json::json!({"error": "v2 tweet create returned no id (unexpected response shape) — the tweet may or may not have landed; check your timeline before retrying", "outcome": "unknown"}),
             6,
         );
     };
@@ -7011,7 +7138,7 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
     let path = std::path::Path::new(video_path);
     let Some(mime) = twr_v2::video::video_mime(path) else {
         return Err((
-            serde_json::json!({"error": format!("unsupported video (mp4/mov): {video_path}")}),
+            serde_json::json!({"error": format!("unsupported video (mp4/mov): {video_path}"), "outcome": "not_sent"}),
             2,
         ));
     };
@@ -7020,17 +7147,30 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
         Ok(d) => d,
         Err(_) => {
             return Err((
-                serde_json::json!({"error": format!("cannot read video: {video_path}")}),
+                serde_json::json!({"error": format!("cannot read video: {video_path}"), "outcome": "not_sent"}),
                 7,
             ))
         }
     };
     if data.len() as u64 > twr_v2::video::MAX_VIDEO_BYTES {
-        return Err((serde_json::json!({"error": "video over 128MB cap"}), 2));
+        return Err((
+            serde_json::json!({"error": "video over 128MB cap", "outcome": "not_sent"}),
+            2,
+        ));
     }
-    let token = v2_bearer().await?;
-    let transport = twr_client::WreqTransport::new_chrome()
-        .map_err(|e| (serde_json::json!({"error": format!("transport: {e}")}), 5))?;
+    let token = match v2_bearer().await {
+        Ok(t) => t,
+        Err((mut d, c)) => {
+            d["outcome"] = serde_json::json!("not_sent");
+            return Err((d, c));
+        }
+    };
+    let transport = twr_client::WreqTransport::new_chrome().map_err(|e| {
+        (
+            serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+            5,
+        )
+    })?;
     let auth = format!("Bearer {token}");
     let base = [("Authorization", auth.as_str())];
     // INIT
@@ -7039,10 +7179,15 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
     let init_resp = transport
         .post_json(twr_v2::video::V2_UPLOAD_INIT_URL, &base, &raw)
         .await
-        .map_err(|_| (serde_json::json!({"error": "v2 video INIT failed"}), 5))?;
+        .map_err(|_| {
+            (
+                serde_json::json!({"error": "v2 video INIT failed", "outcome": "not_sent"}),
+                5,
+            )
+        })?;
     if !(200..300).contains(&init_resp.status) {
         return Err((
-            serde_json::json!({"error": format!("v2 video INIT HTTP {}", init_resp.status)}),
+            serde_json::json!({"error": format!("v2 video INIT HTTP {}", init_resp.status), "outcome": "not_sent"}),
             6,
         ));
     }
@@ -7056,7 +7201,7 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
         .unwrap_or_default();
     if media_id.is_empty() {
         return Err((
-            serde_json::json!({"error": "v2 video INIT returned no media id"}),
+            serde_json::json!({"error": "v2 video INIT returned no media id", "outcome": "not_sent"}),
             6,
         ));
     }
@@ -7082,12 +7227,15 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
             Ok(r) if (200..300).contains(&r.status) => {}
             Ok(r) => {
                 return Err((
-                    serde_json::json!({"error": format!("v2 video APPEND HTTP {}", r.status)}),
+                    serde_json::json!({"error": format!("v2 video APPEND HTTP {}", r.status), "outcome": "not_sent"}),
                     6,
                 ))
             }
             Err(_) => {
-                return Err((serde_json::json!({"error": "v2 video APPEND failed"}), 5));
+                return Err((
+                    serde_json::json!({"error": "v2 video APPEND failed", "outcome": "not_sent"}),
+                    5,
+                ));
             }
         }
     }
@@ -7100,12 +7248,15 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
         Ok(r) if (200..300).contains(&r.status) => {}
         Ok(r) => {
             return Err((
-                serde_json::json!({"error": format!("v2 video FINALIZE HTTP {}", r.status)}),
+                serde_json::json!({"error": format!("v2 video FINALIZE HTTP {}", r.status), "outcome": "not_sent"}),
                 6,
             ))
         }
         Err(_) => {
-            return Err((serde_json::json!({"error": "v2 video FINALIZE failed"}), 5));
+            return Err((
+                serde_json::json!({"error": "v2 video FINALIZE failed", "outcome": "not_sent"}),
+                5,
+            ));
         }
     }
     // STATUS poll until succeeded (5s × 12) — GET with command=STATUS.
@@ -7115,15 +7266,23 @@ async fn v2_upload_video(video_path: &str) -> Result<String, (serde_json::Value,
         let resp = transport
             .get(&twr_v2::video::status_url(&media_id), &base)
             .await
-            .map_err(|_| (serde_json::json!({"error": "v2 video STATUS failed"}), 5))?;
+            .map_err(|_| {
+                (
+                    serde_json::json!({"error": "v2 video STATUS failed", "outcome": "not_sent"}),
+                    5,
+                )
+            })?;
         match twr_v2::video::parse_status(&resp.body) {
             twr_v2::video::UploadStatus::Succeeded { .. } => break,
             twr_v2::video::UploadStatus::Failed { reason } => {
-                return Err((serde_json::json!({"error": reason}), 6));
+                return Err((
+                    serde_json::json!({"error": reason, "outcome": "not_sent"}),
+                    6,
+                ));
             }
             _ if attempts >= twr_v2::video::STATUS_POLL_ATTEMPTS => {
                 return Err((
-                    serde_json::json!({"error": "video still processing after ~1min; retry later"}),
+                    serde_json::json!({"error": "video still processing after ~1min; retry later", "outcome": "not_sent"}),
                     4,
                 ));
             }
@@ -8291,6 +8450,62 @@ mod error_suggestion_tests {
         // `state: unknown` writes carry a suggestion but no error message.
         let err = exit6(serde_json::json!({"state": "unknown", "suggestion": "x"}));
         assert!(err.suggestion.unwrap().contains("doctor --refresh"));
+    }
+
+    // Issue #17: the write outcome rides the error envelope.
+    #[test]
+    fn a_rejected_write_reports_outcome_rejected() {
+        let err = exit6(
+            serde_json::json!({"error": "write rejected (X code 187)", "outcome": "rejected"}),
+        );
+        assert_eq!(err.outcome, Some(twr_core::WriteOutcome::Rejected));
+    }
+
+    #[test]
+    fn an_unknown_write_reports_outcome_unknown_and_is_not_retryable() {
+        // Exit 6 (contract drift) is normally retryable — `unknown` must
+        // override that: the write may have landed.
+        let err =
+            exit6(serde_json::json!({"error": "post failed: transport", "outcome": "unknown"}));
+        assert_eq!(err.outcome, Some(twr_core::WriteOutcome::Unknown));
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn a_state_unknown_payload_implies_outcome_unknown() {
+        let err = handler_error(
+            1,
+            &serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+        );
+        assert_eq!(err.outcome, Some(twr_core::WriteOutcome::Unknown));
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn a_not_sent_write_reports_outcome_not_sent() {
+        let err = handler_error(
+            2,
+            &serde_json::json!({"error": "policy denied", "outcome": "not_sent"}),
+        );
+        assert_eq!(err.outcome, Some(twr_core::WriteOutcome::NotSent));
+    }
+
+    #[test]
+    fn read_failures_carry_no_outcome() {
+        let err = exit6(serde_json::json!({"error": "tweet fetch failed: HTTP 500"}));
+        assert_eq!(err.outcome, None);
+    }
+
+    // Issue #17 outcome rows: stale query id → not_sent, HTTP 500 after
+    // send → unknown, other answered statuses → rejected.
+    #[test]
+    fn http_write_outcomes_classify_by_status() {
+        assert_eq!(write_http_outcome(404), "not_sent");
+        assert_eq!(write_http_outcome(500), "unknown");
+        assert_eq!(write_http_outcome(502), "unknown");
+        assert_eq!(write_http_outcome(400), "rejected");
+        assert_eq!(write_http_outcome(403), "rejected");
+        assert_eq!(write_http_outcome(429), "rejected");
     }
 }
 
