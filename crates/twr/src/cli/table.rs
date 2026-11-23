@@ -142,6 +142,7 @@ mod tests {
             conversation_id: None,
             in_reply_to_status_id: None,
             grok_translated_post_with_availability: None,
+            grok_translated_post: None,
             possibly_sensitive: None,
             display_text_range: None,
             mentions: None,

@@ -138,6 +138,13 @@ pub struct Tweet {
     /// the original.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_translated_post_with_availability: Option<serde_json::Value>,
+    /// Raw `grok_translated_post` object (`{entities, translation}`) — the
+    /// current wire name for the same Grok translation payload (issue #24,
+    /// live-verified 2026: X returns this shape on TweetDetail/HomeTimeline
+    /// where older captures had the `_with_availability` wrapper). Kept
+    /// verbatim under its own key; absent stays absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_translated_post: Option<serde_json::Value>,
     /// `legacy.possibly_sensitive` — explicit `false` is preserved; absent
     /// stays absent (issue #13).
     #[serde(default, skip_serializing_if = "Option::is_none")]

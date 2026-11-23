@@ -216,6 +216,103 @@ mod tests {
     }
 
     #[test]
+    fn grok_translated_post_with_availability_real_shape_is_preserved() {
+        // Issue #24: the availability wrapper's real payload nests the
+        // translation under `data` (`data.translation`,
+        // `data.source_language`, `data.destination_language`,
+        // `data.entities`, `data.associated_data`) — stored verbatim.
+        let mut result = plain_tweet_result("810", "bonjour le monde");
+        result["legacy"]["lang"] = json!("fr");
+        let grok = json!({
+            "is_available": true,
+            "data": {
+                "translation": "hello world",
+                "source_language": "fr",
+                "destination_language": "en",
+                "entities": {"hashtags": [], "symbols": [], "urls": [], "user_mentions": []},
+                "associated_data": {}
+            }
+        });
+        result["grok_translated_post_with_availability"] = grok.clone();
+        let tweet = parse_tweet_result(&result, 0).unwrap();
+        assert_eq!(
+            tweet.grok_translated_post_with_availability.as_ref(),
+            Some(&grok)
+        );
+        assert_eq!(tweet.text, "bonjour le monde");
+        assert_eq!(tweet.lang, "fr");
+        // The plain-shape field stays absent — the two wire names are
+        // independent, never synthesized from each other.
+        assert!(tweet.grok_translated_post.is_none());
+        let v = serde_json::to_value(&tweet).unwrap();
+        assert_eq!(
+            v["grok_translated_post_with_availability"]["data"]["translation"],
+            json!("hello world")
+        );
+        assert!(v.get("grok_translated_post").is_none());
+    }
+
+    #[test]
+    fn grok_translated_post_plain_shape_including_quoted_tweet() {
+        // Issue #24 live fixture shape (TweetDetail/HomeTimeline dumps):
+        // `grok_translated_post` = {entities, translation} sits on the
+        // Tweet result next to `legacy`/`core`, and quoted tweets carry
+        // their own. Verbatim preservation; text/lang untouched.
+        let grok = json!({
+            "entities": {"hashtags": [], "symbols": [], "urls": [], "user_mentions": []},
+            "translation": "NOW I'LL USE THIS GIF FOR EVERYTHING"
+        });
+        let mut quoted = plain_tweet_result("820", "AHORA USARÉ ESTE GIF PARA TODO");
+        quoted["legacy"]["lang"] = json!("es");
+        quoted["grok_translated_post"] =
+            json!({"entities": {}, "translation": "NOW I'LL USE THIS GIF FOR EVERYTHING"});
+        let mut quoting = plain_tweet_result("821", "outer body");
+        quoting["legacy"]["lang"] = json!("en");
+        quoting["grok_translated_post"] = grok.clone();
+        quoting["quoted_status_result"] = json!({ "result": quoted });
+
+        let tweet = parse_tweet_result(&quoting, 0).unwrap();
+        assert_eq!(tweet.grok_translated_post.as_ref(), Some(&grok));
+        assert_eq!(tweet.text, "outer body");
+        assert_eq!(tweet.lang, "en");
+        assert!(tweet.grok_translated_post_with_availability.is_none());
+
+        let inner = tweet.quoted_tweet.as_ref().unwrap();
+        assert_eq!(
+            inner
+                .grok_translated_post
+                .as_ref()
+                .and_then(|v| v.get("translation"))
+                .and_then(serde_json::Value::as_str),
+            Some("NOW I'LL USE THIS GIF FOR EVERYTHING")
+        );
+        assert_eq!(inner.text, "AHORA USARÉ ESTE GIF PARA TODO");
+        assert_eq!(inner.lang, "es");
+
+        let v = serde_json::to_value(&tweet).unwrap();
+        assert_eq!(
+            v["grok_translated_post"]["translation"],
+            grok["translation"]
+        );
+        assert!(v.get("grok_translated_post_with_availability").is_none());
+    }
+
+    #[test]
+    fn grok_translated_post_plain_shape_absent_or_non_object_is_none() {
+        let tweet = parse_tweet_result(&plain_tweet_result("822", "no grok"), 0).unwrap();
+        assert!(tweet.grok_translated_post.is_none());
+        let v = serde_json::to_value(&tweet).unwrap();
+        assert!(v.get("grok_translated_post").is_none());
+
+        for bad in [json!(null), json!("yes"), json!([1, 2])] {
+            let mut result = plain_tweet_result("823", "bad grok");
+            result["grok_translated_post"] = bad;
+            let tweet = parse_tweet_result(&result, 0).unwrap();
+            assert!(tweet.grok_translated_post.is_none());
+        }
+    }
+
+    #[test]
     fn recursion_guard_stops_after_depth_two() {
         let inner = plain_tweet_result("1", "innermost");
         assert!(
