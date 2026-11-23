@@ -959,13 +959,27 @@ pub fn parse_notifications_response(
                 }
                 continue;
             }
-            // Event rows: icon names the type; message/url/timestamp come
-            // from the content; actor + tweet ids from the entry id lists
-            // (fallback: entryId itself when the lists are absent).
+            // Event rows come in two shapes:
+            //  - legacy: content.icon.id names the type; timestampMs,
+            //    fromUserIds, tweetIds sit on content.
+            //  - URT `item` (live /i/api/2/notifications/*.json): the type
+            //    is content.item.clientEventInfo.element, the timestamp is
+            //    the entry's sortIndex, and actors/tweets live under
+            //    content.item.content.notification.{fromUsers,targetTweets}
+            //    or content.item.content.tweet.id.
+            // Fallback for both: entryId itself when no type is present.
+            let item = content.get("item").unwrap_or(&empty_obj);
+            let item_content = item.get("content").unwrap_or(&empty_obj);
+            let notification = item_content.get("notification").unwrap_or(&empty_obj);
             let icon = content
                 .get("icon")
                 .and_then(|i| i.get("id"))
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    item.get("clientEventInfo")
+                        .and_then(|c| c.get("element"))
+                        .and_then(Value::as_str)
+                })
                 .unwrap_or_default();
             let entry_id = entry
                 .get("entryId")
@@ -973,11 +987,13 @@ pub fn parse_notifications_response(
                 .unwrap_or_default();
             let event_type = if icon.is_empty() {
                 entry_id.to_string()
+            } else if let Some(rest) = icon.strip_prefix("icon_") {
+                rest.to_string()
             } else {
-                icon.strip_prefix("icon_").unwrap_or(icon).to_string()
+                icon.to_string()
             };
-            let mut actor_ids: Vec<String> = content
-                .get("fromUserIds")
+            let mut actor_ids: Vec<String> = notification
+                .get("fromUsers")
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
@@ -985,6 +1001,17 @@ pub fn parse_notifications_response(
                         .collect()
                 })
                 .unwrap_or_default();
+            if actor_ids.is_empty() {
+                actor_ids = content
+                    .get("fromUserIds")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
             if actor_ids.is_empty() {
                 actor_ids = content
                     .get("from_user_id_str")
@@ -1011,8 +1038,8 @@ pub fn parse_notifications_response(
                     }
                 })
                 .collect();
-            let mut tweet_ids: Vec<String> = content
-                .get("tweetIds")
+            let mut tweet_ids: Vec<String> = notification
+                .get("targetTweets")
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
@@ -1021,20 +1048,76 @@ pub fn parse_notifications_response(
                 })
                 .unwrap_or_default();
             if tweet_ids.is_empty() {
+                tweet_ids = item_content
+                    .get("tweet")
+                    .and_then(|t| t.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default();
+            }
+            if tweet_ids.is_empty() {
+                tweet_ids = content
+                    .get("tweetIds")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            if tweet_ids.is_empty() {
                 tweet_ids = content
                     .get("target_tweet_id_str")
                     .and_then(Value::as_str)
                     .map(|s| vec![s.to_string()])
                     .unwrap_or_default();
             }
+            // Reply-type URT entries name no actor: the replier is the
+            // author of the referenced tweet in globalObjects.
+            let actors = if actors.is_empty() {
+                tweet_ids
+                    .iter()
+                    .find_map(|tid| {
+                        global_tweets
+                            .get(tid)
+                            .and_then(|t| t.get("user_id_str"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .map(|id| {
+                        let u = global_users.get(&id).unwrap_or(&null);
+                        vec![NotificationActor {
+                            id,
+                            screen_name: u
+                                .get("screen_name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: u
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                actors
+            };
             events.push(NotificationEvent {
                 event_type,
                 actors,
                 tweet_ids,
-                timestamp_ms: content
-                    .get("timestampMs")
+                timestamp_ms: entry
+                    .get("sortIndex")
                     .and_then(Value::as_str)
-                    .or_else(|| content.get("timestamp_ms").and_then(Value::as_str))
+                    .or_else(|| {
+                        content
+                            .get("timestampMs")
+                            .and_then(Value::as_str)
+                            .or_else(|| content.get("timestamp_ms").and_then(Value::as_str))
+                    })
                     .unwrap_or_default()
                     .to_string(),
                 message: content
