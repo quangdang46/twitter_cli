@@ -191,6 +191,41 @@ impl FailingInput {
     }
 }
 
+/// What happened to a write request, for the error envelope (issue #17).
+/// Distinguishes "X answered and refused" from "the request may have
+/// reached X" so an agent never blind-retries an uncertain mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteOutcome {
+    /// X answered and refused the write — the mutation did not apply.
+    Rejected,
+    /// The request may have reached X; do NOT auto-retry — check whether
+    /// the write landed first. `retryable` is forced false.
+    Unknown,
+    /// Local refusal or failure known not to have reached X (policy
+    /// denial, stale query id, pre-send persistence failure).
+    NotSent,
+}
+
+impl WriteOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WriteOutcome::Rejected => "rejected",
+            WriteOutcome::Unknown => "unknown",
+            WriteOutcome::NotSent => "not_sent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rejected" => Some(WriteOutcome::Rejected),
+            "unknown" => Some(WriteOutcome::Unknown),
+            "not_sent" => Some(WriteOutcome::NotSent),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Error, Serialize)]
 #[error("{message}")]
 pub struct TwrError {
@@ -200,6 +235,8 @@ pub struct TwrError {
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
     pub failing_input: Option<FailingInput>,
+    /// Write outcome — `Some` only on write-command failures.
+    pub outcome: Option<WriteOutcome>,
 }
 
 impl TwrError {
@@ -213,7 +250,19 @@ impl TwrError {
             retryable,
             retry_after_ms: None,
             failing_input: None,
+            outcome: None,
         }
+    }
+
+    /// Attach the write outcome (issue #17). `Unknown` forces
+    /// `retryable: false` — an agent must check whether the write landed
+    /// before retrying, whatever the exit-code kind says.
+    pub fn with_outcome(mut self, outcome: WriteOutcome) -> Self {
+        if outcome == WriteOutcome::Unknown {
+            self.retryable = false;
+        }
+        self.outcome = Some(outcome);
+        self
     }
 
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
@@ -327,6 +376,50 @@ mod tests {
     fn healthy_payload_does_not_classify_as_not_found() {
         let payload = json!({ "result": { "__typename": "Tweet", "rest_id": "123" } });
         assert!(!is_not_found_payload(&payload));
+    }
+
+    // Issue #17: write outcome serialization + retryable override.
+    #[test]
+    fn write_outcome_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(WriteOutcome::Rejected).unwrap(),
+            json!("rejected")
+        );
+        assert_eq!(
+            serde_json::to_value(WriteOutcome::Unknown).unwrap(),
+            json!("unknown")
+        );
+        assert_eq!(
+            serde_json::to_value(WriteOutcome::NotSent).unwrap(),
+            json!("not_sent")
+        );
+        for (s, o) in [
+            ("rejected", WriteOutcome::Rejected),
+            ("unknown", WriteOutcome::Unknown),
+            ("not_sent", WriteOutcome::NotSent),
+        ] {
+            assert_eq!(WriteOutcome::parse(s), Some(o));
+        }
+        assert_eq!(WriteOutcome::parse("bogus"), None);
+    }
+
+    #[test]
+    fn unknown_outcome_forces_retryable_false() {
+        // ContractDrift is retryable by kind — `unknown` must override.
+        let err =
+            TwrError::new(ErrorKind::ContractDrift, "boom").with_outcome(WriteOutcome::Unknown);
+        assert!(!err.retryable);
+        assert_eq!(err.outcome, Some(WriteOutcome::Unknown));
+        // Rejected keeps the kind's retryable flag.
+        let err = TwrError::new(ErrorKind::ForbiddenRateLimited, "slow down")
+            .with_outcome(WriteOutcome::Rejected);
+        assert!(err.retryable);
+    }
+
+    #[test]
+    fn outcome_is_null_when_absent() {
+        let v = serde_json::to_value(TwrError::new(ErrorKind::NotFound, "gone")).unwrap();
+        assert_eq!(v["outcome"], json!(null));
     }
 
     #[test]

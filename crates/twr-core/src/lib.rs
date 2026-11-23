@@ -21,7 +21,7 @@ pub use envelope::{
 };
 pub use error::{
     classify_api_code, is_not_found_payload, is_secret_flag, ErrorKind, FailingInput, TwrError,
-    RATE_LIMIT_API_CODES, REDACTED, SECRET_FLAGS,
+    WriteOutcome, RATE_LIMIT_API_CODES, REDACTED, SECRET_FLAGS,
 };
 pub use idempotency::{
     IdempotencyEntry, IdempotencyStore, PreCheck, WriteState, IDEMPOTENCY_TTL_SECS,

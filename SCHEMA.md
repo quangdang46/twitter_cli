@@ -33,15 +33,26 @@ rate-limit resume (exit 4).
     "message": "…",
     "suggestion": "…",
     "retryable": true,
-    "retryAfterMs": 900000,
-    "failingInput": {"flag": "--max", "value": "500"}
+    "retry_after_ms": 900000,
+    "failing_input": {"flag": "--max", "value": "500"},
+    "outcome": "rejected|unknown|not_sent"
   },
   "meta": {"traceId": "…"}
 }
 ```
 
+`outcome` is present only on write-command failures (null elsewhere) and says
+what happened to the mutation:
+
+- `rejected` — X answered and refused the write; the mutation did not apply.
+- `unknown` — the request may have reached X (transport failure after send,
+  HTTP 5xx, or a 2xx with no confirmation). Do NOT auto-retry; check whether
+  the write landed first. `retryable` is always `false` for `unknown`.
+- `not_sent` — a local refusal or failure known not to have reached X
+  (policy denial, budget cap, stale query id, pre-send persistence failure).
+
 Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
-`"[REDACTED]"` in `failingInput` — enforced at construction.
+`"[REDACTED]"` in `failing_input` — enforced at construction.
 
 ## Types
 
