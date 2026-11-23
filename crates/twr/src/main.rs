@@ -222,6 +222,21 @@ enum Command {
         #[arg(long)]
         idempotency_key: Option<String>,
     },
+    /// Submit caller-observed timeline impression events to X (opt-in
+    /// recommendation feedback, issue #20). Reads a JSON batch of event
+    /// objects from --input <file> or stdin — twr never fabricates
+    /// impressions; the caller measures real visibility/dwell. Requires
+    /// --policy write and --apply (or --dry-run to preview). Events are
+    /// passed through verbatim; optional `id`/`event_id` fields enable
+    /// local duplicate suppression (7-day seen store).
+    Impressions {
+        /// JSON file with the event batch (`-` or omitted = stdin).
+        #[arg(long)]
+        input: Option<String>,
+        /// Idempotency key (24h dedup window).
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Delete a tweet (always previews first, even with --apply).
     Delete {
         id: String,
@@ -1028,6 +1043,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data = d;
             exit_code = code;
         }
+        Command::Impressions {
+            input,
+            idempotency_key,
+        } => {
+            kind = "write_result";
+            let (d, code) = run_impressions(&opts, input, idempotency_key).await;
+            data = d;
+            exit_code = code;
+        }
         Command::Delete {
             id,
             idempotency_key,
@@ -1803,7 +1827,7 @@ fn envelope_type_of(command: &str) -> &'static str {
         | "unretweet" | "bookmark" | "unbookmark" | "follow" | "unfollow" | "mute" | "unmute"
         | "block" | "unblock" | "pin" | "unpin" | "list-create" | "list-edit" | "list-delete"
         | "list-add-member" | "list-remove-member" | "list-follow" | "list-unfollow"
-        | "list-pin" | "list-unpin" | "dm-send" => "write_result",
+        | "list-pin" | "list-unpin" | "dm-send" | "impressions" => "write_result",
         "dm-list" => "dm_list",
         "dm-read" => "dm_message_list",
         "feed" | "bookmarks" | "bookmarks-folders" | "bookmarks-folder" | "search" | "list"
@@ -6237,6 +6261,277 @@ async fn run_dm_send(
     )
 }
 
+/// `twr impressions`: submit a caller-supplied batch of timeline
+/// impression events to X's flow endpoint (issue #20). Opt-in only —
+/// reads never emit feedback and twr never fabricates events; the batch
+/// comes from `--input <file>` or stdin and is passed through verbatim.
+/// Policy: "impressions" is absent from the Engagement whitelist, so only
+/// `--policy write` allows it. Accounting: the general mutation budget
+/// applies (not the post cap, not the DM cap); local `id`/`event_id`
+/// fields dedup against a 7-day seen store so a resubmitted batch cannot
+/// double-report.
+async fn run_impressions(
+    opts: &OutputOptions,
+    input: Option<String>,
+    idempotency_key: Option<String>,
+) -> (serde_json::Value, i32) {
+    use twr_core::{cancelled_data, dry_run_data, Decision};
+    // 1. Read + validate the batch first — local failures are `not_sent`.
+    let raw = match input.as_deref() {
+        Some("-") | None => {
+            if std::io::stdin().is_terminal() {
+                return (
+                    serde_json::json!({"error": "impressions needs --input <file> or a JSON batch on stdin", "outcome": "not_sent"}),
+                    2,
+                );
+            }
+            let mut buf = String::new();
+            match std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf) {
+                Ok(_) => buf,
+                Err(e) => {
+                    return (
+                        serde_json::json!({"error": format!("cannot read stdin: {e}"), "outcome": "not_sent"}),
+                        2,
+                    )
+                }
+            }
+        }
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    serde_json::json!({"error": format!("cannot read --input {path}: {e}"), "outcome": "not_sent"}),
+                    2,
+                )
+            }
+        },
+    };
+    let events = match cli::impressions::parse_batch(&raw) {
+        Ok(e) => e,
+        Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
+    };
+    // Fail CLOSED without a state dir (bead nku): budgets + idempotency +
+    // the seen store all live there.
+    if let Err(e) = require_write_state() {
+        return e;
+    }
+    // 2. Policy: write-only (see fn doc).
+    if !opts.policy.allows("impressions") {
+        return (
+            serde_json::json!({"error": opts.policy.denial("impressions"), "outcome": "not_sent"}),
+            2,
+        );
+    }
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    match cli::write::gate(opts.apply, opts.dry_run, opts.no_interactive, stdin_is_tty) {
+        Decision::Deny(msg) => {
+            return (serde_json::json!({"error": msg, "outcome": "not_sent"}), 2)
+        }
+        Decision::Preview => {
+            let mut d = dry_run_data("impressions");
+            d["events"] = serde_json::json!(events.len());
+            d["max_batch"] = serde_json::json!(cli::impressions::MAX_BATCH);
+            d["endpoint"] = serde_json::json!("flow/timeline.json");
+            return (d, 0);
+        }
+        Decision::Prompt => {
+            if opts.no_interactive {
+                return (
+                    serde_json::json!({"error": "needs --apply or --dry-run", "outcome": "not_sent"}),
+                    2,
+                );
+            }
+            eprintln!(
+                "This will submit {} impression event(s) to X. Type 'yes' to proceed:",
+                events.len()
+            );
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() || line.trim().to_lowercase() != "yes"
+            {
+                return (cancelled_data("impressions"), 0);
+            }
+        }
+        Decision::Execute => {}
+        Decision::Cancelled => return (cancelled_data("impressions"), 0),
+    }
+    // 3. Local duplicate suppression (7-day seen store).
+    let seen_path = cli::impressions::seen_path();
+    let seen: std::collections::HashSet<String> = seen_path
+        .as_deref()
+        .map(cli::impressions::load_seen)
+        .unwrap_or_default()
+        .into_keys()
+        .collect();
+    let (fresh, skipped) = cli::impressions::partition_seen(&events, &seen);
+    if fresh.is_empty() {
+        return (
+            serde_json::json!({"ok": true, "operation": "impressions", "submitted": 0, "skipped_duplicates": skipped, "note": "all events already submitted locally"}),
+            0,
+        );
+    }
+    // 4. Idempotency claim → `Prepared` (bead sxu); `Sent` immediately
+    //    before the wire. Same crash-safety contract as every write.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let store_path = twr_core::idempotency::default_store_path();
+    if let Some(key) = &idempotency_key {
+        if let Some(p) = &store_path {
+            match state_blocking(|| twr_core::idempotency::claim(p, key, now)) {
+                Ok(twr_core::PreCheck::ReplayCached(result)) => {
+                    return (
+                        serde_json::json!({"idempotent_replay": true, "result": result}),
+                        0,
+                    )
+                }
+                Ok(twr_core::PreCheck::RefuseUnknown) => {
+                    return (
+                        serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                        1,
+                    )
+                }
+                Ok(twr_core::PreCheck::Proceed) => {}
+                Err(e) => return (serde_json::json!({"error": e, "outcome": "not_sent"}), 2),
+            }
+        }
+    }
+    let auth = match read_auth(opts) {
+        Ok(a) => a,
+        Err((AuthFail::Envelope(err), code)) => {
+            return emit_fail(
+                opts,
+                err.with_outcome(twr_core::WriteOutcome::NotSent),
+                code,
+            );
+        }
+    };
+    let transport = match twr_client::WreqTransport::new_chrome() {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                serde_json::json!({"error": format!("transport: {e}"), "outcome": "not_sent"}),
+                5,
+            )
+        }
+    };
+    let config = twr_config::TwrConfig::default();
+    let mut ctx = build_ctx(opts, &config, &transport, &auth);
+    cli::exec::throttle_wait(&mut ctx.throttle, "Impressions").await;
+    // flow/timeline.json is gated behind x-client-transaction-id like the
+    // gated GraphQL ops — derive ingredients and mint a per-request id
+    // (issue #20: the endpoint 404s without it). Best-effort: a derive
+    // failure still sends the request unsigned rather than blocking.
+    ctx.ensure_tx_for_request("Impressions").await;
+    let tx_id = ctx.tx_id_for("POST", "/i/api/1.1/flow/timeline.json");
+    // `Sent` immediately before the wire — FAIL CLOSED on persistence
+    // error (bead 11c), same as every other mutation.
+    if let Err(e) = idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Sent,
+        None,
+        now,
+    ) {
+        return (
+            serde_json::json!({"error": format!("could not persist idempotency state; refusing to send: {e}"), "outcome": "not_sent"}),
+            5,
+        );
+    }
+    // General mutation budget only — impressions are telemetry, not
+    // content writes, so the post cap and DM cap do not apply.
+    if let Err(e) = reserve_budgets_at_send(false) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return e;
+    }
+    let headers = twr_client::build_headers(&twr_client::HeaderInput {
+        creds: &ctx.creds,
+        method: "POST",
+        os: twr_client::Os::current(),
+        chrome_major: &ctx.chrome_major,
+        user_agent: ctx.user_agent.as_deref(),
+        locale: &ctx.locale,
+        transaction_id: tx_id.as_deref(),
+    });
+    let mut refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    refs.push(("Content-Type", "application/x-www-form-urlencoded"));
+    let resp = match send_impressions_batch(ctx.transport, &refs, &fresh).await {
+        Ok(r) => r,
+        Err(_) => {
+            mark_unknown(&store_path, idempotency_key.as_deref());
+            return (
+                serde_json::json!({"state": "unknown", "suggestion": twr_core::UNKNOWN_SUGGESTION}),
+                1,
+            );
+        }
+    };
+    if resp.status == 429 {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return (
+            serde_json::json!({"error": "rate limited", "outcome": "rejected"}),
+            4,
+        );
+    }
+    if !(200..300).contains(&resp.status) {
+        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        return impressions_http_error(resp.status);
+    }
+    // Confirmed: record dedup ids, ack idempotency, report counts.
+    if let Some(p) = &seen_path {
+        cli::impressions::record_seen(p, &cli::impressions::sent_ids(&fresh), now);
+    }
+    if let Err(e) = idem_set(
+        &store_path,
+        idempotency_key.as_deref(),
+        twr_core::WriteState::Acknowledged,
+        Some(serde_json::json!({"submitted": fresh.len()})),
+        now,
+    ) {
+        eprintln!("twr: write landed but idempotency ack failed: {e}");
+    }
+    (
+        serde_json::json!({
+            "ok": true,
+            "operation": "impressions",
+            "submitted": fresh.len(),
+            "skipped_duplicates": skipped,
+            "endpoint": "flow/timeline.json",
+        }),
+        0,
+    )
+}
+
+/// X's flow telemetry endpoint for impression feedback (issue #20).
+const IMPRESSIONS_URL: &str = "https://x.com/i/api/1.1/flow/timeline.json";
+
+/// POST one deduplicated impression batch. Extracted for mocked-transport
+/// tests: the caller supplies headers (auth + transaction id), this owns
+/// only the `debug=true&log=` body shape.
+async fn send_impressions_batch(
+    transport: &dyn twr_client::HttpTransport,
+    refs: &[(&str, &str)],
+    events: &[serde_json::Value],
+) -> Result<twr_client::TransportResponse, twr_client::TransportError> {
+    let body = cli::impressions::form_body(&cli::impressions::log_payload(events));
+    transport.post_json(IMPRESSIONS_URL, refs, &body).await
+}
+
+/// Non-2xx impressions response → `(data, exit_code)` with the issue #17
+/// outcome classification (404 stale gate → not_sent, 5xx → unknown,
+/// other → rejected).
+fn impressions_http_error(status: u16) -> (serde_json::Value, i32) {
+    (
+        serde_json::json!({
+            "error": format!("impressions failed: HTTP {status}"),
+            "outcome": write_http_outcome(status),
+        }),
+        twr_core::ErrorKind::from_http_status(status).exit_code(),
+    )
+}
+
 /// `twr completions <shell>`: script to stdout, instructions to stderr
 /// (xf split — keeps output pipeable). Not an envelope command.
 fn run_completions(shell: &str) -> anyhow::Result<()> {
@@ -8506,6 +8801,78 @@ mod error_suggestion_tests {
         assert_eq!(write_http_outcome(400), "rejected");
         assert_eq!(write_http_outcome(403), "rejected");
         assert_eq!(write_http_outcome(429), "rejected");
+    }
+}
+
+#[cfg(test)]
+mod impressions_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// Mock transport capturing the request for assertions (issue #20:
+    /// "tests cover … batching limits, policy/dry-run behavior, duplicate
+    /// handling, rate limits, and ambiguous delivery using mocked
+    /// transport").
+    struct FakeTransport {
+        status: u16,
+        seen: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl twr_client::HttpTransport for FakeTransport {
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+        ) -> Result<twr_client::TransportResponse, twr_client::TransportError> {
+            Err(twr_client::TransportError::Io("unused".into()))
+        }
+        async fn post_json(
+            &self,
+            url: &str,
+            _headers: &[(&str, &str)],
+            body: &[u8],
+        ) -> Result<twr_client::TransportResponse, twr_client::TransportError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_vec()));
+            Ok(twr_client::TransportResponse {
+                status: self.status,
+                body: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn impressions_batch_posts_log_form_to_flow_endpoint() {
+        let t = FakeTransport {
+            status: 200,
+            seen: Mutex::new(vec![]),
+        };
+        let events = vec![json!({"id":"e1","event":"impression","tweet_id":"1"})];
+        let refs = [("Content-Type", "application/x-www-form-urlencoded")];
+        let r = send_impressions_batch(&t, &refs, &events).await.unwrap();
+        assert_eq!(r.status, 200);
+        let (url, body) = &t.seen.lock().unwrap()[0];
+        assert_eq!(url, IMPRESSIONS_URL);
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(text.starts_with("debug=true&log="));
+        assert!(text.contains("impression"));
+    }
+
+    #[test]
+    fn impressions_http_error_maps_status_to_outcome() {
+        let (d, code) = impressions_http_error(500);
+        assert_eq!(d["outcome"], "unknown");
+        assert_eq!(code, 5);
+        let (d, code) = impressions_http_error(404);
+        assert_eq!(d["outcome"], "not_sent");
+        assert_eq!(code, 6);
+        let (d, code) = impressions_http_error(403);
+        assert_eq!(d["outcome"], "rejected");
+        assert_eq!(code, 77);
     }
 }
 

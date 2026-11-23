@@ -92,6 +92,15 @@ Secret-flag values (`--cookie/--auth-token/--ct0/--proxy…`) are always
   add `"graphql_operation": "CreateTweet"|"CreateNoteTweet"` (auto-routed at
   the 280-weighted-char threshold — reported in `--dry-run` previews too, so
   an agent can confirm which mutation would run before `--apply`).
+  `impressions` (opt-in recommendation feedback, issue #20) accepts a
+  caller-supplied JSON batch of event objects via `--input <file>` or
+  stdin — a top-level array or `{"events": [...]}`, max 200 non-empty
+  objects per call, passed through verbatim to
+  `POST /i/api/1.1/flow/timeline.json` (`log` form field). Requires
+  `--policy write` + `--apply`; `--dry-run` previews counts only. Optional
+  `id`/`event_id` fields dedup against a 7-day local seen store; success
+  reports `{"submitted": n, "skipped_duplicates": m}`. twr never emits
+  impressions on reads and never fabricates event fields.
 - `dm_list`: `{"conversations": DmConversation[], "page": {...}}` (from `dm-list`); `DmConversation{id, participants[{id,screen_name,name}], last_message?, last_timestamp_ms, unread_count}` — private; never logged beyond envelope
 - `dm_message_list`: `{"conversation_id": str, "messages": DmMessage[], "page": {...}}` (from `dm-read`); `DmMessage{id, sender_id, text, timestamp_ms}` — same privacy note
 - `doctor`: `{"checks": [{"check": "AUTH|CONFIG|QUERY_ID|TX_ID|TLS", "status": "pass|warn|fail", "suggestion": …}]}`

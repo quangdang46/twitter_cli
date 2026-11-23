@@ -208,3 +208,9 @@ DmRead:
 DmSend:
   rps: 0.3
   burst: 1
+# Impression feedback rides 1.1 REST flow/timeline.json (no queryId) —
+# telemetry, not content: strictest bucket so a batch cannot look like
+# engagement farming.
+Impressions:
+  rps: 0.2
+  burst: 1
