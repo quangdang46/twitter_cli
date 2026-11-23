@@ -585,6 +585,38 @@ mod tests {
         assert_eq!(cursor.as_deref(), Some("NEXT_NOTIF"));
     }
 
+    /// Live `UserByRestId` returns a post-legacy shape with no `legacy`
+    /// object: profile fields live under profile_bio/website/
+    /// relationship_counts/tweet_counts/action_counts/relationship_perspectives.
+    #[test]
+    fn parses_post_legacy_user_shape() {
+        let payload = json!({
+            "rest_id": "44196397",
+            "core": {"name": "Elon Musk", "screen_name": "elonmusk", "created_at": "Tue Jun 02 20:12:29 +0000 2009"},
+            "avatar": {"image_url": "https://img"},
+            "location": {"location": ""},
+            "profile_bio": {"description": "https://t.co/x"},
+            "website": {"url": "https://x.com"},
+            "relationship_counts": {"followers": 240096108, "following": 1429},
+            "tweet_counts": {"tweets": 112724, "media_tweets": 4787},
+            "action_counts": {"favorites_count": 259605},
+            "relationship_perspectives": {"following": true, "followed_by": false},
+            "is_blue_verified": true
+        });
+        let u = crate::parse::parse_user_result(&payload).unwrap();
+        assert_eq!(u.id, "44196397");
+        assert_eq!(u.screen_name, "elonmusk");
+        assert_eq!(u.bio, "https://t.co/x");
+        assert_eq!(u.url, "https://x.com");
+        assert_eq!(u.followers_count, 240096108);
+        assert_eq!(u.following_count, 1429);
+        assert_eq!(u.tweets_count, 112724);
+        assert_eq!(u.likes_count, 259605);
+        assert_eq!(u.following, Some(true));
+        assert_eq!(u.followed_by, Some(false));
+        assert!(u.verified);
+    }
+
     /// Live `/i/api/2/notifications/all.json` returns URT `item` entries
     /// (verified 2026-…): type under clientEventInfo.element, timestamp in
     /// entry.sortIndex, actors in notification.fromUsers, tweets in

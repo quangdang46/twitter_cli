@@ -1616,11 +1616,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     let _ = config;
 
-    if opts.compact {
-        data = twr_core::apply_compact(data);
-    }
-    if !opts.fields.is_empty() {
-        data = twr_core::apply_fields(&data, &opts.fields);
+    // --compact/--fields project SUCCESS data only. Applying them to a
+    // non-zero-exit payload would strip the handler's error/outcome keys
+    // before handler_error rebuilds the envelope — losing the message and,
+    // worse, downgrading outcome:"unknown" so retryable could flip true.
+    if exit_code == 0 {
+        if opts.compact {
+            data = twr_core::apply_compact(data);
+        }
+        if !opts.fields.is_empty() {
+            data = twr_core::apply_fields(&data, &opts.fields);
+        }
     }
 
     // Human view: no explicit machine flag AND a real TTY → render the
@@ -1923,7 +1929,7 @@ fn schema_type_fields() -> serde_json::Value {
         "query-ids": {"operations": "[{operation, query_id, source?}]"},
         "schema": "this document",
         "commands": "[{name, type, desc}] inventory",
-        "error": {"code": "ErrorKind", "message": "string", "suggestion?": "string", "retryable": "bool", "retryAfterMs?": "int", "failingInput?": "{flag,value}"}
+        "error": {"code": "ErrorKind", "message": "string", "suggestion?": "string", "retryable": "bool", "retry_after_ms?": "int", "failing_input?": "{flag,value}", "outcome?": "rejected|unknown|not_sent"}
     })
 }
 
@@ -3992,6 +3998,7 @@ async fn run_post_write(
         edit_target,
         idempotency_key,
     } = args;
+    let idempotency_key = scoped_idempotency_key(operation, idempotency_key);
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
     // Client-side input validation (bead 0p9): empty/whitespace text and
@@ -3999,7 +4006,7 @@ async fn run_post_write(
     // must fail even on --dry-run, before budgets or the apply gate.
     if text.trim().is_empty() {
         return (
-            serde_json::json!({"error": format!("{operation} text is empty or whitespace")}),
+            serde_json::json!({"error": format!("{operation} text is empty or whitespace"), "outcome": "not_sent"}),
             2,
         );
     }
@@ -4011,7 +4018,7 @@ async fn run_post_write(
         if let Some(t) = target {
             if cli::ids::normalize_tweet_id(t).is_none() {
                 return (
-                    serde_json::json!({"error": format!("{label} is not a tweet ID or x.com URL: {t}")}),
+                    serde_json::json!({"error": format!("{label} is not a tweet ID or x.com URL: {t}"), "outcome": "not_sent"}),
                     2,
                 );
             }
@@ -4081,7 +4088,8 @@ async fn run_post_write(
         if !v.is_empty() && !images.is_empty() {
             return (
                 serde_json::json!({
-                    "error": "cannot attach a video and images to the same post (X allows 4 photos OR 1 video)"
+                    "error": "cannot attach a video and images to the same post (X allows 4 photos OR 1 video)",
+                    "outcome": "not_sent"
                 }),
                 2,
             );
@@ -4167,7 +4175,11 @@ async fn run_post_write(
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
-            return emit_fail(opts, err, code);
+            return emit_fail(
+                opts,
+                err.with_outcome(twr_core::WriteOutcome::NotSent),
+                code,
+            );
         }
     };
     // Arc so the per-attachment upload tasks below can each hold a clone
@@ -4305,7 +4317,22 @@ async fn run_post_write(
         .map(|id| format!("https://x.com/i/status/{id}"));
     let reply_norm = reply_to.as_deref().and_then(cli::ids::normalize_tweet_id);
     if reply_to.is_some() && reply_norm.is_none() {
-        return (serde_json::json!({"error": "not a tweet ID or URL"}), 2);
+        return (
+            serde_json::json!({"error": "not a tweet ID or URL", "outcome": "not_sent"}),
+            2,
+        );
+    }
+    // edit_target goes through the same URL→id normalization as
+    // reply/quote — validation accepted URLs but the raw string was sent
+    // as previous_tweet_id, guaranteeing a server rejection.
+    let edit_norm = edit_target
+        .as_deref()
+        .and_then(cli::ids::normalize_tweet_id);
+    if edit_target.is_some() && edit_norm.is_none() {
+        return (
+            serde_json::json!({"error": "edit target is not a tweet ID or x.com URL", "outcome": "not_sent"}),
+            2,
+        );
     }
     // Length-based routing (o1l.4.1): standard-length text stays on
     // CreateTweet unconditionally (regression guard — see
@@ -4337,7 +4364,7 @@ async fn run_post_write(
             quote_url.as_deref(),
             &media_ids,
             card_uri.as_deref(),
-            edit_target.as_deref(),
+            edit_norm.as_deref(),
         )
     };
     let qid = ctx
@@ -4418,7 +4445,7 @@ async fn run_post_write(
         );
     }
     if !(200..300).contains(&resp.status) {
-        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        mark_http_write_result(&store_path, idempotency_key.as_deref(), now, resp.status);
         return (
             serde_json::json!({"error": format!("post failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
             twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
@@ -4580,7 +4607,7 @@ async fn run_post_write(
         ) {
             eprintln!("twr: write landed but idempotency ack failed: {e}");
         }
-        let prev = edit_target.clone().unwrap_or_default();
+        let prev = edit_norm.clone().unwrap_or_default();
         return (
             serde_json::json!({"id": new_id, "previous_tweet_id": prev, "operation": "edit"}),
             0,
@@ -4742,6 +4769,32 @@ fn mark_prepared(store_path: &Option<std::path::PathBuf>, key: Option<&str>, now
     }
 }
 
+/// Scope a caller-supplied idempotency key to the operation: the same key
+/// string reused across DIFFERENT writes must not replay a foreign result
+/// (e.g. a `post` ack replayed for `delete` reporting success while the
+/// delete never ran). Applied once per runner so claim + every mark_*
+/// downstream share the scoped key.
+fn scoped_idempotency_key(op: &str, key: Option<String>) -> Option<String> {
+    key.map(|k| format!("{op}:{k}"))
+}
+
+/// The server ANSWERED a sent write with a non-2xx status. 5xx is
+/// ambiguous — the mutation may have landed — so the key must go to
+/// `Unknown` (same-key retry refused) to match the `outcome:"unknown"`
+/// envelope. 4xx/404 are definite refusals → back to `Prepared`.
+fn mark_http_write_result(
+    store_path: &Option<std::path::PathBuf>,
+    key: Option<&str>,
+    now: u64,
+    status: u16,
+) {
+    if status >= 500 {
+        mark_unknown(store_path, key);
+    } else {
+        mark_prepared(store_path, key, now);
+    }
+}
+
 /// Reserve the general mutation budget AND (for post-family ops) the
 /// post cap+cooldown atomically at send time (bead nku). Call ONLY on the
 /// real-execute path, immediately before the mutation POST. `Deny` maps
@@ -4891,6 +4944,24 @@ async fn run_engage(
     idempotency_key: Option<String>,
     preview: Option<String>,
 ) -> (serde_json::Value, i32) {
+    let idempotency_key = scoped_idempotency_key(cmd, idempotency_key);
+    // Tweet-target ops (like/retweet/bookmark/delete/pin/…): normalize a
+    // status URL or bare id up front — a junk target must fail as a usage
+    // error even on --dry-run, before budgets/idempotency are consumed.
+    // User-target cmds resolve screen names later (needs network).
+    let target_id = if is_user_target_cmd(cmd) {
+        target_id
+    } else {
+        match cli::ids::normalize_tweet_id(&target_id) {
+            Some(id) => id,
+            None => {
+                return (
+                    serde_json::json!({"error": format!("{cmd} target is not a tweet ID or x.com URL: {target_id}"), "outcome": "not_sent"}),
+                    2,
+                )
+            }
+        }
+    };
     use twr_core::{cancelled_data, dry_run_data, Decision};
     // Fail CLOSED when no state dir exists (bead nku).
     if let Err(e) = require_write_state() {
@@ -4938,7 +5009,14 @@ async fn run_engage(
     let target_id = if is_user_target_cmd(cmd) {
         match resolve_user_id(opts, config, &target_id).await {
             Ok(id) => id,
-            Err(e) => return e,
+            // Resolution failed before any mutation was sent — annotate
+            // the outcome the shared read-side helper doesn't know about.
+            Err((mut d, c)) => {
+                if d.get("outcome").is_none() {
+                    d["outcome"] = serde_json::json!("not_sent");
+                }
+                return (d, c);
+            }
         }
     } else {
         target_id
@@ -5107,7 +5185,7 @@ async fn run_engage(
                     );
                 }
                 if !(200..300).contains(&r.status) {
-                    mark_prepared(&store_path, idempotency_key.as_deref(), now);
+                    mark_http_write_result(&store_path, idempotency_key.as_deref(), now, r.status);
                     let kind = twr_core::ErrorKind::from_http_status(post.response.status);
                     let mut data = cli::exec::engage_failure_data(&ctx, cmd, desc.op, &post);
                     data["outcome"] = serde_json::json!(write_http_outcome(post.response.status));
@@ -5440,7 +5518,7 @@ async fn run_list_write(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let store_path = twr_core::idempotency::default_store_path();
-    let idempotency_key = args.idempotency_key();
+    let idempotency_key = scoped_idempotency_key(operation, args.idempotency_key());
     // Idempotency claim → `Prepared` (bead sxu); `Sent` is written
     // immediately before the mutation POST below.
     if let Some(key) = &idempotency_key {
@@ -5467,7 +5545,11 @@ async fn run_list_write(
     let auth = match read_auth(opts) {
         Ok(a) => a,
         Err((AuthFail::Envelope(err), code)) => {
-            return emit_fail(opts, err, code);
+            return emit_fail(
+                opts,
+                err.with_outcome(twr_core::WriteOutcome::NotSent),
+                code,
+            );
         }
     };
     let transport = match twr_client::WreqTransport::new_chrome() {
@@ -5576,12 +5658,12 @@ async fn run_list_write(
             4,
         );
     }
-    // Delete-retry on an already-deleted list: X answers 404 / errors with
-    // a not-found shape — that is SUCCESS for a delete retry (plan §5.5),
-    // not a failure. Classify before the generic error path below.
-    if matches!(args, ListWriteArgs::Delete { .. })
-        && (resp.status == 404 || is_not_found_payload(&resp.body))
-    {
+    // Delete-retry on an already-deleted list: X answers with a not-found
+    // BODY shape — that is SUCCESS for a delete retry (plan §5.5), not a
+    // failure. A bare transport 404 is NOT enough: a stale query id also
+    // 404s before the mutation runs, and must surface as contract drift,
+    // not a false "already deleted".
+    if matches!(args, ListWriteArgs::Delete { .. }) && is_not_found_payload(&resp.body) {
         finish_list_write(&store_path, &idempotency_key, now, operation, &args);
         return (
             serde_json::json!({"ok": true, "operation": operation, "target": args.target(), "note": "already deleted"}),
@@ -5589,7 +5671,7 @@ async fn run_list_write(
         );
     }
     if !(200..300).contains(&resp.status) {
-        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        mark_http_write_result(&store_path, idempotency_key.as_deref(), now, resp.status);
         return (
             serde_json::json!({"error": format!("{operation} failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
             twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
@@ -6000,19 +6082,20 @@ async fn run_dm_send(
     text: String,
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
+    let idempotency_key = scoped_idempotency_key("dm-send", idempotency_key);
     use twr_core::{cancelled_data, dry_run_data, Decision};
     // Client-side input validation (bead 0p9): the recipient must be a
     // numeric X user id and the text non-empty — usage errors (exit 2)
     // that fail even on --dry-run, before budgets or the apply gate.
     if user_id.trim().is_empty() || !user_id.trim().chars().all(|c| c.is_ascii_digit()) {
         return (
-            serde_json::json!({"error": format!("dm-send recipient must be a numeric user id, got: {user_id}")}),
+            serde_json::json!({"error": format!("dm-send recipient must be a numeric user id, got: {user_id}"), "outcome": "not_sent"}),
             2,
         );
     }
     if text.trim().is_empty() {
         return (
-            serde_json::json!({"error": "dm-send text is empty or whitespace"}),
+            serde_json::json!({"error": "dm-send text is empty or whitespace", "outcome": "not_sent"}),
             2,
         );
     }
@@ -6217,7 +6300,7 @@ async fn run_dm_send(
         );
     }
     if !(200..300).contains(&resp.status) {
-        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        mark_http_write_result(&store_path, idempotency_key.as_deref(), now, resp.status);
         return (
             serde_json::json!({"error": format!("dm-send failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
             twr_core::ErrorKind::from_http_status(resp.status).exit_code(),
@@ -6278,6 +6361,7 @@ async fn run_impressions(
     input: Option<String>,
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
+    let idempotency_key = scoped_idempotency_key("impressions", idempotency_key);
     use twr_core::{cancelled_data, dry_run_data, Decision};
     // 1. Read + validate the batch first — local failures are `not_sent`.
     let raw = match input.as_deref() {
@@ -6317,6 +6401,20 @@ async fn run_impressions(
     // the seen store all live there.
     if let Err(e) = require_write_state() {
         return e;
+    }
+    // General mutation budget fast-fail BEFORE the gate (parity with the
+    // other writers — reserve_budgets_at_send stays authoritative).
+    if let Some(path) = twr_core::budget::default_log_path() {
+        let limit = twr_core::budget::effective_budget(|k| std::env::var(k).ok());
+        let today = twr_core::budget::today_utc();
+        if let twr_core::BudgetCheck::Deny { used, limit } =
+            twr_core::budget::check(&path, &today, limit)
+        {
+            return (
+                serde_json::json!({"error": twr_core::budget::denial_suggestion(used, limit), "outcome": "not_sent"}),
+                2,
+            );
+        }
     }
     // 2. Policy: write-only (see fn doc).
     if !opts.policy.allows("impressions") {
@@ -6479,7 +6577,7 @@ async fn run_impressions(
         );
     }
     if !(200..300).contains(&resp.status) {
-        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        mark_http_write_result(&store_path, idempotency_key.as_deref(), now, resp.status);
         return impressions_http_error(resp.status);
     }
     // Confirmed: record dedup ids, ack idempotency, report counts.
@@ -6626,6 +6724,7 @@ fn emit_fail(opts: &OutputOptions, err: twr_core::TwrError, code: i32) -> (serde
                 "error": err.message,
                 "error_code": format!("{:?}", err.code),
                 "suggestion": err.suggestion,
+                "outcome": err.outcome,
             }),
             code,
         );
@@ -7186,6 +7285,7 @@ async fn run_post_write_v2(
     alt_text: Option<String>,
     idempotency_key: Option<String>,
 ) -> (serde_json::Value, i32) {
+    let idempotency_key = scoped_idempotency_key("post-v2", idempotency_key);
     use twr_core::{cancelled_data, dry_run_data, Decision};
     let _ = config;
     // Same client-side validation as the cookie path (bead 0p9/255):
@@ -7193,7 +7293,7 @@ async fn run_post_write_v2(
     // — they fail even on --dry-run, before budgets or the apply gate.
     if text.trim().is_empty() {
         return (
-            serde_json::json!({"error": "post text is empty or whitespace"}),
+            serde_json::json!({"error": "post text is empty or whitespace", "outcome": "not_sent"}),
             2,
         );
     }
@@ -7204,13 +7304,41 @@ async fn run_post_write_v2(
             Some(id) => Some(id),
             None => {
                 return (
-                    serde_json::json!({"error": format!("reply target is not a tweet ID or x.com URL: {r}")}),
+                    serde_json::json!({"error": format!("reply target is not a tweet ID or x.com URL: {r}"), "outcome": "not_sent"}),
                     2,
                 )
             }
         },
         None => None,
     };
+    // Validate the video attachment BEFORE the gate/budgets (same parity
+    // as the cookie path's cli::write::validate_video): mime, readability,
+    // and the 128MB cap — a bad --video must fail --dry-run too instead of
+    // surfacing only inside v2_upload_video after the gate.
+    if let Some(v) = video_path.as_deref() {
+        if twr_v2::video::video_mime(std::path::Path::new(v)).is_none() {
+            return (
+                serde_json::json!({"error": format!("unsupported video (mp4/mov): {v}"), "outcome": "not_sent"}),
+                2,
+            );
+        }
+        match std::fs::metadata(v) {
+            Ok(m) if m.is_file() => {
+                if m.len() > twr_v2::video::MAX_VIDEO_BYTES {
+                    return (
+                        serde_json::json!({"error": "video over 128MB cap", "outcome": "not_sent"}),
+                        2,
+                    );
+                }
+            }
+            _ => {
+                return (
+                    serde_json::json!({"error": format!("cannot read video: {v}"), "outcome": "not_sent"}),
+                    7,
+                )
+            }
+        }
+    }
     // Fail CLOSED when no state dir exists (bead nku): budgets and
     // idempotency cannot be enforced, so refuse before any side effect.
     if let Err(e) = require_write_state() {
@@ -7390,7 +7518,7 @@ async fn run_post_write_v2(
         );
     }
     if !(200..300).contains(&resp.status) {
-        mark_prepared(&store_path, idempotency_key.as_deref(), now);
+        mark_http_write_result(&store_path, idempotency_key.as_deref(), now, resp.status);
         return (
             serde_json::json!({"error": format!("v2 tweet create failed: HTTP {}", resp.status), "outcome": write_http_outcome(resp.status)}),
             twr_core::ErrorKind::from_http_status(resp.status).exit_code(),

@@ -149,7 +149,12 @@ pub fn record_seen(path: &std::path::Path, ids: &[String], now: u64) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(body) = serde_json::to_string(&map) {
-        let _ = std::fs::write(path, body);
+        // tmp+rename: a crash mid-write must not truncate the seen store
+        // into silent duplicate resubmissions.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
     }
 }
 

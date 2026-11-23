@@ -241,6 +241,17 @@ pub fn parse_user_result(user_data: &Value) -> Option<UserProfile> {
     let core = user_data.get("core").unwrap_or(&empty);
     let avatar = user_data.get("avatar").unwrap_or(&empty);
     let location_obj = user_data.get("location").unwrap_or(&empty);
+    // UserByRestId returns a post-legacy shape with no `legacy` object at
+    // all: profile fields live under profile_bio/website/relationship_*/
+    // tweet_counts/action_counts (live-verified). Fall back per-field so
+    // both shapes parse.
+    let profile_bio = user_data.get("profile_bio").unwrap_or(&empty);
+    let website = user_data.get("website").unwrap_or(&empty);
+    let rel_counts = user_data.get("relationship_counts").unwrap_or(&empty);
+    let tweet_counts = user_data.get("tweet_counts").unwrap_or(&empty);
+    let action_counts = user_data.get("action_counts").unwrap_or(&empty);
+    let perspectives = user_data.get("relationship_perspectives").unwrap_or(&empty);
+    let verification = user_data.get("verification").unwrap_or(&empty);
 
     let rest_id = user_data.get("rest_id").and_then(Value::as_str)?;
     if rest_id.is_empty() {
@@ -264,6 +275,7 @@ pub fn parse_user_result(user_data: &Value) -> Option<UserProfile> {
         bio: legacy
             .get("description")
             .and_then(Value::as_str)
+            .or_else(|| profile_bio.get("description").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
         location: location_obj
@@ -274,17 +286,26 @@ pub fn parse_user_result(user_data: &Value) -> Option<UserProfile> {
             .to_string(),
         url: dget!(legacy, "entities", "url", "urls", 0, "expanded_url")
             .and_then(Value::as_str)
+            .or_else(|| website.get("url").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
-        followers_count: parse_int(legacy.get("followers_count"), 0),
-        following_count: parse_int(legacy.get("friends_count"), 0),
-        tweets_count: parse_int(legacy.get("statuses_count"), 0),
-        likes_count: parse_int(legacy.get("favourites_count"), 0),
+        followers_count: parse_int(legacy.get("followers_count"), 0)
+            .max(parse_int_opt(rel_counts.get("followers")).unwrap_or(0)),
+        following_count: parse_int(legacy.get("friends_count"), 0)
+            .max(parse_int_opt(rel_counts.get("following")).unwrap_or(0)),
+        tweets_count: parse_int(legacy.get("statuses_count"), 0)
+            .max(parse_int_opt(tweet_counts.get("tweets")).unwrap_or(0)),
+        likes_count: parse_int(legacy.get("favourites_count"), 0)
+            .max(parse_int_opt(action_counts.get("favorites_count")).unwrap_or(0)),
         verified: user_data
             .get("is_blue_verified")
             .and_then(Value::as_bool)
             .unwrap_or(false)
             || legacy
+                .get("verified")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            || verification
                 .get("verified")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
@@ -304,8 +325,10 @@ pub fn parse_user_result(user_data: &Value) -> Option<UserProfile> {
             .or_else(|| legacy.get("created_at").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
-        following: opt_bool(legacy.get("following")),
-        followed_by: opt_bool(legacy.get("followed_by")),
+        following: opt_bool(legacy.get("following"))
+            .or_else(|| opt_bool(perspectives.get("following"))),
+        followed_by: opt_bool(legacy.get("followed_by"))
+            .or_else(|| opt_bool(perspectives.get("followed_by"))),
     })
 }
 
@@ -617,11 +640,14 @@ pub fn parse_list_result(list: &Value) -> Option<TwitterList> {
             .get("mode")
             .and_then(Value::as_str)
             .is_some_and(|m| m.eq_ignore_ascii_case("private")),
+        // Live lists send created_at as epoch-millis NUMBER (not the
+        // Twitter date string tweets use) — keep the raw digits.
         created_at: list
             .get("created_at")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+            .map(str::to_string)
+            .or_else(|| parse_int_opt(list.get("created_at")).map(|n| n.to_string()))
+            .unwrap_or_default(),
         owner,
     })
 }
