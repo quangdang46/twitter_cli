@@ -207,6 +207,31 @@ impl<'a> ExecCtx<'a> {
             .as_ref()
             .and_then(|tx| tx.inner.prepare(operation, method, path))
     }
+
+    /// Derive transaction ingredients for a request that is NOT a gated
+    /// GraphQL op — e.g. the 1.1 REST `flow/timeline.json` impression
+    /// endpoint, which X also gates behind `x-client-transaction-id`
+    /// (issue #20: it 404s without one). Same derive/cache machinery as
+    /// [`Self::ensure_tx`], minus the `GATED_OPS` allowlist.
+    pub async fn ensure_tx_for_request(&mut self, label: &str) {
+        if self.tx.is_some() || self.tx_attempted {
+            return;
+        }
+        self.tx_attempted = true;
+        match self.derive_tx_ingredients().await {
+            Ok(ingredients) => {
+                self.install_ingredients(label, ingredients);
+            }
+            Err(why) => self.fail_tx(label, why),
+        }
+    }
+
+    /// Mint a transaction id for an arbitrary method+path, bypassing the
+    /// `GATED_OPS` gate inside [`twr_tx::RequestProof::prepare`] — 1.1 REST
+    /// endpoints are gated too but are not GraphQL operation names.
+    pub fn tx_id_for(&self, method: &str, path: &str) -> Option<String> {
+        self.tx.as_ref().map(|tx| tx.inner.generate(method, path))
+    }
 }
 
 /// GraphQL GET URL: `/i/api/graphql/<qid>/<op>?variables=..&features=..`.
